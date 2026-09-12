@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dota}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dota}
+      POSTGRES_DB: ${POSTGRES_DB:-dota_coach}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dota} -d ${POSTGRES_DB:-dota_coach}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dota}:${POSTGRES_PASSWORD:-dota}@postgres:5432/${POSTGRES_DB:-dota_coach}
+      HOST: 0.0.0.0
+      PORT: "8080"
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      DOTA_API_BASE_URL: ${DOTA_API_BASE_URL:-https://api.opendota.com/api}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      RUST_LOG: ${RUST_LOG:-dota_coach_backend=info,tower_http=info}
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the client bundle: must be reachable from the browser.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

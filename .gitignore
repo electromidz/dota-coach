@@ -1,0 +1,19 @@
+# env
+.env
+.env.local
+.env.*.local
+
+# rust
+backend/target/
+
+# node
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/next-env.d.ts
+*.tsbuildinfo
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+/* Design tokens. Dark-first: the app has no light theme by design — it is a
+   gaming product, not an admin panel. */
+@theme {
+  --color-base: #0a0b0f;
+  --color-surface: #12141c;
+  --color-surface-2: #191c26;
+  --color-border: #262a37;
+
+  --color-ink: #f2f4f8;
+  --color-ink-muted: #9aa2b4;
+  --color-ink-faint: #646b7d;
+
+  --color-accent: #e8453c;
+  --color-accent-soft: #2a1416;
+
+  --color-good: #3fb950;
+  --color-warn: #e3b341;
+  --color-bad: #f0533f;
+
+  /* System stack on purpose: no webfont fetch at build or first paint. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+
+  --radius-card: 0.875rem;
+}
+
+html {
+  color-scheme: dark;
+  /* Avoid the iOS "rubber band" reveal of white behind the app shell. */
+  background-color: var(--color-base);
+}
+
+body {
+  background-color: var(--color-base);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+  /* Respect notches and home indicators when installed as a PWA. */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
