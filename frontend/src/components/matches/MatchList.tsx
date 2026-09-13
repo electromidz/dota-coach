@@ -72,7 +72,13 @@ export function MatchList() {
         {data.total} matches stored
       </p>
 
-      <ul className="flex flex-col gap-3">
+      {/* One column on a phone, because a match card is already dense. Two and
+          then three once the shell widens, so a 20-match page is one screen
+          instead of five.
+          These track the *column's* width, not the window's: below `lg` the
+          shell is still `max-w-lg`, so an earlier split would put two cards
+          into 512px. */}
+      <ul className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3 xl:gap-4">
         {data.matches.map((match, i) => (
           <MatchCard key={match.id} match={match} index={i} />
         ))}
@@ -81,7 +87,7 @@ export function MatchList() {
       {data.total_pages > 1 ? (
         <nav
           aria-label="Match history pages"
-          className="flex items-center justify-between gap-3 pt-1"
+          className="flex items-center justify-between gap-3 pt-1 lg:justify-center lg:gap-6"
         >
           <Button
             variant="ghost"
@@ -114,10 +120,14 @@ export function MatchList() {
 
 function ListSkeleton() {
   return (
-    <div className="flex flex-col gap-3" aria-busy="true" aria-live="polite">
+    <div
+      className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3 xl:gap-4"
+      aria-busy="true"
+      aria-live="polite"
+    >
       <span className="sr-only">Loading matches…</span>
-      {[0, 1, 2, 3, 4].map((i) => (
-        <div key={i} className="h-[7.5rem] animate-pulse rounded-card bg-surface-2" />
+      {[0, 1, 2, 3, 4, 5].map((i) => (
+        <div key={i} className="glass h-[7.5rem] animate-pulse rounded-card" />
       ))}
     </div>
   );

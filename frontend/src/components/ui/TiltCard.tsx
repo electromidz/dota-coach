@@ -47,8 +47,11 @@ export function TiltCard({
     setTransform(undefined);
   }
 
+  // `min-w-0`: as a grid item this wrapper would otherwise refuse to shrink
+  // below its content's intrinsic width and push the whole grid past the
+  // viewport. A perspective wrapper should never drive layout.
   return (
-    <div className="scene-3d">
+    <div className="scene-3d min-w-0">
       <div
         ref={ref}
         // Pointer events cover mouse, pen and touch in one path.

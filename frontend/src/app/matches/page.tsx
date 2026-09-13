@@ -5,7 +5,11 @@ export const metadata = { title: "Matches" };
 
 export default function MatchesPage() {
   return (
-    <AppShell title="Matches">
+    <AppShell
+      title="Matches"
+      eyebrow="History"
+      description="Every match stored for your account, newest first."
+    >
       <MatchList />
     </AppShell>
   );

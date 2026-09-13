@@ -12,7 +12,11 @@ export default async function HomePage({
   const { error } = await searchParams;
 
   return (
-    <AppShell title="Overview">
+    <AppShell
+      title="Overview"
+      eyebrow="Dashboard"
+      description="Your latest matches and what they say about your play."
+    >
       <Overview loginError={error} />
     </AppShell>
   );

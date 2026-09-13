@@ -21,7 +21,7 @@ export function MatchCard({ match, index = 0 }: { match: Match; index?: number }
 
   return (
     <li
-      className="rise-in"
+      className="min-w-0 rise-in"
       // Small stagger down the list; capped so a long page never crawls.
       style={{ animationDelay: `${Math.min(index, 8) * 45}ms` }}
     >

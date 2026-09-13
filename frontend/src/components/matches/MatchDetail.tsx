@@ -58,8 +58,8 @@ export function MatchDetail({ id }: { id: string }) {
     return (
       <div className="flex flex-col gap-4" aria-busy="true">
         <span className="sr-only">Loading match…</span>
-        <div className="h-40 animate-pulse rounded-card bg-surface-2" />
-        <div className="h-64 animate-pulse rounded-card bg-surface-2" />
+        <div className="glass h-40 animate-pulse rounded-card" />
+        <div className="glass h-64 animate-pulse rounded-card" />
       </div>
     );
   }
@@ -90,83 +90,99 @@ export function MatchDetail({ id }: { id: string }) {
     <div className="flex flex-col gap-5 pb-8">
       <BackLink />
 
-      <TiltCard>
-        <Card glow={won ? "string" : "error"} className="flex flex-col gap-4">
-          <div className="flex items-center gap-3">
-            <div className="pop-3d">
-              <HeroPortrait
-                heroId={match.hero_id}
-                heroName={match.hero_name}
-                size="lg"
-              />
+      {/* A phone reads this top to bottom. A desktop puts the identity card
+          beside the numbers, so the result and the figures explaining it are
+          in one glance rather than one scroll. */}
+      <div className="grid gap-5 lg:grid-cols-3 lg:items-start">
+        <TiltCard>
+          <Card glow={won ? "string" : "error"} className="flex flex-col gap-4">
+            <div className="flex items-center gap-3">
+              <div className="pop-3d">
+                <HeroPortrait
+                  heroId={match.hero_id}
+                  heroName={match.hero_name}
+                  size="lg"
+                />
+              </div>
+
+              {/* The name wraps rather than truncating: this page is *about*
+                  this hero, and "Outworld Destroyer" clipped to "Outworld…"
+                  loses the one thing the heading exists to say. That only
+                  works because the result badge is not competing for the same
+                  row — on a 360px screen the two left roughly 80px for the
+                  name, and a single long word simply spilled over the badge. */}
+              <div className="min-w-0 flex-1">
+                <h1 className="font-display text-xl tracking-wide">
+                  {match.hero_name}
+                </h1>
+                <p className="mt-0.5 text-sm text-ink-muted">
+                  <span className="text-operator">{match.role}</span>
+                  {" · "}
+                  <span className="font-mono tabular-nums">
+                    {formatDuration(match.duration_seconds)}
+                  </span>
+                </p>
+              </div>
             </div>
 
-            <div className="min-w-0 flex-1">
-              <h1 className="truncate font-display text-xl tracking-wide">
-                {match.hero_name}
-              </h1>
-              <p className="mt-0.5 text-sm text-ink-muted">
-                <span className="text-operator">{match.role}</span>
-                {" · "}
-                <span className="font-mono tabular-nums">
-                  {formatDuration(match.duration_seconds)}
+            {/* Result sits with the score it explains. */}
+            <div className="flex items-baseline justify-between gap-3 border-t border-glass-edge pt-4">
+              <span className="flex min-w-0 items-baseline gap-3">
+                <span className="font-mono text-3xl tabular-nums text-number">
+                  {match.kills}/{match.deaths}/{match.assists}
                 </span>
-              </p>
+                <span className="text-sm text-ink-faint">
+                  {match.kda?.toFixed(1) ?? "—"} KDA
+                </span>
+              </span>
+
+              <span
+                className={cn(
+                  "shrink-0 rounded-lg border px-3 py-1.5 font-display text-sm tracking-wide",
+                  won
+                    ? "border-string/50 bg-mark-win/15 text-string"
+                    : "border-error/50 bg-mark-loss/15 text-error",
+                )}
+              >
+                {won ? "Win" : "Loss"}
+              </span>
             </div>
 
-            <span
-              className={cn(
-                "shrink-0 rounded-lg border px-3 py-1.5 font-display text-sm tracking-wide",
-                won
-                  ? "border-string/50 bg-mark-win/15 text-string"
-                  : "border-error/50 bg-mark-loss/15 text-error",
-              )}
-            >
-              {won ? "Win" : "Loss"}
-            </span>
-          </div>
+            <p className="text-xs text-ink-faint">
+              {new Date(match.started_at).toLocaleString()}
+            </p>
+          </Card>
+        </TiltCard>
 
-          <div className="flex items-baseline gap-3 border-t border-glass-edge pt-4">
-            <span className="font-mono text-3xl tabular-nums text-number">
-              {match.kills}/{match.deaths}/{match.assists}
-            </span>
-            <span className="text-sm text-ink-faint">
-              {match.kda?.toFixed(1) ?? "—"} KDA
-            </span>
-          </div>
+        <section className="flex min-w-0 flex-col gap-3 lg:col-span-2">
+          <h2 className="text-xs font-semibold uppercase tracking-[0.2em] text-ink-faint">
+            Performance
+          </h2>
 
-          <p className="text-xs text-ink-faint">
-            {new Date(match.started_at).toLocaleString()}
-          </p>
-        </Card>
-      </TiltCard>
+          <Card>
+            {/* `lg`, not `sm`: the shell is phone-width until then, and three
+                columns of numbers do not fit in it. */}
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-5 lg:grid-cols-3">
+              <Stat label="GPM" value={match.gpm} />
+              <Stat label="XPM" value={match.xpm} />
+              <Stat label="Last hits" value={match.last_hits} />
+              <Stat label="Denies" value={match.denies} />
+              <Stat label="Net worth" value={match.net_worth} />
+              <Stat label="Hero damage" value={match.hero_damage} />
+              <Stat label="Tower damage" value={match.tower_damage} />
+              <Stat label="Hero healing" value={match.hero_healing} />
+              <Stat label="Match ID" value={match.match_id} small />
+            </dl>
+          </Card>
 
-      <section className="flex flex-col gap-3">
-        <h2 className="text-xs font-semibold uppercase tracking-[0.2em] text-ink-faint">
-          Performance
-        </h2>
-
-        <Card>
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-5">
-            <Stat label="GPM" value={match.gpm} />
-            <Stat label="XPM" value={match.xpm} />
-            <Stat label="Last hits" value={match.last_hits} />
-            <Stat label="Denies" value={match.denies} />
-            <Stat label="Net worth" value={match.net_worth} />
-            <Stat label="Hero damage" value={match.hero_damage} />
-            <Stat label="Tower damage" value={match.tower_damage} />
-            <Stat label="Hero healing" value={match.hero_healing} />
-            <Stat label="Match ID" value={match.match_id} small />
-          </dl>
-        </Card>
-
-        {!match.detail_synced ? (
-          <Alert tone="info">
-            Only the summary was available for this match, so some figures are
-            missing. A later sync will fill them in.
-          </Alert>
-        ) : null}
-      </section>
+          {!match.detail_synced ? (
+            <Alert tone="info">
+              Only the summary was available for this match, so some figures are
+              missing. A later sync will fill them in.
+            </Alert>
+          ) : null}
+        </section>
+      </div>
 
       <p className="text-xs leading-relaxed text-ink-faint">
         Role is an estimate: Dota does not publish positions, so it is derived

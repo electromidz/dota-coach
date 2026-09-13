@@ -9,7 +9,10 @@ import { cn } from "@/lib/utils";
  */
 const BASE = cn(
   "inline-flex min-h-11 cursor-pointer items-center justify-center gap-2",
-  "rounded-xl px-6 text-base font-semibold tracking-wide",
+  // No size utility here on purpose: `--color-base` shadows `text-base`, so
+  // writing it would set a near-black colour, not 1rem — which the body
+  // already inherits anyway.
+  "rounded-xl px-6 font-semibold tracking-wide",
   "transition-[color,background-color,border-color,box-shadow,opacity]",
   "duration-200 ease-out focus-neon",
   "disabled:cursor-not-allowed disabled:opacity-50",
@@ -17,7 +20,8 @@ const BASE = cn(
 
 const VARIANTS = {
   /* Primary action. Filled with the keyword accent; dark ink on a bright
-     neon fill is the only combination here that stays readable. */
+     neon fill is the only combination here that stays readable — `text-base`
+     is the page's near-black, not a font size. */
   primary: cn(
     "bg-accent text-base",
     "shadow-[0_0_28px_-6px_var(--color-keyword)]",

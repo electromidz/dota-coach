@@ -5,7 +5,11 @@ export const metadata = { title: "Profile" };
 
 export default function ProfilePage() {
   return (
-    <AppShell title="Profile">
+    <AppShell
+      title="Profile"
+      eyebrow="Account"
+      description="Your Steam and Dota identities, and what this app has stored."
+    >
       <Profile />
     </AppShell>
   );

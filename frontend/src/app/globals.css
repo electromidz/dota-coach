@@ -47,9 +47,12 @@
   --color-mark-line: #36f9f6;
   --color-mark-track: #262a44;
 
-  /* Glass surfaces. Tokens so every card blurs identically. */
-  --color-glass: oklch(from #16162b l c h / 0.55);
-  --color-glass-edge: oklch(from #ffffff l c h / 0.10);
+  /* Glass surfaces. Tokens so every card blurs identically.
+     The fill sits at 0.48: enough tint to hold text, thin enough that the
+     ambient field behind actually shows through and the blur has something to
+     do. Raising it much past 0.5 turns every card back into a flat panel. */
+  --color-glass: oklch(from #16162b l c h / 0.48);
+  --color-glass-edge: oklch(from #ffffff l c h / 0.14);
 
   --font-sans: var(--font-chakra), ui-sans-serif, system-ui, -apple-system,
     "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -72,16 +75,29 @@ html {
   overscroll-behavior-y: none;
 }
 
+/* No background-color here. `html` already paints the base, and an opaque
+   colour on `body` would hide the ambient layer below: a `z-index: -1`
+   pseudo-element paints *before* its parent's own background in the root
+   stacking context, not behind the canvas. */
 body {
-  background-color: var(--color-base);
   color: var(--color-ink);
   -webkit-font-smoothing: antialiased;
   /* A tap should feel instant, not "selected", the way a native row does. */
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Ambient glow: three fixed radial washes. Gives the glass something to
-   refract without a request, and never scrolls, so it cannot repaint. */
+/* Ambient field: three corner washes over a vertical lift. Gives the glass
+   something to refract without costing a request, and being fixed it never
+   scrolls, so it cannot repaint.
+
+   Every radius is a `clamp()` on `vw` rather than a fixed `rem`. A 42rem blob
+   anchored off the top-left corner is most of a desktop window but four times
+   a phone's width, so on a phone the visible part was a flat wall of colour
+   instead of a gradient. Scaling with the viewport keeps the same composition
+   at every size.
+
+   Alphas stay at or below 0.17: `--color-ink-faint` is the lightest text in
+   the system and needs to clear 4.5:1 even at a wash's brightest point. */
 body::before {
   content: "";
   position: fixed;
@@ -90,31 +106,56 @@ body::before {
   pointer-events: none;
   background:
     radial-gradient(
-      42rem 42rem at 12% -8%,
-      oklch(from #ff7edb l c h / 0.16),
-      transparent 60%
+      clamp(17rem, 58vw, 46rem) clamp(17rem, 58vw, 46rem) at 6% -8%,
+      oklch(from #ff7edb l c h / 0.17),
+      transparent 62%
     ),
     radial-gradient(
-      38rem 38rem at 92% 6%,
-      oklch(from #36f9f6 l c h / 0.12),
-      transparent 60%
+      clamp(15rem, 50vw, 40rem) clamp(15rem, 50vw, 40rem) at 98% 0%,
+      oklch(from #36f9f6 l c h / 0.14),
+      transparent 62%
     ),
     radial-gradient(
-      50rem 30rem at 50% 106%,
-      oklch(from #b381f0 l c h / 0.10),
-      transparent 65%
+      clamp(20rem, 95vw, 56rem) clamp(11rem, 36vw, 32rem) at 50% 108%,
+      oklch(from #b381f0 l c h / 0.15),
+      transparent 66%
+    ),
+    linear-gradient(
+      180deg,
+      oklch(from #16162b l c h / 0.65) 0%,
+      transparent 42%,
+      oklch(from #101020 l c h / 0.8) 100%
     );
 }
 
+/* One definition of a pane of glass, used by every card, the header, the tab
+   bar and the ghost button, so they are all lit by the same imaginary source.
+
+   Three things separate glass from a flat translucent rectangle:
+     - the blur, which needs the ambient field behind it to be worth anything
+     - the diagonal sheen, a highlight running off one corner
+     - asymmetric edges: bright along the top, dark along the bottom
+
+   The sheen peaks at 0.06 white. That is a contrast ceiling, not a taste
+   call: `--color-ink-faint` over the brightest corner of the sheen sitting on
+   the brightest point of the background wash measures 4.65:1. At 0.09 it
+   drops to 4.1:1 and fails. */
 @utility glass {
   background-color: var(--color-glass);
+  background-image: linear-gradient(
+    155deg,
+    oklch(from #ffffff l c h / 0.06) 0%,
+    oklch(from #ffffff l c h / 0.015) 38%,
+    transparent 70%
+  );
   /* Unprefixed only: Lightning CSS adds -webkit- from the browserslist
      targets. Writing the prefix by hand made it drop the standard property,
      which cost Firefox the blur entirely. */
-  backdrop-filter: blur(16px) saturate(140%);
+  backdrop-filter: blur(20px) saturate(160%);
   border: 1px solid var(--color-glass-edge);
   box-shadow:
-    0 1px 0 0 oklch(from #ffffff l c h / 0.06) inset,
+    0 1px 0 0 oklch(from #ffffff l c h / 0.10) inset,
+    0 -1px 0 0 oklch(from #000000 l c h / 0.35) inset,
     0 8px 32px -12px oklch(from #000000 l c h / 0.8);
 }
 
@@ -187,11 +228,17 @@ body::before {
 
 /* --- Native app chrome ---------------------------------------------------- */
 
-/* iOS momentum scrolling inside the app shell, with the tab bar accounted for. */
+/* iOS momentum scrolling inside the app shell, with the tab bar accounted for.
+   From `lg` the tab bar is gone (TopNav replaces it), so the reserve would be
+   a strip of dead space at the bottom of every page. */
 @utility app-scroll {
   overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
   padding-bottom: calc(var(--spacing-tabbar) + env(safe-area-inset-bottom) + 1rem);
+
+  @media (width >= 64rem) {
+    padding-bottom: 4rem;
+  }
 }
 
 @utility safe-top {
@@ -202,9 +249,16 @@ body::before {
   padding-bottom: env(safe-area-inset-bottom);
 }
 
+/* Phone gutters are notch-aware; desktop gutters are simply wider — no device
+   inset exists on a monitor, so the max() is pointless there. */
 @utility safe-x {
   padding-left: max(1.25rem, env(safe-area-inset-left));
   padding-right: max(1.25rem, env(safe-area-inset-right));
+
+  @media (width >= 64rem) {
+    padding-left: 2rem;
+    padding-right: 2rem;
+  }
 }
 
 /* --- Motion --------------------------------------------------------------- */

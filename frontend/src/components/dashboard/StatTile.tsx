@@ -31,7 +31,7 @@ export function StatTile({
   return (
     <div
       className={cn(
-        "glass soft-raised flex flex-col gap-1 rounded-card p-3.5",
+        "glass soft-raised flex flex-col gap-1 rounded-card p-3.5 lg:gap-2 lg:p-5",
         className,
       )}
     >
@@ -39,7 +39,9 @@ export function StatTile({
         <Icon name={icon} className={cn("size-3.5", toneClass)} />
         {label}
       </span>
-      <span className="font-mono text-2xl tabular-nums text-ink">{value}</span>
+      <span className="font-mono text-2xl tabular-nums text-ink lg:text-3xl">
+        {value}
+      </span>
     </div>
   );
 }
