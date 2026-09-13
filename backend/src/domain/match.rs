@@ -37,6 +37,26 @@ pub struct NormalizedMatch {
     pub started_at: DateTime<Utc>,
     /// True once the full match detail (denies, net worth, damage) was fetched.
     pub from_details: bool,
+
+    /// Team totals, for participation rates. Any match detail carries these.
+    pub team_kills: Option<i32>,
+    pub team_deaths: Option<i32>,
+
+    /// True when the provider had a parsed replay. Everything below is gated
+    /// on it, and stays `None` for the majority of public matches.
+    pub replay_parsed: bool,
+    pub last_hits_at_10: Option<i32>,
+    pub last_hits_at_15: Option<i32>,
+    pub gold_at_10: Option<i32>,
+    pub gold_at_15: Option<i32>,
+    pub xp_at_10: Option<i32>,
+    pub xp_at_15: Option<i32>,
+    /// Seconds from the horn.
+    pub bkb_seconds: Option<i32>,
+    pub blink_seconds: Option<i32>,
+    pub midas_seconds: Option<i32>,
+    /// 0-1, as the provider reports it.
+    pub teamfight_participation: Option<f32>,
 }
 
 impl NormalizedMatch {
@@ -61,6 +81,25 @@ impl NormalizedMatch {
         self.lane_role = detail.lane_role.or(self.lane_role);
         self.is_roaming = detail.is_roaming.or(self.is_roaming);
         self.farm_rank = detail.farm_rank.or(self.farm_rank);
+
+        self.team_kills = detail.team_kills.or(self.team_kills);
+        self.team_deaths = detail.team_deaths.or(self.team_deaths);
+
+        // Parsed-replay facts only ever arrive with the detail.
+        self.replay_parsed = detail.replay_parsed;
+        self.last_hits_at_10 = detail.last_hits_at_10.or(self.last_hits_at_10);
+        self.last_hits_at_15 = detail.last_hits_at_15.or(self.last_hits_at_15);
+        self.gold_at_10 = detail.gold_at_10.or(self.gold_at_10);
+        self.gold_at_15 = detail.gold_at_15.or(self.gold_at_15);
+        self.xp_at_10 = detail.xp_at_10.or(self.xp_at_10);
+        self.xp_at_15 = detail.xp_at_15.or(self.xp_at_15);
+        self.bkb_seconds = detail.bkb_seconds.or(self.bkb_seconds);
+        self.blink_seconds = detail.blink_seconds.or(self.blink_seconds);
+        self.midas_seconds = detail.midas_seconds.or(self.midas_seconds);
+        self.teamfight_participation = detail
+            .teamfight_participation
+            .or(self.teamfight_participation);
+
         self.from_details = true;
     }
 
@@ -197,8 +236,29 @@ pub struct Match {
     pub party_size: Option<i32>,
     pub started_at: DateTime<Utc>,
     pub detail_synced: bool,
+
+    pub team_kills: Option<i32>,
+    pub team_deaths: Option<i32>,
+    pub replay_parsed: bool,
+    pub last_hits_at_10: Option<i32>,
+    pub last_hits_at_15: Option<i32>,
+    pub gold_at_10: Option<i32>,
+    pub gold_at_15: Option<i32>,
+    pub xp_at_10: Option<i32>,
+    pub xp_at_15: Option<i32>,
+    pub bkb_seconds: Option<i32>,
+    pub blink_seconds: Option<i32>,
+    pub midas_seconds: Option<i32>,
+    pub teamfight_participation: Option<f32>,
+
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+
+    /// Derived KDA, joined from `match_metrics`. Present so the client renders
+    /// a number the backend computed rather than recomputing it.
+    #[sqlx(default)]
+    #[serde(rename = "kda")]
+    pub metrics_kda: Option<f32>,
 }
 
 #[cfg(test)]
@@ -230,6 +290,19 @@ mod tests {
             party_size: Some(1),
             started_at: Utc::now(),
             from_details: false,
+            team_kills: None,
+            team_deaths: None,
+            replay_parsed: false,
+            last_hits_at_10: None,
+            last_hits_at_15: None,
+            gold_at_10: None,
+            gold_at_15: None,
+            xp_at_10: None,
+            xp_at_15: None,
+            bkb_seconds: None,
+            blink_seconds: None,
+            midas_seconds: None,
+            teamfight_participation: None,
         }
     }
 

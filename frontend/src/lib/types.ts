@@ -81,8 +81,59 @@ export interface Match {
   party_size: number | null;
   started_at: string;
   detail_synced: boolean;
+  replay_parsed: boolean;
+  /** Derived by the backend. Never recomputed here. */
+  kda: number | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Aggregates from `GET /api/stats`. Every value is computed in Rust. */
+export interface PlayerStats {
+  matches: number;
+  wins: number;
+  losses: number;
+  win_rate: number | null;
+  avg_kda: number | null;
+  avg_gpm: number | null;
+  avg_xpm: number | null;
+  avg_last_hits: number | null;
+  avg_deaths_per_10: number | null;
+  avg_kills_per_10: number | null;
+  avg_hero_damage: number | null;
+  avg_kill_participation: number | null;
+  /** How many matches actually carried the kill-participation input. */
+  kill_participation_sample: number;
+  /** Time-sliced metrics are gated on a parsed replay. */
+  parsed_matches: number;
+}
+
+export interface HeroStats {
+  hero_id: number;
+  hero_name: string;
+  matches: number;
+  wins: number;
+  win_rate: number;
+  avg_kda: number;
+  avg_gpm: number;
+  last_played_at: string;
+}
+
+export interface RoleStats {
+  role: string;
+  matches: number;
+  wins: number;
+  win_rate: number;
+  avg_kda: number;
+  avg_gpm: number;
+}
+
+export interface StatsResponse {
+  overall: PlayerStats;
+  heroes: HeroStats[];
+  roles: RoleStats[];
+  /** Which formula set produced these numbers. */
+  metrics_version: number;
 }
 
 export interface MatchListResponse {

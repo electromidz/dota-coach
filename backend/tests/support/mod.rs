@@ -491,6 +491,19 @@ pub fn sample_match(match_id: i64, started_at: DateTime<Utc>) -> NormalizedMatch
         party_size: Some(1),
         started_at,
         from_details: false,
+        team_kills: Some(30),
+        team_deaths: Some(20),
+        replay_parsed: false,
+        last_hits_at_10: None,
+        last_hits_at_15: None,
+        gold_at_10: None,
+        gold_at_15: None,
+        xp_at_10: None,
+        xp_at_15: None,
+        bkb_seconds: None,
+        blink_seconds: None,
+        midas_seconds: None,
+        teamfight_participation: None,
     }
 }
 

@@ -29,7 +29,8 @@ async fn an_anonymous_request_is_rejected_everywhere() {
         ("POST", "/api/players/me/sync"),
         ("GET", "/api/matches"),
         ("GET", "/api/matches/00000000-0000-0000-0000-000000000000"),
-        ("GET", "/api/auth/session"),
+        ("GET", "/api/auth/me"),
+        ("GET", "/api/stats"),
     ] {
         let response = if method == "GET" {
             app.get(path, None).await
@@ -87,7 +88,7 @@ async fn the_steam_login_flow_creates_an_account_a_dota_link_and_a_session() {
     );
 
     // 1. Starting the flow issues the login nonce and redirects to Steam.
-    let start = app.get("/auth/steam/login", None).await;
+    let start = app.get("/api/auth/steam", None).await;
     assert_eq!(start.status, StatusCode::SEE_OTHER);
     assert!(start
         .location
@@ -105,7 +106,7 @@ async fn the_steam_login_flow_creates_an_account_a_dota_link_and_a_session() {
             Request::builder()
                 .method("GET")
                 .uri(format!(
-                    "/auth/steam/callback?state={nonce}&openid.mode=id_res"
+                    "/api/auth/steam/callback?state={nonce}&openid.mode=id_res"
                 ))
                 .header(header::COOKIE, format!("dota_coach_login_state={nonce}"))
                 .body(Body::empty())
@@ -146,14 +147,14 @@ async fn the_session_cookie_is_http_only() {
         StubVerifier::accepting(steam_id),
     );
 
-    let start = app.get("/auth/steam/login", None).await;
+    let start = app.get("/api/auth/steam", None).await;
     let nonce = start.cookie_value("dota_coach_login_state").unwrap();
 
     let callback = app
         .request(
             Request::builder()
                 .method("GET")
-                .uri(format!("/auth/steam/callback?state={nonce}"))
+                .uri(format!("/api/auth/steam/callback?state={nonce}"))
                 .header(header::COOKIE, format!("dota_coach_login_state={nonce}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -188,7 +189,9 @@ async fn a_callback_without_the_matching_nonce_establishes_no_session() {
     );
 
     // A login the user never started: attacker-chosen state, no cookie.
-    let response = app.get("/auth/steam/callback?state=attacker", None).await;
+    let response = app
+        .get("/api/auth/steam/callback?state=attacker", None)
+        .await;
 
     assert_eq!(response.status, StatusCode::SEE_OTHER);
     assert_eq!(
@@ -214,7 +217,7 @@ async fn a_mismatched_nonce_establishes_no_session() {
         .request(
             Request::builder()
                 .method("GET")
-                .uri("/auth/steam/callback?state=one")
+                .uri("/api/auth/steam/callback?state=one")
                 .header(header::COOKIE, "dota_coach_login_state=two")
                 .body(Body::empty())
                 .unwrap(),
@@ -235,14 +238,14 @@ async fn an_assertion_steam_rejects_establishes_no_session() {
     };
     let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
 
-    let start = app.get("/auth/steam/login", None).await;
+    let start = app.get("/api/auth/steam", None).await;
     let nonce = start.cookie_value("dota_coach_login_state").unwrap();
 
     let response = app
         .request(
             Request::builder()
                 .method("GET")
-                .uri(format!("/auth/steam/callback?state={nonce}"))
+                .uri(format!("/api/auth/steam/callback?state={nonce}"))
                 .header(header::COOKIE, format!("dota_coach_login_state={nonce}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -263,14 +266,14 @@ async fn steam_being_down_is_reported_without_leaking_detail() {
     };
     let app = app(db, MockDota::default().into(), StubVerifier::unavailable());
 
-    let start = app.get("/auth/steam/login", None).await;
+    let start = app.get("/api/auth/steam", None).await;
     let nonce = start.cookie_value("dota_coach_login_state").unwrap();
 
     let response = app
         .request(
             Request::builder()
                 .method("GET")
-                .uri(format!("/auth/steam/callback?state={nonce}"))
+                .uri(format!("/api/auth/steam/callback?state={nonce}"))
                 .header(header::COOKIE, format!("dota_coach_login_state={nonce}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -566,6 +569,195 @@ async fn a_second_sync_inside_the_cooldown_is_throttled() {
     assert_eq!(second.error_code(), "RATE_LIMITED");
 
     app.cleanup(&[steam_id]).await;
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic analytics
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn syncing_computes_metrics_for_every_stored_match() {
+    let Some(db) = support::pool().await else {
+        return skip("syncing_computes_metrics_for_every_stored_match");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(6)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+
+    let sync = app.post("/api/players/me/sync", Some(&session.token)).await;
+    assert_eq!(sync.json()["sync"]["metrics_computed"], 6);
+
+    let stats = app.get("/api/stats", Some(&session.token)).await;
+    assert_eq!(stats.status, StatusCode::OK);
+    assert_eq!(stats.json()["overall"]["matches"], 6);
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn metrics_are_not_recomputed_once_they_are_current() {
+    let Some(db) = support::pool().await else {
+        return skip("metrics_are_not_recomputed_once_they_are_current");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(4)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    // Second pass: nothing new, and nothing stale to recompute.
+    let again = app.post("/api/players/me/sync", Some(&session.token)).await;
+    assert_eq!(again.json()["sync"]["new_matches"], 0);
+    assert_eq!(again.json()["sync"]["metrics_computed"], 0);
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn changing_a_matchs_facts_invalidates_its_metrics() {
+    let Some(db) = support::pool().await else {
+        return skip("changing_a_matchs_facts_invalidates_its_metrics");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(3)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    // Simulate a fact backfill touching the underlying row. A version check
+    // alone would call these metrics current; they are not.
+    sqlx::query("UPDATE matches SET team_kills = 40 WHERE dota_player_id = $1")
+        .bind(session.dota_player_id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    let resync = app.post("/api/players/me/sync", Some(&session.token)).await;
+    assert_eq!(
+        resync.json()["sync"]["metrics_computed"],
+        3,
+        "metrics must be recomputed when their inputs change"
+    );
+
+    // And the newly available input now produces a value.
+    let stats = app.get("/api/stats", Some(&session.token)).await.json();
+    assert_eq!(stats["overall"]["kill_participation_sample"], 3);
+    assert!(stats["overall"]["avg_kill_participation"].as_f64().unwrap() > 0.0);
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn stats_aggregate_wins_heroes_and_roles() {
+    let Some(db) = support::pool().await else {
+        return skip("stats_aggregate_wins_heroes_and_roles");
+    };
+    let steam_id = unique_steam_id();
+    // `sample_matches` alternates the result on the match id's parity.
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(10)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app.get("/api/stats", Some(&session.token)).await.json();
+    let overall = &body["overall"];
+
+    assert_eq!(overall["matches"], 10);
+    assert_eq!(
+        overall["wins"].as_i64().unwrap() + overall["losses"].as_i64().unwrap(),
+        10
+    );
+    // KDA 8/4/12 -> (8+12)/4 = 5 on every sample match.
+    assert!((overall["avg_kda"].as_f64().unwrap() - 5.0).abs() < 0.01);
+
+    // Every sample match is the same hero and role, so both roll up to one row.
+    assert_eq!(body["heroes"].as_array().unwrap().len(), 1);
+    assert_eq!(body["heroes"][0]["matches"], 10);
+    assert_eq!(body["roles"].as_array().unwrap().len(), 1);
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn stats_report_an_empty_history_without_dividing_by_zero() {
+    let Some(db) = support::pool().await else {
+        return skip("stats_report_an_empty_history_without_dividing_by_zero");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+
+    let body = app.get("/api/stats", Some(&session.token)).await.json();
+
+    assert_eq!(body["overall"]["matches"], 0);
+    // No matches means no win rate — not a 0% one.
+    assert!(body["overall"]["win_rate"].is_null());
+    assert!(body["overall"]["avg_kda"].is_null());
+    assert!(body["heroes"].as_array().unwrap().is_empty());
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn unparsed_matches_report_no_time_sliced_metrics() {
+    let Some(db) = support::pool().await else {
+        return skip("unparsed_matches_report_no_time_sliced_metrics");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(3)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app.get("/api/stats", Some(&session.token)).await.json();
+
+    // The fixtures carry no parsed replay, so nothing pretends to have @10 data.
+    assert_eq!(body["overall"]["parsed_matches"], 0);
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn one_user_cannot_read_another_users_stats() {
+    let Some(db) = support::pool().await else {
+        return skip("one_user_cannot_read_another_users_stats");
+    };
+    let alice_steam = unique_steam_id();
+    let bob_steam = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(5)),
+        StubVerifier::rejecting(),
+    );
+
+    let alice = app.login_as(alice_steam).await;
+    let bob = app.login_as(bob_steam).await;
+    app.post("/api/players/me/sync", Some(&alice.token)).await;
+
+    // Stats are scoped by session, so Bob sees his own empty history.
+    let bob_stats = app.get("/api/stats", Some(&bob.token)).await;
+    assert_eq!(bob_stats.json()["overall"]["matches"], 0);
+
+    let alice_stats = app.get("/api/stats", Some(&alice.token)).await;
+    assert_eq!(alice_stats.json()["overall"]["matches"], 5);
+
+    app.cleanup(&[alice_steam, bob_steam]).await;
 }
 
 // ---------------------------------------------------------------------------

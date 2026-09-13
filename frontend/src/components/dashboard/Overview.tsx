@@ -15,27 +15,26 @@ import { Card } from "@/components/ui/Card";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
 import { Icon } from "@/components/ui/Icon";
 import { StreamingText } from "@/components/ui/StreamingText";
-import { ApiError, getMatches, syncMatches } from "@/lib/api";
+import { ApiError, getMatches, getStats, syncMatches } from "@/lib/api";
 import {
   formatFixed,
   formatPercent,
   formatWhole,
-  kdaTrend,
+  kdaSeries,
   recentForm,
-  roleBreakdown,
-  summarize,
-  topHeroes,
 } from "@/lib/stats";
-import type { Match, SyncReport } from "@/lib/types";
+import type { Match, StatsResponse, SyncReport } from "@/lib/types";
 import { useSession } from "@/lib/session-context";
 import { cn } from "@/lib/utils";
 
-/** The API caps a page at 100; one page is plenty for these aggregates. */
-const SAMPLE = 100;
+/** Enough recent matches for the trend line and form strip. Aggregates come
+ *  from the backend, so this is a display sample, not a statistical one. */
+const SAMPLE = 20;
 
 export function Overview({ loginError }: { loginError?: string }) {
   const { session, setSession } = useSession();
   const [matches, setMatches] = useState<Match[] | null>(null);
+  const [stats, setStats] = useState<StatsResponse | null>(null);
   const [matchesError, setMatchesError] = useState<string | null>(null);
 
   const [syncing, setSyncing] = useState(false);
@@ -44,8 +43,14 @@ export function Overview({ loginError }: { loginError?: string }) {
 
   const load = useCallback(async () => {
     try {
-      const page = await getMatches(1, SAMPLE);
+      // Aggregates and the recent list in parallel: the numbers come from the
+      // backend, the list only feeds the trend and form visuals.
+      const [page, computed] = await Promise.all([
+        getMatches(1, SAMPLE),
+        getStats(),
+      ]);
       setMatches(page.matches);
+      setStats(computed);
       setMatchesError(null);
     } catch (error) {
       setMatchesError(
@@ -97,8 +102,8 @@ export function Overview({ loginError }: { loginError?: string }) {
 
   const { me } = session;
   const list = matches ?? [];
-  const stats = summarize(list);
-  const hasMatches = list.length > 0;
+  const overall = stats?.overall;
+  const hasMatches = (overall?.matches ?? 0) > 0;
 
   return (
     <div className="flex flex-col gap-6 pb-4">
@@ -109,8 +114,8 @@ export function Overview({ loginError }: { loginError?: string }) {
           />
         </p>
         <p className="text-xs text-ink-faint">
-          {hasMatches
-            ? `Reading your last ${stats.matches} ${stats.matches === 1 ? "match" : "matches"}.`
+          {hasMatches && overall
+            ? `Reading ${overall.matches} ${overall.matches === 1 ? "match" : "matches"}.`
             : "Sync your matches to see your numbers."}
         </p>
       </section>
@@ -143,28 +148,28 @@ export function Overview({ loginError }: { loginError?: string }) {
         </Card>
       ) : null}
 
-      {hasMatches ? (
+      {hasMatches && overall && stats ? (
         <>
           <section className="grid grid-cols-2 gap-3">
             <StatTile
               label="Win rate"
-              value={formatPercent(stats.winRate)}
+              value={formatPercent(overall.win_rate)}
               icon="trophy"
               tone="string"
             />
             <StatTile
               label="Avg KDA"
-              value={formatFixed(stats.avgKda)}
+              value={formatFixed(overall.avg_kda)}
               icon="spark"
             />
             <StatTile
               label="Avg GPM"
-              value={formatWhole(stats.avgGpm)}
+              value={formatWhole(overall.avg_gpm)}
               icon="coins"
             />
             <StatTile
-              label="Avg deaths"
-              value={formatFixed(stats.avgDeaths)}
+              label="Deaths / 10min"
+              value={formatFixed(overall.avg_deaths_per_10)}
               icon="skull"
               tone="error"
             />
@@ -172,9 +177,9 @@ export function Overview({ loginError }: { loginError?: string }) {
 
           <Card className="flex flex-col gap-5">
             <Meter
-              value={stats.winRate ?? 0}
+              value={overall.win_rate ?? 0}
               label="Win rate"
-              valueText={`${stats.wins}W · ${stats.losses}L`}
+              valueText={`${overall.wins}W · ${overall.losses}L`}
             />
 
             <div className="flex flex-col gap-2">
@@ -194,7 +199,7 @@ export function Overview({ loginError }: { loginError?: string }) {
                 last {Math.min(list.length, 20)} matches
               </span>
             </div>
-            <Sparkline values={kdaTrend(list, 20)} label="KDA per match" />
+            <Sparkline values={kdaSeries(list, 20)} label="KDA per match" />
           </Card>
 
           <Card className="flex flex-col gap-4">
@@ -203,13 +208,21 @@ export function Overview({ loginError }: { loginError?: string }) {
             </h2>
             <BarList
               caption="Matches played per role"
-              data={roleBreakdown(list).map((r) => ({
+              data={stats.roles.map((r) => ({
                 label: r.role,
                 value: r.matches,
-                meta: formatPercent(r.wins / r.matches),
+                meta: formatPercent(r.win_rate),
               }))}
             />
           </Card>
+
+          {overall.parsed_matches < overall.matches ? (
+            <p className="text-xs leading-relaxed text-ink-faint">
+              {overall.parsed_matches} of {overall.matches} matches have a
+              parsed replay. Timing metrics such as last hits at 10 minutes are
+              only available for those.
+            </p>
+          ) : null}
 
           <section className="flex flex-col gap-3">
             <div className="flex items-baseline justify-between gap-3">
@@ -225,18 +238,18 @@ export function Overview({ loginError }: { loginError?: string }) {
             </div>
 
             <ul className="flex gap-2 overflow-x-auto pb-1">
-              {topHeroes(list).map((hero) => (
-                <li key={hero.heroId} className="flex shrink-0 flex-col gap-1.5">
+              {stats.heroes.slice(0, 5).map((hero) => (
+                <li key={hero.hero_id} className="flex shrink-0 flex-col gap-1.5">
                   <HeroPortrait
-                    heroId={hero.heroId}
-                    heroName={hero.heroName}
+                    heroId={hero.hero_id}
+                    heroName={hero.hero_name}
                     size="lg"
                   />
                   <span className="max-w-28 truncate text-[0.6875rem] text-ink-muted">
-                    {hero.heroName}
+                    {hero.hero_name}
                   </span>
                   <span className="font-mono text-[0.6875rem] tabular-nums text-ink-faint">
-                    {hero.matches}× · {formatPercent(hero.wins / hero.matches)}
+                    {hero.matches}× · {formatPercent(hero.win_rate)}
                   </span>
                 </li>
               ))}

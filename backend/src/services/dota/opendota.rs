@@ -17,6 +17,7 @@ use tokio::sync::RwLock;
 use super::{DotaDataProvider, ProviderError, ProviderPlayer};
 use crate::config::DotaConfig;
 use crate::domain::r#match::NormalizedMatch;
+use crate::services::metrics;
 
 /// Slots 0-127 are Radiant, 128-255 are Dire.
 const DIRE_SLOT_THRESHOLD: i32 = 128;
@@ -206,6 +207,8 @@ struct RawMatchDetail {
     start_time: Option<i64>,
     game_mode: Option<i32>,
     lobby_type: Option<i32>,
+    /// Non-null only when a replay was parsed; it gates every time-sliced field.
+    version: Option<i32>,
     #[serde(default)]
     players: Vec<RawMatchPlayer>,
 }
@@ -229,6 +232,20 @@ struct RawMatchPlayer {
     hero_healing: Option<i32>,
     lane_role: Option<i16>,
     is_roaming: Option<bool>,
+
+    // Parsed replays only. Indexed by minute.
+    lh_t: Option<Vec<i32>>,
+    gold_t: Option<Vec<i32>>,
+    xp_t: Option<Vec<i32>>,
+    purchase_log: Option<Vec<RawPurchase>>,
+    teamfight_participation: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPurchase {
+    key: String,
+    /// Seconds from the horn; negative for pre-horn shopping.
+    time: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,6 +304,21 @@ fn normalize_recent_match(raw: RawRecentMatch) -> Option<NormalizedMatch> {
         party_size: raw.party_size,
         started_at,
         from_details: false,
+
+        // All of the following need the match detail, or a parsed replay.
+        team_kills: None,
+        team_deaths: None,
+        replay_parsed: false,
+        last_hits_at_10: None,
+        last_hits_at_15: None,
+        gold_at_10: None,
+        gold_at_15: None,
+        xp_at_10: None,
+        xp_at_15: None,
+        bkb_seconds: None,
+        blink_seconds: None,
+        midas_seconds: None,
+        teamfight_participation: None,
     })
 }
 
@@ -311,11 +343,38 @@ fn normalize_match_detail(
         .ok_or(ProviderError::NotFound)?;
 
     let farm_rank = farm_rank(&raw.players, index);
+
+    // Team totals, taken before the player is moved out of the vector.
+    let side = is_radiant(raw.players[index].player_slot);
+    let team: Vec<&RawMatchPlayer> = raw
+        .players
+        .iter()
+        .filter(|p| is_radiant(p.player_slot) == side)
+        .collect();
+    let team_kills = Some(team.iter().map(|p| p.kills.unwrap_or(0)).sum());
+    let team_deaths = Some(team.iter().map(|p| p.deaths.unwrap_or(0)).sum());
+
+    // A parsed replay is what makes the per-minute series exist at all.
+    let replay_parsed = raw.version.is_some();
+
     let player = raw
         .players
         .into_iter()
         .nth(index)
         .expect("index just found");
+
+    let at = |series: &Option<Vec<i32>>, minute: usize| {
+        series.as_ref().and_then(|s| metrics::series_at(s, minute))
+    };
+
+    let purchases: Vec<(String, i32)> = player
+        .purchase_log
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|p| (p.key.clone(), p.time))
+        .collect();
+    let item_time = |key: &str| metrics::first_purchase_seconds(&purchases, key);
 
     Ok(NormalizedMatch {
         match_id: raw.match_id,
@@ -342,6 +401,21 @@ fn normalize_match_detail(
         party_size: None,
         started_at,
         from_details: true,
+
+        team_kills,
+        team_deaths,
+
+        replay_parsed,
+        last_hits_at_10: at(&player.lh_t, 10),
+        last_hits_at_15: at(&player.lh_t, 15),
+        gold_at_10: at(&player.gold_t, 10),
+        gold_at_15: at(&player.gold_t, 15),
+        xp_at_10: at(&player.xp_t, 10),
+        xp_at_15: at(&player.xp_t, 15),
+        bkb_seconds: item_time("black_king_bar"),
+        blink_seconds: item_time("blink"),
+        midas_seconds: item_time("hand_of_midas"),
+        teamfight_participation: player.teamfight_participation,
     })
 }
 

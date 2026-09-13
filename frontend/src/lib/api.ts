@@ -4,6 +4,7 @@ import type {
   MatchListResponse,
   MatchResponse,
   MeResponse,
+  StatsResponse,
   SyncResponse,
 } from "./types";
 
@@ -36,7 +37,7 @@ export function baseUrl(): string {
 
 /** Where the browser goes to start a Steam login. A full navigation, not fetch. */
 export function steamLoginUrl(): string {
-  return `${baseUrl()}/auth/steam/login`;
+  return `${baseUrl()}/api/auth/steam`;
 }
 
 /**
@@ -89,6 +90,11 @@ export function getMe(): Promise<MeResponse> {
 
 export function syncMatches(): Promise<SyncResponse> {
   return apiFetch<SyncResponse>("/api/players/me/sync", { method: "POST" });
+}
+
+/** Aggregated analytics. All arithmetic happens in the backend. */
+export function getStats(): Promise<StatsResponse> {
+  return apiFetch<StatsResponse>("/api/stats");
 }
 
 export function getMatches(page = 1, limit = 20): Promise<MatchListResponse> {

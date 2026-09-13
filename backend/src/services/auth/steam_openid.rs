@@ -18,7 +18,7 @@ use reqwest::{Client, Url};
 use crate::config::AuthConfig;
 
 /// Path Steam is told to send the user back to.
-pub const CALLBACK_PATH: &str = "/auth/steam/callback";
+pub const CALLBACK_PATH: &str = "/api/auth/steam/callback";
 
 const OPENID_NS: &str = "http://specs.openid.net/auth/2.0";
 const IDENTIFIER_SELECT: &str = "http://specs.openid.net/auth/2.0/identifier_select";
@@ -294,7 +294,7 @@ mod tests {
         let mut params = BTreeMap::new();
         params.insert(
             "openid.return_to".to_string(),
-            "http://localhost:8080/auth/steam/callback?state=x".to_string(),
+            "http://localhost:8080/api/auth/steam/callback?state=x".to_string(),
         );
 
         let error = provider().verify(&params).await.unwrap_err();

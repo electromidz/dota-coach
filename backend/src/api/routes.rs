@@ -7,10 +7,9 @@ use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::api::handlers::{auth, health, matches, players};
+use crate::api::handlers::{auth, health, matches, players, stats};
 use crate::config::Config;
 use crate::error::AppError;
-use crate::services::auth::steam_openid::CALLBACK_PATH;
 use crate::state::AppState;
 
 /// Single place where every route is mounted.
@@ -23,25 +22,22 @@ use crate::state::AppState;
 pub fn build(state: AppState, config: &Config) -> Router {
     let api = Router::new()
         .route("/health", get(health::health))
-        .route("/auth/session", get(auth::session))
+        // Spec-mandated auth surface. `steam` starts the flow, `callback`
+        // completes it; both are browser navigations, not fetch targets.
+        .route("/auth/steam", get(auth::login))
+        .route("/auth/steam/callback", get(auth::callback))
+        .route("/auth/me", get(auth::me))
         .route("/auth/logout", post(auth::logout))
         .route("/players/me", get(players::me))
         .route("/players/me/sync", post(players::sync))
+        .route("/stats", get(stats::get))
         .route("/matches", get(matches::list))
         .route("/matches/{id}", get(matches::get));
-
-    // Browser-facing login endpoints: reached by top-level navigation, so they
-    // redirect rather than return JSON.
-    let steam_auth = Router::new().route("/steam/login", get(auth::login)).route(
-        CALLBACK_PATH.trim_start_matches("/auth"),
-        get(auth::callback),
-    );
 
     Router::new()
         .route("/health", get(health::health))
         .route("/health/live", get(health::liveness))
         .nest("/api", api)
-        .nest("/auth", steam_auth)
         // Unknown paths answer with the same envelope as everything else.
         .fallback(not_found)
         .layer(TraceLayer::new_for_http())

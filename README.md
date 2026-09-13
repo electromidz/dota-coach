@@ -1,64 +1,81 @@
-# AI Dota Coach
+# Dota Coach
 
-A personal AI coach for Dota 2 players. It reads your recent matches, turns them
-into hard numbers, learns the habits that repeat across games, and gives you
-**one** thing to train next — not a wall of statistics.
+A long-term personal AI coach for Dota 2. It reads your matches, turns them into
+reproducible numbers, benchmarks you against comparable players, learns the
+habits that repeat, and gives you **one** thing to train next — not a wall of
+statistics.
 
-> Status: **Phase 3 complete.** Sign in with Steam, the backend links your Dota
-> account from the proven Steam identity, syncs your recent matches into
-> Postgres, and the frontend shows your profile and paginated history.
-> Deterministic metrics, AI analysis and the coach itself land in Phases 4–6
-> (see [Roadmap](#roadmap)).
+The product answers:
+
+- What am I good at, and what am I bad at?
+- What mistakes keep repeating?
+- Which heroes fit me, and which are strong for my rank and role right now?
+- What should I work on next — and is it actually improving?
+
+> Status: **Phase 4 complete.** Sign in with Steam, the backend resolves your
+> Dota account, syncs matches into Postgres, and computes a deterministic,
+> version-stamped metrics layer exposed at `GET /api/stats`. Benchmarking, hero
+> intelligence and the AI coach follow — see [Roadmap](#roadmap).
+
+Engineering rules that hold everywhere in this repo:
+
+1. **The backend computes; the model interprets.** No statistic, percentile or
+   entitlement is ever produced by an LLM.
+2. **Providers are replaceable.** OpenDota, Valve's OpenID and any future
+   STRATZ/payment provider sit behind traits; the domain never imports them.
+3. **Identity comes from the session.** No endpoint accepts a user, player or
+   Steam id from the caller.
+4. **Missing data is represented, never invented.** An unavailable metric is
+   `null` with its sample size, not a plausible-looking number.
 
 ---
 
 ## Product overview
 
-Most Dota tools are dashboards: they show you what happened. This one is a
-coach: it looks across many games and answers four questions.
+Most Dota tools are dashboards: they show what happened. This is a coach — it
+looks across many games and finds what repeats. A single bad fight is noise;
+the same bad fight in four of the last ten games is a pattern, and a pattern is
+something you can train.
 
-- What am I good at?
-- What am I bad at?
-- What keeps repeating?
-- What should I work on right now?
-
-The key idea is that matches are **not** analysed in isolation. A single bad
-fight is noise. The same bad fight in four of the last ten games is a pattern,
-and a pattern is something you can train.
-
-Nothing here promises MMR gains, and every score the app shows is an estimate
-derived from public match data.
+Nothing here promises MMR gains, and every score shown is an estimate derived
+from public match data.
 
 ---
 
 ## Architecture
 
 ```text
-Steam OpenID          proves who the user is; nothing else may set identity
+Steam OpenID           proves who the user is; nothing else may set identity
         │
         ▼
-Dota data (OpenDota)
+Dota data (OpenDota)   behind DotaDataProvider
         │
         ▼
-Provider layer         normalizes provider payloads into internal domain models
+Provider layer         normalizes payloads into internal domain models
         │
         ▼
-Deterministic metrics  laning / farming / fighting / survival / objectives / impact
+Deterministic metrics  KDA, per-10 rates, participation, timings  [done]
         │
         ▼
-Player history         aggregates across matches
+Hero pool + benchmark  how you compare to comparable players      [phase 5-6]
         │
         ▼
-AI analysis            LLM reasons over structured data and returns strict JSON
+Hero intelligence      which strong heroes actually fit you       [phase 6]
         │
         ▼
-Coaching insights      persisted strengths, weaknesses, recurring patterns
+Player model           strengths, weaknesses, recurring patterns  [phase 7-8]
         │
         ▼
-Training focus         exactly one current focus
+AI coaching            LLM reasons over structured data only      [phase 7]
+        │
+        ▼
+Training focus         exactly one current focus                  [phase 9]
+        │
+        ▼
+Progress tracking      is the focus actually improving?           [phase 9]
 ```
 
-Two rules hold the design together:
+Four rules hold the design together:
 
 1. **The LLM never does arithmetic.** All numbers are computed in Rust, are
    reproducible, and are version-stamped. The model only interprets them.
@@ -68,6 +85,9 @@ Two rules hold the design together:
 3. **Identity comes from the session, always.** The Steam id is written only
    from a verified OpenID assertion, and every query is scoped to the caller's
    own player row. No endpoint accepts a user, player or Steam id as input.
+4. **Derived values are version-stamped.** Every metric row records the formula
+   set that produced it and is recomputed when either the formula or its inputs
+   change, so a stored number always matches its current definition.
 
 It is a **modular monolith** — one Rust binary, one database, no queues, no
 service mesh.
@@ -110,25 +130,27 @@ dota-coach/
 │       │   ├── routes.rs      # every route mounted in one place
 │       │   ├── extract.rs     # CurrentUser + rejections via the error envelope
 │       │   └── handlers/
-│       ├── domain/            # user, session, player, match, role
+│       ├── domain/            # user, session, player, match, metrics
 │       ├── services/
 │       │   ├── auth/          # Steam OpenID + server-side sessions
 │       │   ├── dota/          # DotaDataProvider trait + OpenDota impl
-│       │   ├── sync/          # fetch -> dedupe -> enrich -> store
-│       │   ├── metrics/       # deterministic scores + impact score
-│       │   ├── coaching/      # profile, patterns, training focus
-│       │   └── llm/           # LlmProvider trait + OpenAI-compatible impl
-│       └── repositories/      # SQL access, one module per aggregate
+│       │   ├── sync/          # fetch -> dedupe -> enrich -> store -> compute
+│       │   ├── metrics/       # deterministic metric engine (pure functions)
+│       │   ├── coaching/      # profile, patterns, training focus  [phase 7+]
+│       │   └── llm/           # LlmProvider trait                  [phase 7]
+│       ├── repositories/      # SQL access, one module per aggregate
+│       └── tests/             # integration suite against the real router
 └── frontend/
     ├── Dockerfile
     └── src/
-        ├── app/               # App Router pages (/, /matches/[id])
-        ├── components/        # dashboard / matches / ui
-        └── lib/               # api client, shared types, utils
+        ├── app/               # App Router: /, /matches, /matches/[id], /profile
+        ├── components/        # shell / dashboard / matches / charts / ui
+        └── lib/               # api client, types, hero map, formatters
 ```
 
 Business logic lives in the backend. React components consume the API and
-render; they do not compute coaching.
+render; **they compute nothing**. The frontend holds formatters and chart
+reshaping only — every average, rate and rollup arrives from `/api/stats`.
 
 ---
 
@@ -263,25 +285,26 @@ accepts a user id, player id or Steam id from the caller.
 
 ### Authentication
 
-| Method | Path                    | Description                                       |
-| ------ | ----------------------- | ------------------------------------------------- |
-| `GET`  | `/auth/steam/login`     | Redirects to Steam. Sets the login nonce cookie.  |
-| `GET`  | `/auth/steam/callback`  | Steam returns here; sets the session cookie       |
-| `GET`  | `/api/auth/session`     | The signed-in account, or `401`                   |
-| `POST` | `/api/auth/logout`      | Destroys the session and clears the cookie        |
+| Method | Path                       | Description                                      |
+| ------ | -------------------------- | ------------------------------------------------ |
+| `GET`  | `/api/auth/steam`          | Redirects to Steam. Sets the login nonce cookie. |
+| `GET`  | `/api/auth/steam/callback` | Steam returns here; sets the session cookie      |
+| `GET`  | `/api/auth/me`             | The signed-in account, or `401`                  |
+| `POST` | `/api/auth/logout`         | Destroys the session and clears the cookie       |
 
 The two login endpoints are reached by **top-level browser navigation** and
 answer with redirects, not JSON — OpenID cannot be completed from `fetch`.
 
 ### Player and matches
 
-| Method | Path                      | Description                                          |
-| ------ | ------------------------- | ---------------------------------------------------- |
-| `GET`  | `/api/players/me`         | Steam profile + linked Dota identity + match count   |
-| `POST` | `/api/players/me/sync`    | Fetch, deduplicate and store recent matches          |
-| `GET`  | `/api/matches`            | Own history, newest first. `?page=1&limit=20`        |
-| `GET`  | `/api/matches/:id`        | One own match                                        |
-| `GET`  | `/health`, `/health/live` | Readiness and liveness; no session required          |
+| Method | Path                      | Description                                        |
+| ------ | ------------------------- | -------------------------------------------------- |
+| `GET`  | `/api/players/me`         | Steam profile + linked Dota identity + match count |
+| `POST` | `/api/players/me/sync`    | Fetch, dedupe, store, back-fill and compute        |
+| `GET`  | `/api/matches`            | Own history, newest first. `?page=1&limit=20`      |
+| `GET`  | `/api/matches/:id`        | One own match, with its derived KDA                |
+| `GET`  | `/api/stats`              | Aggregates: overall, per hero, per role            |
+| `GET`  | `/health`, `/health/live` | Readiness and liveness; no session required        |
 
 Pagination is validated, not clamped: `page` must be ≥ 1 and `limit` must be
 1–100, otherwise the request is a `400`. The response carries `page`, `limit`,
@@ -290,12 +313,20 @@ Pagination is validated, not clamped: `page` must be ≥ 1 and `limit` must be
 `steam_id` is serialized as a **string**: a SteamID64 does not fit in a
 JavaScript number. `dota_account_id` is a plain number — it is 32-bit.
 
-Planned (Phases 4–5):
+Planned, in roadmap order:
 
 ```text
-GET    /api/players/me/stats     aggregates + time-of-day
-GET    /api/players/me/coach     profile, patterns, current focus
-POST   /api/matches/:id/analyze  AI analysis (rate-limited)
+GET    /api/benchmark            peer comparison            phase 5
+GET    /api/benchmark/:metric
+GET    /api/heroes               hero pool                  phase 6
+GET    /api/heroes/recommendations
+GET    /api/hero-intelligence
+POST   /api/matches/:id/analyze  AI analysis (rate-limited) phase 7
+GET    /api/coach                insights, patterns         phase 7-8
+GET    /api/coach/training-focus                            phase 9
+GET    /api/billing              subscription + payments    phase 10
+POST   /api/billing/checkout
+POST   /api/billing/webhook
 ```
 
 ### Errors
@@ -371,6 +402,9 @@ Points that matter:
    twice.
 4. Fetch full detail for what remains, four requests in flight.
 5. Insert. `UNIQUE (dota_player_id, match_id)` backstops concurrent syncs.
+6. Back-fill a bounded batch of older matches with facts a later schema added.
+7. Recompute deterministic metrics for anything missing, out-of-version or
+   whose inputs changed.
 
 Running it repeatedly never creates duplicates: the second pass reports
 `new_matches: 0` and `duplicates_skipped: N`. A match-detail failure is not
@@ -379,34 +413,89 @@ completes it. Syncs are throttled per player by `SYNC_COOLDOWN_SECONDS`.
 
 Match rows carry the full per-match fact set (hero, role estimate, result,
 duration, KDA, GPM/XPM, last hits, denies, net worth, hero/tower damage,
-healing, game mode, lobby type, party size, start time), which is what Phase 4
-needs to compute deterministic metrics without a schema redesign.
+healing, game mode, lobby type, party size, start time, team totals, and — for
+parsed replays — time-sliced snapshots and item timings). The response reports
+`metrics_computed` and `facts_backfilled` alongside the fetch counters.
 
 ---
 
-## How the AI coaching pipeline works
+## Deterministic metrics
 
-1. **Normalize.** The provider converts OpenDota payloads into domain models.
-   Each sync lists recent matches, drops the ones already stored, fetches full
-   detail for the rest (four requests in flight), and inserts. Duplicates are
-   impossible: the planner diffs against stored ids and
-   `UNIQUE (user_id, match_id)` backstops concurrent syncs. A match-detail
-   failure is not fatal — the summary is stored with `detail_synced = false`
-   and a later sync can complete it.
-2. **Compute.** A metrics service derives KDA, deaths per 10 minutes, and
-   0–100 laning / farming / fight / survival / objective scores, plus a
-   transparent `impact_score` built from configurable weights.
-3. **Aggregate.** The player's recent history is summarized: how many matches
-   have been analysed, which strengths and weaknesses recur.
-4. **Analyse.** The LLM receives a compact structured payload — match facts,
-   computed scores, history summary — never raw API blobs, and never
-   user-controlled prompt text. It must return strict JSON, which is validated
-   before anything is stored.
-5. **Persist.** Validated strengths and weaknesses become `coaching_insights`
-   rows tagged with a category and severity.
-6. **Focus.** The coach counts insight categories across recent matches and
-   promotes the single most frequent weakness to the current training focus,
-   with the evidence that justified it ("4 of your last 10 games").
+Metrics are computed in Rust, from stored facts, by pure functions in
+`services/metrics`. Nothing here calls a provider or a model, and running it
+twice on the same row gives the same answer — which is precisely what lets a
+later coaching layer *interpret* numbers it did not invent.
+
+Two layers, deliberately separated:
+
+| Table           | Holds                                            |
+| --------------- | ------------------------------------------------ |
+| `matches`       | raw facts, exactly as the provider reported them |
+| `match_metrics` | values derived from those facts, version-stamped |
+
+### What is computed
+
+Always available, from any synced match:
+
+```text
+KDA                  (kills + assists) / max(deaths, 1)
+Kills / 10 min       rate over game length
+Deaths / 10 min
+Assists / 10 min
+Last hits per minute
+Hero damage per minute
+Tower damage per minute
+Kill participation   (kills + assists) / team kills
+```
+
+Available **only for parsed replays**, which most public matches are not:
+
+```text
+Last hits @10, @15
+Net worth  @10, @15
+XP         @10, @15
+BKB / Blink / Midas timing   first purchase, seconds from the horn
+Teamfight participation
+```
+
+`GET /api/stats` reports `parsed_matches` alongside `matches` so a client can
+say *why* a timing metric is absent, and `kill_participation_sample` alongside
+the average so a figure built on three games is never presented as though it
+were built on thirty. A missing metric is `null` — never a zero, and never a
+plausible-looking guess.
+
+### Recomputation
+
+A metrics row is rebuilt when it is missing, when `METRICS_VERSION` moves, or
+when its inputs changed (`match_metrics.computed_at < matches.updated_at`).
+That last condition matters: a fact back-fill rewrites the match row, leaving a
+metrics row that is the right *version* but the wrong *answer*.
+
+Because deduplication means a stored match is never re-fetched, each sync also
+back-fills a bounded batch of older matches with facts a later schema added —
+otherwise a new column would only ever populate for matches synced after it
+landed.
+
+---
+
+## How the AI coaching pipeline will work
+
+Phases 5-9 build on the metrics layer. The shape is fixed even where the code
+is not yet written:
+
+1. **Normalize.** The provider converts payloads into domain models. Duplicates
+   are impossible: the planner diffs stored ids and `UNIQUE (dota_player_id,
+   match_id)` backstops concurrent syncs.
+2. **Compute.** Deterministic metrics, above.
+3. **Benchmark.** Compare against comparable players, segmented by hero, role,
+   rank bracket and patch. No percentile is claimed below a minimum sample.
+4. **Aggregate.** Hero pool and player model, evolving as matches arrive rather
+   than being rebuilt per match.
+5. **Analyse.** The LLM receives a compact structured payload — never raw API
+   blobs, never user-controlled prompt text — and must return strict JSON that
+   is validated before anything is stored.
+6. **Focus.** One training focus at a time, chosen from benchmark gap, pattern
+   history, recency, impact and confidence — not simply the lowest statistic.
 
 ### Why roles are estimates
 
@@ -441,15 +530,17 @@ cd frontend && npm test
 Nothing in the suite touches OpenDota or Valve:
 
 - **Unit tests** cover provider normalization (from recorded OpenDota payloads
-  in `backend/tests/fixtures/`), role estimation, the sync planner, session
-  token hashing, cookie flags, OpenID claimed-id parsing, pagination validation
-  and error mapping. They need neither a database nor a network.
+  in `backend/tests/fixtures/`), the metric formulas (KDA, per-10 rates, kill
+  participation, series indexing, item timings), role estimation, the sync
+  planner, session token hashing, cookie flags, OpenID claimed-id parsing,
+  pagination validation and error mapping. No database, no network.
 - **Integration tests** (`backend/tests/api.rs`) drive the *real* router with a
   mock `DotaDataProvider` and a stub `SteamVerifier`, against a real Postgres.
   They cover the login round trip, rejection of anonymous, forged and expired
   sessions, login-nonce mismatches, sync idempotency, duplicate match ids,
-  provider outages/rate limits/bad responses, pagination, and that one user
-  cannot read another's matches.
+  provider outages/rate limits/bad responses, pagination, metric computation
+  and invalidation, and that one user can read neither another's matches nor
+  another's statistics.
 
 Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
 `SKIPPED <name>` rather than passing silently.
@@ -470,6 +561,8 @@ Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
   the database URL live in backend config; only `NEXT_PUBLIC_*` is bundled.
 - **Provider responses are validated** into typed domain models before storage;
   unknown or null fields become `None` rather than defaults that look real.
+- **Analytics are session-scoped.** `/api/stats` aggregates only the caller's
+  own player row; there is no parameter that could widen it.
 - **Internal errors are never serialized** — provider messages, SQL and stack
   detail are logged, and the client gets a fixed, safe message.
 
@@ -483,8 +576,13 @@ Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
   account shows no persona until the first sync. Avoiding a second provider and
   a second API key was the tradeoff.
 - **`role` is an estimate.** See [Why roles are estimates](#why-roles-are-estimates).
-- **Sync is synchronous.** A 20-match sync holds the request open for a few
-  seconds; there is no job queue yet.
+- **Sync is synchronous.** A sync holds the request open for a few seconds;
+  there is no job queue yet. Phase 7's per-match LLM calls will need one.
+- **Time-sliced metrics need a parsed replay.** Last hits at 10, net worth at
+  15 and item timings exist only where OpenDota parsed the replay, which is a
+  minority of public matches. They are reported as `null`, with
+  `parsed_matches` alongside so the UI can explain the gap.
+- **Benchmarks are not implemented yet**, so no percentile is claimed anywhere.
 - **`SYNC_MATCH_LIMIT` caps history at 100.** There is no backfill of a full
   career.
 - **Integration tests share one database** and clean up after themselves, so a
@@ -497,15 +595,22 @@ Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
 
 ## Roadmap
 
-| Phase | Scope                                                         | Status |
-| ----- | ------------------------------------------------------------- | ------ |
-| 1     | Repo structure, Axum API, Postgres, Docker, basic frontend     | ✅ done |
-| 2     | Dota provider, match sync, schema                              | ✅ done |
-| 3     | Steam login, sessions, Dota linking, match history UI          | ✅ done |
-| 4     | Deterministic metrics, dashboard, match page, charts           | next   |
-| 5     | LLM abstraction, structured match analysis, analysis UI        |        |
-| 6     | Player history, recurring patterns, profile, training focus    |        |
-| 7     | PWA, landing polish, error states                              |        |
+Phases follow `PRODUCT_SPEC.md`.
 
-Deliberately out of scope: live coaching, overlays, voice, replay parsing,
-native apps, social features, payments, leaderboards.
+| Phase | Scope                                                        | Status  |
+| ----- | ------------------------------------------------------------ | ------- |
+| 1     | Repository assessment, Axum API, Postgres, Docker, frontend    | ✅ done |
+| 2     | Steam OpenID, users, sessions, auth middleware                 | ✅ done |
+| 3     | DotaProvider, player resolution, match sync and persistence    | ✅ done |
+| 4     | Deterministic metrics, player/hero/role statistics             | ✅ done |
+| 5     | Benchmark engine: percentiles, segmentation, sample validation | next    |
+| 6     | Hero intelligence: meta providers, hero pool, fit score        |         |
+| 7     | AI coach: LLM provider, evidence-based insights                |         |
+| 8     | Player model and recurring pattern detection                   |         |
+| 9     | Training focus and progress tracking                           |         |
+| 10    | Trial, entitlements, crypto billing, webhooks                  |         |
+| 11    | PWA, landing page, production configuration, observability     |         |
+
+Deliberately **out of scope** until the core loop is excellent: microservices,
+live overlay, voice coaching, replay parsing, native apps, social features,
+leaderboards, full draft assistant.

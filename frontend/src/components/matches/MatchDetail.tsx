@@ -10,7 +10,6 @@ import { Icon } from "@/components/ui/Icon";
 import { SteamLoginButton } from "@/components/ui/SteamLoginButton";
 import { TiltCard } from "@/components/ui/TiltCard";
 import { ApiError, getMatch } from "@/lib/api";
-import { matchKda } from "@/lib/stats";
 import type { Match } from "@/lib/types";
 import { cn, formatDuration } from "@/lib/utils";
 
@@ -132,7 +131,7 @@ export function MatchDetail({ id }: { id: string }) {
               {match.kills}/{match.deaths}/{match.assists}
             </span>
             <span className="text-sm text-ink-faint">
-              {matchKda(match).toFixed(1)} KDA
+              {match.kda?.toFixed(1) ?? "—"} KDA
             </span>
           </div>
 

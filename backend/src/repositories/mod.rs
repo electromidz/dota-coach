@@ -5,5 +5,6 @@
 
 pub mod dota_player;
 pub mod r#match;
+pub mod metrics;
 pub mod session;
 pub mod user;

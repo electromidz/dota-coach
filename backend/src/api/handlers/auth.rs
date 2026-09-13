@@ -160,8 +160,8 @@ pub struct SessionResponse {
     pub user: User,
 }
 
-/// `GET /api/auth/session` — who am I?
-pub async fn session(CurrentUser(user): CurrentUser) -> AppResult<Json<SessionResponse>> {
+/// `GET /api/auth/me` — who am I?
+pub async fn me(CurrentUser(user): CurrentUser) -> AppResult<Json<SessionResponse>> {
     Ok(Json(SessionResponse { user }))
 }
 

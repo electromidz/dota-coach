@@ -15,6 +15,7 @@ use crate::domain::r#match::{NewMatch, NormalizedMatch};
 use crate::domain::user::SteamProfileUpdate;
 use crate::repositories;
 use crate::services::dota::{fallback_hero_name, DotaDataProvider, ProviderError};
+use crate::services::metrics;
 
 /// Concurrent match-detail requests. OpenDota's anonymous tier allows 60
 /// calls/minute; four in flight stays well inside that while keeping a
@@ -33,6 +34,10 @@ pub struct SyncReport {
     pub details_enriched: usize,
     /// New matches stored from the summary alone because the detail call failed.
     pub details_failed: usize,
+    /// Matches whose deterministic metrics were computed or refreshed.
+    pub metrics_computed: usize,
+    /// Already-stored matches back-filled with facts a later schema added.
+    pub facts_backfilled: usize,
 }
 
 /// Run one synchronization pass for `player`.
@@ -108,6 +113,14 @@ pub async fn sync_player(
         .collect();
 
     let new_matches = repositories::r#match::insert_new(pool, &rows).await? as usize;
+
+    // Deduplication means a stored match is never re-fetched, so a schema
+    // addition would otherwise only reach matches synced after it landed.
+    let facts_backfilled = backfill_facts(pool, dota, player, limit).await;
+
+    // Metrics are derived, so they are recomputed rather than trusted: this
+    // also repairs rows written by an older formula version.
+    let metrics_computed = recompute_metrics(pool, player.id).await?;
     // Returns the row as it now stands, including the rank refresh above.
     let player = repositories::dota_player::mark_synced(pool, player.id).await?;
 
@@ -117,6 +130,8 @@ pub async fn sync_player(
         duplicates_skipped,
         details_enriched,
         details_failed,
+        metrics_computed,
+        facts_backfilled,
     };
 
     tracing::info!(
@@ -124,10 +139,74 @@ pub async fn sync_player(
         seen = report.matches_seen,
         new = report.new_matches,
         enriched = report.details_enriched,
+        metrics = report.metrics_computed,
         "sync complete"
     );
 
     Ok((report, player))
+}
+
+/// Re-fetch details for stored matches that predate a fact the metrics engine
+/// now needs, and write those facts onto the existing rows.
+///
+/// Bounded by the same limit as a normal sync so a long history is repaired
+/// over several passes rather than in one burst against the provider. Failures
+/// are logged and skipped: a backfill must never fail the sync that carries it.
+async fn backfill_facts(
+    pool: &PgPool,
+    dota: &dyn DotaDataProvider,
+    player: &DotaPlayer,
+    limit: u32,
+) -> usize {
+    let stale = match repositories::r#match::missing_facts(pool, player.id, limit as i64).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list matches needing a fact backfill");
+            return 0;
+        }
+    };
+
+    if stale.is_empty() {
+        return 0;
+    }
+
+    let fetched: Vec<Option<NormalizedMatch>> = stream::iter(stale)
+        .map(|match_id| async move {
+            dota.get_match_details(match_id, player.dota_account_id)
+                .await
+                .ok()
+        })
+        .buffer_unordered(DETAIL_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut updated = 0;
+    for detail in fetched.into_iter().flatten() {
+        match repositories::r#match::update_facts(pool, player.id, &detail).await {
+            Ok(rows) => updated += rows as usize,
+            Err(e) => tracing::warn!(error = %e, "fact backfill write failed"),
+        }
+    }
+
+    updated
+}
+
+/// Compute metrics for any match that has none, or whose stored metrics came
+/// from an older formula version.
+///
+/// Separated from the fetch so it can also be run as a backfill: the inputs
+/// are entirely local, so this never touches a provider.
+pub async fn recompute_metrics(pool: &PgPool, dota_player_id: Uuid) -> Result<usize, SyncError> {
+    let stale =
+        repositories::metrics::stale_match_ids(pool, dota_player_id, metrics::METRICS_VERSION)
+            .await?;
+
+    let matches = repositories::r#match::find_many(pool, &stale).await?;
+    for m in &matches {
+        repositories::metrics::upsert(pool, &metrics::compute(m)).await?;
+    }
+
+    Ok(matches.len())
 }
 
 /// Drop matches already stored, and any the provider listed twice.
@@ -225,6 +304,19 @@ mod tests {
             party_size: Some(1),
             started_at: Utc::now(),
             from_details: false,
+            team_kills: None,
+            team_deaths: None,
+            replay_parsed: false,
+            last_hits_at_10: None,
+            last_hits_at_15: None,
+            gold_at_10: None,
+            gold_at_15: None,
+            xp_at_10: None,
+            xp_at_15: None,
+            bkb_seconds: None,
+            blink_seconds: None,
+            midas_seconds: None,
+            teamfight_participation: None,
         }
     }
 

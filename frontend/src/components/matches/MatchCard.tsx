@@ -2,7 +2,6 @@ import Link from "next/link";
 
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
 import { TiltCard } from "@/components/ui/TiltCard";
-import { matchKda } from "@/lib/stats";
 import type { Match } from "@/lib/types";
 import { cn, formatDuration, timeAgo } from "@/lib/utils";
 
@@ -73,7 +72,7 @@ export function MatchCard({ match, index = 0 }: { match: Match; index?: number }
                 {match.kills}/{match.deaths}/{match.assists}
               </p>
               <p className="text-[0.6875rem] text-ink-faint">
-                {matchKda(match).toFixed(1)} KDA
+                {match.kda?.toFixed(1) ?? "—"} KDA
               </p>
             </div>
           </div>
