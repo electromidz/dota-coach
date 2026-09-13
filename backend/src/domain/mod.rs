@@ -3,4 +3,9 @@
 //! Nothing provider-specific lives here: OpenDota/STRATZ response shapes are
 //! translated into these types at the provider boundary.
 //!
-//! Phase 2 adds `player`, `r#match`; Phase 3 `metrics`; Phase 5 `coaching`.
+//! Phase 4 adds `metrics`; Phase 5 `coaching`.
+
+pub mod r#match;
+pub mod player;
+pub mod session;
+pub mod user;

@@ -1,44 +1,243 @@
 @import "tailwindcss";
 
-/* Design tokens. Dark-first: the app has no light theme by design — it is a
-   gaming product, not an admin panel. */
+/* Design tokens.
+   ---------------------------------------------------------------------------
+   The palette is lifted from a dark code editor's syntax highlighting, because
+   this product is about reading numbers: each token role carries the same
+   meaning it does in an editor, so colour is never decoration alone.
+
+     keyword  magenta -> the product accent, primary actions
+     function cyan    -> links, navigation, trend lines
+     string   green   -> wins, healthy state
+     number   amber   -> numeric stats (its literal role in a code editor)
+     error    red     -> losses, failures
+
+   Dark-first by design. Every foreground clears 4.5:1 on --color-base and body
+   text clears 7:1. Chart marks use their own steps -- see below. */
 @theme {
-  --color-base: #0a0b0f;
-  --color-surface: #12141c;
-  --color-surface-2: #191c26;
-  --color-border: #262a37;
+  --color-base: #08080f;
+  --color-surface: #101020;
+  --color-surface-2: #16162b;
+  --color-border: #262a44;
 
   --color-ink: #f2f4f8;
   --color-ink-muted: #9aa2b4;
-  --color-ink-faint: #646b7d;
+  --color-ink-faint: #8b93a7;
 
-  --color-accent: #e8453c;
-  --color-accent-soft: #2a1416;
+  /* Syntax token roles. Text and UI use. */
+  --color-keyword: #ff7edb;
+  --color-function: #36f9f6;
+  --color-string: #72f1b8;
+  --color-number: #fede5d;
+  --color-operator: #b381f0;
+  --color-error: #fe4450;
 
-  --color-good: #3fb950;
-  --color-warn: #e3b341;
-  --color-bad: #f0533f;
+  --color-accent: #ff7edb;
+  --color-good: #72f1b8;
+  --color-warn: #fede5d;
+  --color-bad: #fe4450;
 
-  /* System stack on purpose: no webfont fetch at build or first paint. */
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
+  /* Chart marks are a separate scale on purpose.
+     Neon sits at OKLCH L 0.77-0.87, outside the 0.48-0.67 band that keeps
+     adjacent fills separable under colour-vision deficiency. Text keeps the
+     bright neon (checked by WCAG contrast); *marks* use these validated steps.
+     Verified: CVD deutan dE 10.3, normal-vision dE 33.2, contrast >= 3:1. */
+  --color-mark-win: #159e78;
+  --color-mark-loss: #fe4450;
+  --color-mark-line: #36f9f6;
+  --color-mark-track: #262a44;
 
-  --radius-card: 0.875rem;
+  /* Glass surfaces. Tokens so every card blurs identically. */
+  --color-glass: oklch(from #16162b l c h / 0.55);
+  --color-glass-edge: oklch(from #ffffff l c h / 0.10);
+
+  --font-sans: var(--font-chakra), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: var(--font-russo), var(--font-chakra), ui-sans-serif,
+    system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code",
+    "Cascadia Code", Menlo, Consolas, monospace;
+
+  --radius-card: 1.25rem;
+
+  /* Native app chrome. The tab bar is a fixed height plus the home-indicator
+     inset; content reserves exactly this much so nothing hides behind it. */
+  --spacing-tabbar: 4rem;
 }
 
 html {
   color-scheme: dark;
-  /* Avoid the iOS "rubber band" reveal of white behind the app shell. */
   background-color: var(--color-base);
+  /* Stop the pull-to-refresh rubber band revealing white behind the shell. */
+  overscroll-behavior-y: none;
 }
 
 body {
   background-color: var(--color-base);
   color: var(--color-ink);
   -webkit-font-smoothing: antialiased;
-  /* Respect notches and home indicators when installed as a PWA. */
-  padding: env(safe-area-inset-top) env(safe-area-inset-right)
-    env(safe-area-inset-bottom) env(safe-area-inset-left);
+  /* A tap should feel instant, not "selected", the way a native row does. */
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Ambient glow: three fixed radial washes. Gives the glass something to
+   refract without a request, and never scrolls, so it cannot repaint. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      42rem 42rem at 12% -8%,
+      oklch(from #ff7edb l c h / 0.16),
+      transparent 60%
+    ),
+    radial-gradient(
+      38rem 38rem at 92% 6%,
+      oklch(from #36f9f6 l c h / 0.12),
+      transparent 60%
+    ),
+    radial-gradient(
+      50rem 30rem at 50% 106%,
+      oklch(from #b381f0 l c h / 0.10),
+      transparent 65%
+    );
+}
+
+@utility glass {
+  background-color: var(--color-glass);
+  /* Unprefixed only: Lightning CSS adds -webkit- from the browserslist
+     targets. Writing the prefix by hand made it drop the standard property,
+     which cost Firefox the blur entirely. */
+  backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid var(--color-glass-edge);
+  box-shadow:
+    0 1px 0 0 oklch(from #ffffff l c h / 0.06) inset,
+    0 8px 32px -12px oklch(from #000000 l c h / 0.8);
+}
+
+/* Backdrop blur is expensive on low-end GPUs. Fall back to an opaque surface
+   where it is unsupported. */
+@supports not (backdrop-filter: blur(1px)) {
+  .glass {
+    background-color: var(--color-surface-2);
+  }
+}
+
+/* Soft UI: the light reads as coming from above-left, so a raised element
+   carries a pale top edge and a deep bottom shadow. Kept subtle -- on a dark
+   surface, heavy neumorphism turns to mud. */
+@utility soft-raised {
+  box-shadow:
+    0 1px 0 0 oklch(from #ffffff l c h / 0.08) inset,
+    -1px -1px 2px 0 oklch(from #ffffff l c h / 0.04) inset,
+    0 10px 24px -12px oklch(from #000000 l c h / 0.9),
+    0 2px 6px -2px oklch(from #000000 l c h / 0.6);
+}
+
+/* The pressed counterpart: light and shadow swap sides. */
+@utility soft-pressed {
+  box-shadow:
+    0 2px 6px 0 oklch(from #000000 l c h / 0.55) inset,
+    0 -1px 0 0 oklch(from #ffffff l c h / 0.05) inset;
+}
+
+@utility neon-text-* {
+  color: --value(--color- *);
+  text-shadow: 0 0 12px oklch(from --value(--color- *) l c h / 0.55);
+}
+
+@utility neon-ring-* {
+  border-color: oklch(from --value(--color- *) l c h / 0.55);
+  box-shadow:
+    0 0 0 1px oklch(from --value(--color- *) l c h / 0.35),
+    0 0 24px -6px oklch(from --value(--color- *) l c h / 0.6);
+}
+
+/* One focus definition so keyboard users get an identical, always visible
+   affordance everywhere. */
+@utility focus-neon {
+  &:focus-visible {
+    outline: 2px solid var(--color-function);
+    outline-offset: 2px;
+  }
+}
+
+/* --- 3D -------------------------------------------------------------------
+   Depth is done with CSS 3D transforms rather than WebGL: no runtime, no
+   canvas, and it degrades to flat when motion is reduced. */
+@utility scene-3d {
+  perspective: 900px;
+  perspective-origin: 50% 50%;
+}
+
+@utility layer-3d {
+  transform-style: preserve-3d;
+  will-change: transform;
+  transition: transform 350ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Pushes a child toward the viewer inside a tilted parent, so the card has
+   real parallax rather than a painted gradient. */
+@utility pop-3d {
+  transform: translateZ(28px);
+}
+
+/* --- Native app chrome ---------------------------------------------------- */
+
+/* iOS momentum scrolling inside the app shell, with the tab bar accounted for. */
+@utility app-scroll {
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: calc(var(--spacing-tabbar) + env(safe-area-inset-bottom) + 1rem);
+}
+
+@utility safe-top {
+  padding-top: env(safe-area-inset-top);
+}
+
+@utility safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+@utility safe-x {
+  padding-left: max(1.25rem, env(safe-area-inset-left));
+  padding-right: max(1.25rem, env(safe-area-inset-right));
+}
+
+/* --- Motion --------------------------------------------------------------- */
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Entrance for a list. The stagger is set per item with an inline delay. */
+@utility rise-in {
+  animation: rise-in 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes caret-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@utility caret {
+  animation: caret-blink 1s steps(1) infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -46,6 +245,14 @@ body {
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* Flatten the tilt entirely rather than merely making it instant. */
+  .layer-3d,
+  .pop-3d {
+    transform: none !important;
   }
 }

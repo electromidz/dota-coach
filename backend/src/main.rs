@@ -1,20 +1,15 @@
-mod api;
-mod config;
-mod db;
-mod domain;
-mod error;
-mod repositories;
-mod services;
-mod state;
-
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::config::Config;
-use crate::state::AppState;
+use dota_coach_backend::config::Config;
+use dota_coach_backend::services::auth::steam_openid::{self, SteamOpenId};
+use dota_coach_backend::services::dota::opendota::OpenDotaProvider;
+use dota_coach_backend::state::AppState;
+use dota_coach_backend::{api, db, repositories};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -44,7 +39,32 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("LLM_API_KEY not set - AI analysis will be unavailable");
     }
 
-    let state = AppState::new(pool, config.clone());
+    if !config.auth.cookie_secure && !config.auth.public_base_url.starts_with("http://localhost") {
+        tracing::warn!(
+            public_base_url = %config.auth.public_base_url,
+            "COOKIE_SECURE is false outside localhost - session cookies will be sent over plain HTTP"
+        );
+    }
+
+    match repositories::session::delete_expired(&pool).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(removed = n, "expired sessions swept"),
+        Err(e) => tracing::warn!(error = %e, "session sweep failed"),
+    }
+
+    // Concrete providers are chosen exactly once, here; everything downstream
+    // sees trait objects.
+    let dota = Arc::new(OpenDotaProvider::new(&config.dota)?);
+    tracing::info!(base_url = %config.dota.base_url, "dota provider ready");
+
+    let steam = Arc::new(SteamOpenId::new(reqwest::Client::new(), &config.auth));
+    tracing::info!(
+        openid_url = %config.auth.steam_openid_url,
+        return_to = %format!("{}{}", config.auth.public_base_url, steam_openid::CALLBACK_PATH),
+        "steam openid ready"
+    );
+
+    let state = AppState::new(pool, config.clone(), dota, steam.clone(), steam);
     let app = api::routes::build(state, &config);
 
     let listener = TcpListener::bind(&addr).await?;
@@ -68,7 +88,9 @@ fn init_tracing() {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
     };
 
     #[cfg(unix)]

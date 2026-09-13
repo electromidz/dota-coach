@@ -22,6 +22,24 @@ sqlx = { version = "0.9", default-features = false, features = [
 ] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+# rustls only: the runtime image has no OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "gzip",
+] }
+async-trait = "0.1"
+futures = "0.3"
+axum-extra = { version = "0.10", features = ["cookie"] }
+# Cookie max-age is expressed with the `cookie` crate's clock type.
+time = "0.3"
+# Session tokens: CSPRNG bytes, stored as a SHA-256 hash.
+rand = "0.9"
+sha2 = "0.10"
+hex = "0.4"
+# Steam returns OpenID parameters in the query string; they must be decoded
+# verbatim so verification can echo them back unchanged.
+form_urlencoded = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -29,3 +47,5 @@ dotenvy = "0.15"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

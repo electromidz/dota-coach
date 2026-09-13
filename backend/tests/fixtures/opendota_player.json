@@ -1,0 +1,22 @@
+{
+  "solo_competitive_rank": null,
+  "competitive_rank": null,
+  "rank_tier": 55,
+  "leaderboard_rank": null,
+  "profile": {
+    "account_id": 86745912,
+    "personaname": "Test Player",
+    "name": null,
+    "plus": false,
+    "cheese": 0,
+    "steamid": "76561198047011640",
+    "avatar": "https://avatars.example/short.jpg",
+    "avatarmedium": "https://avatars.example/medium.jpg",
+    "avatarfull": "https://avatars.example/full.jpg",
+    "profileurl": "https://steamcommunity.com/id/testplayer/",
+    "last_login": null,
+    "loccountrycode": null,
+    "is_contributor": false,
+    "is_subscriber": false
+  }
+}

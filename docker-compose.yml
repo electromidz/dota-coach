@@ -23,7 +23,17 @@ services:
       HOST: 0.0.0.0
       PORT: "8080"
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      # Must match what the browser reaches: Steam signs the return_to URL.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:3000}
+      STEAM_OPENID_URL: ${STEAM_OPENID_URL:-https://steamcommunity.com/openid/login}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-720}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
       DOTA_API_BASE_URL: ${DOTA_API_BASE_URL:-https://api.opendota.com/api}
+      DOTA_API_KEY: ${DOTA_API_KEY:-}
+      DOTA_API_TIMEOUT_SECONDS: ${DOTA_API_TIMEOUT_SECONDS:-10}
+      SYNC_MATCH_LIMIT: ${SYNC_MATCH_LIMIT:-20}
+      SYNC_COOLDOWN_SECONDS: ${SYNC_COOLDOWN_SECONDS:-30}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}

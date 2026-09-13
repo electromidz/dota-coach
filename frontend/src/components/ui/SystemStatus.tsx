@@ -70,27 +70,28 @@ export function SystemStatus() {
   );
 }
 
-function Row({
-  label,
-  ok,
-  value,
-}: {
-  label: string;
-  ok: boolean;
-  value: string;
-}) {
+function Row({ label, ok, value }: { label: string; ok: boolean; value: string }) {
   return (
     <div className="flex items-center justify-between gap-4 py-1 text-sm">
       <span className="text-ink-muted">{label}</span>
       <span className="flex items-center gap-2">
+        {/* Glowing status dot; the adjacent word carries the same information
+            for anyone who cannot separate the two hues. */}
         <span
           aria-hidden
           className={cn(
             "size-2 rounded-full",
-            ok ? "bg-good" : "bg-bad",
+            ok
+              ? "bg-string shadow-[0_0_8px_var(--color-string)]"
+              : "bg-error shadow-[0_0_8px_var(--color-error)]",
           )}
         />
-        <span className={cn("tabular-nums", ok ? "text-ink" : "text-bad")}>
+        <span
+          className={cn(
+            "font-mono text-xs tabular-nums",
+            ok ? "text-string" : "text-error",
+          )}
+        >
           {value}
         </span>
       </span>
