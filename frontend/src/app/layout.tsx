@@ -32,7 +32,8 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#08080f",
+  // Matches --color-base, so the browser chrome blends into the app shell.
+  themeColor: "#1a1b26",
   width: "device-width",
   initialScale: 1,
   // Lets the layout paint under notches when installed as a PWA.

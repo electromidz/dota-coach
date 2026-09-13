@@ -1,57 +1,76 @@
 @import "tailwindcss";
 
-/* Design tokens.
+/* Design tokens — Tokyo Night.
    ---------------------------------------------------------------------------
-   The palette is lifted from a dark code editor's syntax highlighting, because
-   this product is about reading numbers: each token role carries the same
-   meaning it does in an editor, so colour is never decoration alone.
+   The palette is a dark code editor's syntax highlighting, because this product
+   is about reading numbers: each token role carries the same meaning it does in
+   an editor, so colour is never decoration alone.
 
      keyword  magenta -> the product accent, primary actions
-     function cyan    -> links, navigation, trend lines
+     function blue    -> links, navigation, trend lines
      string   green   -> wins, healthy state
-     number   amber   -> numeric stats (its literal role in a code editor)
+     number   orange  -> numeric stats (its literal role in a code editor)
+     operator purple  -> role and position tags
      error    red     -> losses, failures
 
-   Dark-first by design. Every foreground clears 4.5:1 on --color-base and body
-   text clears 7:1. Chart marks use their own steps -- see below. */
-@theme {
-  --color-base: #08080f;
-  --color-surface: #101020;
-  --color-surface-2: #16162b;
-  --color-border: #262a44;
+   Tokyo Night rather than a neon theme on purpose. The hues are the same
+   distance apart, but they sit at a far lower chroma, which is what a screen
+   full of dense figures needs: the numbers stay the loudest thing on the page.
 
-  --color-ink: #f2f4f8;
-  --color-ink-muted: #9aa2b4;
-  --color-ink-faint: #8b93a7;
+   Two values are lifted off their canonical steps, both for contrast, and both
+   still inside the theme's own ramps:
+
+     ink-faint  #565f89 (comment) measures 2.4:1 -- fine for a comment in an
+                editor, illegal for a UI label. Raised to #8f98c4 (5.2:1).
+     operator   #9d7cd8 measures 4.4:1 on the deepest surface. Raised to
+                #a98ce0 (5.2:1).
+
+   Every foreground below clears 4.5:1 on base, glass and surface-2 alike; body
+   text clears 9:1. Chart marks use their own steps -- see below. */
+@theme {
+  --color-base: #1a1b26;
+  --color-surface: #1f2335;
+  --color-surface-2: #24283b;
+  --color-border: #3b4261;
+
+  --color-ink: #c0caf5;
+  --color-ink-muted: #a9b1d6;
+  --color-ink-faint: #8f98c4;
 
   /* Syntax token roles. Text and UI use. */
-  --color-keyword: #ff7edb;
-  --color-function: #36f9f6;
-  --color-string: #72f1b8;
-  --color-number: #fede5d;
-  --color-operator: #b381f0;
-  --color-error: #fe4450;
+  --color-keyword: #bb9af7;
+  --color-function: #7aa2f7;
+  --color-string: #9ece6a;
+  --color-number: #ff9e64;
+  --color-operator: #a98ce0;
+  --color-error: #f7768e;
 
-  --color-accent: #ff7edb;
-  --color-good: #72f1b8;
-  --color-warn: #fede5d;
-  --color-bad: #fe4450;
+  --color-accent: #bb9af7;
+  --color-good: #9ece6a;
+  --color-warn: #e0af68;
+  --color-bad: #f7768e;
 
   /* Chart marks are a separate scale on purpose.
-     Neon sits at OKLCH L 0.77-0.87, outside the 0.48-0.67 band that keeps
-     adjacent fills separable under colour-vision deficiency. Text keeps the
-     bright neon (checked by WCAG contrast); *marks* use these validated steps.
-     Verified: CVD deutan dE 10.3, normal-vision dE 33.2, contrast >= 3:1. */
-  --color-mark-win: #159e78;
-  --color-mark-loss: #fe4450;
-  --color-mark-line: #36f9f6;
-  --color-mark-track: #262a44;
+     Editor foregrounds sit above OKLCH L 0.67, outside the 0.48-0.67 band that
+     keeps adjacent fills separable under colour-vision deficiency. Text keeps
+     the theme's own steps (checked by WCAG contrast); *marks* use these.
+
+     The win mark is a teal-leaning green rather than Tokyo Night's #9ece6a: at
+     equal lightness a true green and a red are the one pair a deuteranope
+     cannot separate at all (measured dE 1.0). Pushing the green toward teal
+     restores it.
+     Verified: CVD deutan dE 9.4, tritan 34.7, normal-vision dE 29.5,
+     contrast >= 3:1 against the glass surface. */
+  --color-mark-win: #0fa88f;
+  --color-mark-loss: #db4b4b;
+  --color-mark-line: #7aa2f7;
+  --color-mark-track: #3b4261;
 
   /* Glass surfaces. Tokens so every card blurs identically.
      The fill sits at 0.48: enough tint to hold text, thin enough that the
      ambient field behind actually shows through and the blur has something to
      do. Raising it much past 0.5 turns every card back into a flat panel. */
-  --color-glass: oklch(from #16162b l c h / 0.48);
+  --color-glass: oklch(from #24283b l c h / 0.48);
   --color-glass-edge: oklch(from #ffffff l c h / 0.14);
 
   --font-sans: var(--font-chakra), ui-sans-serif, system-ui, -apple-system,
@@ -107,24 +126,24 @@ body::before {
   background:
     radial-gradient(
       clamp(17rem, 58vw, 46rem) clamp(17rem, 58vw, 46rem) at 6% -8%,
-      oklch(from #ff7edb l c h / 0.17),
+      oklch(from #bb9af7 l c h / 0.17),
       transparent 62%
     ),
     radial-gradient(
       clamp(15rem, 50vw, 40rem) clamp(15rem, 50vw, 40rem) at 98% 0%,
-      oklch(from #36f9f6 l c h / 0.14),
+      oklch(from #7aa2f7 l c h / 0.14),
       transparent 62%
     ),
     radial-gradient(
       clamp(20rem, 95vw, 56rem) clamp(11rem, 36vw, 32rem) at 50% 108%,
-      oklch(from #b381f0 l c h / 0.15),
+      oklch(from #a98ce0 l c h / 0.15),
       transparent 66%
     ),
     linear-gradient(
       180deg,
-      oklch(from #16162b l c h / 0.65) 0%,
+      oklch(from #24283b l c h / 0.65) 0%,
       transparent 42%,
-      oklch(from #101020 l c h / 0.8) 100%
+      oklch(from #1f2335 l c h / 0.8) 100%
     );
 }
 

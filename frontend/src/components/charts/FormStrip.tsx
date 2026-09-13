@@ -36,8 +36,8 @@ export function FormStrip({
             title={won ? "Win" : "Loss"}
             className={cn(
               "flex h-7 flex-1 items-center justify-center rounded text-[0.625rem] font-semibold",
-              // 15%: the darkest fill at which the loss label still clears
-              // 4.5:1 against its own tinted cell (measured, not guessed).
+              // 15% keeps both labels well clear of 4.5:1 against their own
+              // tinted cell (measured: win 7.0:1, loss 5.2:1).
               won
                 ? "bg-mark-win/15 text-string"
                 : "bg-mark-loss/15 text-error",
