@@ -195,3 +195,49 @@ pub async fn stale_match_ids(
     .fetch_all(pool)
     .await
 }
+
+/// The player's averaged, benchmark-comparable figures for one hero.
+///
+/// Averaged in SQL over that hero's matches, in the same per-minute units the
+/// provider's distribution uses, so the two sides are directly comparable
+/// without the handler doing arithmetic.
+#[derive(Debug, sqlx::FromRow)]
+pub struct HeroAverages {
+    pub sample: i64,
+    pub gold_per_min: Option<f64>,
+    pub xp_per_min: Option<f64>,
+    pub last_hits_per_min: Option<f64>,
+    pub kills_per_min: Option<f64>,
+    pub deaths_per_min: Option<f64>,
+    pub assists_per_min: Option<f64>,
+    pub hero_damage_per_min: Option<f64>,
+    pub tower_damage: Option<f64>,
+}
+
+pub async fn hero_averages(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    hero_id: i32,
+) -> Result<HeroAverages, sqlx::Error> {
+    sqlx::query_as::<_, HeroAverages>(
+        "SELECT
+             COUNT(*)                                  AS sample,
+             AVG(m.gpm)::float8                        AS gold_per_min,
+             AVG(m.xpm)::float8                        AS xp_per_min,
+             AVG(mm.last_hits_per_min)::float8         AS last_hits_per_min,
+             -- The metrics engine stores per-10; the provider speaks per-minute.
+             (AVG(mm.kills_per_10) / 10.0)::float8     AS kills_per_min,
+             (AVG(mm.deaths_per_10) / 10.0)::float8    AS deaths_per_min,
+             (AVG(mm.assists_per_10) / 10.0)::float8   AS assists_per_min,
+             AVG(mm.hero_damage_per_min)::float8       AS hero_damage_per_min,
+             AVG(m.tower_damage)::float8               AS tower_damage
+           FROM matches m
+           JOIN match_metrics mm ON mm.match_id = m.id
+          WHERE m.dota_player_id = $1
+            AND m.hero_id = $2",
+    )
+    .bind(dota_player_id)
+    .bind(hero_id)
+    .fetch_one(pool)
+    .await
+}

@@ -4,6 +4,7 @@ use sqlx::PgPool;
 
 use crate::config::Config;
 use crate::services::auth::steam_openid::{SteamOpenId, SteamVerifier};
+use crate::services::benchmarks::BenchmarkProvider;
 use crate::services::dota::DotaDataProvider;
 
 /// Shared, cheaply-cloneable application state handed to every handler.
@@ -20,6 +21,8 @@ pub struct AppState {
     pub steam: Arc<SteamOpenId>,
     /// Verification behind a trait object so tests never call Valve.
     pub steam_verifier: Arc<dyn SteamVerifier>,
+    /// Peer distributions. Swappable for STRATZ without touching the engine.
+    pub benchmarks: Arc<dyn BenchmarkProvider>,
 }
 
 impl AppState {
@@ -29,6 +32,7 @@ impl AppState {
         dota: Arc<dyn DotaDataProvider>,
         steam: Arc<SteamOpenId>,
         steam_verifier: Arc<dyn SteamVerifier>,
+        benchmarks: Arc<dyn BenchmarkProvider>,
     ) -> Self {
         Self {
             db,
@@ -36,6 +40,7 @@ impl AppState {
             dota,
             steam,
             steam_verifier,
+            benchmarks,
         }
     }
 }

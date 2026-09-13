@@ -12,10 +12,12 @@ The product answers:
 - Which heroes fit me, and which are strong for my rank and role right now?
 - What should I work on next — and is it actually improving?
 
-> Status: **Phase 4 complete.** Sign in with Steam, the backend resolves your
-> Dota account, syncs matches into Postgres, and computes a deterministic,
-> version-stamped metrics layer exposed at `GET /api/stats`. Benchmarking, hero
-> intelligence and the AI coach follow — see [Roadmap](#roadmap).
+> Status: **Phase 5 complete.** Sign in with Steam, the backend resolves your
+> Dota account, syncs matches into Postgres, computes a deterministic
+> version-stamped metrics layer, and benchmarks you against the peer
+> distribution for each hero — with percentiles withheld when the sample is too
+> thin to support one. Hero intelligence and the AI coach follow — see
+> [Roadmap](#roadmap).
 
 Engineering rules that hold everywhere in this repo:
 
@@ -57,7 +59,10 @@ Provider layer         normalizes payloads into internal domain models
 Deterministic metrics  KDA, per-10 rates, participation, timings  [done]
         │
         ▼
-Hero pool + benchmark  how you compare to comparable players      [phase 5-6]
+Benchmark engine       percentile, top 20%, gap, confidence       [done]
+        │
+        ▼
+Hero pool              signature / comfort / stretch / risk       [phase 6]
         │
         ▼
 Hero intelligence      which strong heroes actually fit you       [phase 6]
@@ -136,6 +141,7 @@ dota-coach/
 │       │   ├── dota/          # DotaDataProvider trait + OpenDota impl
 │       │   ├── sync/          # fetch -> dedupe -> enrich -> store -> compute
 │       │   ├── metrics/       # deterministic metric engine (pure functions)
+│       │   ├── benchmarks/    # BenchmarkProvider + percentile engine
 │       │   ├── coaching/      # profile, patterns, training focus  [phase 7+]
 │       │   └── llm/           # LlmProvider trait                  [phase 7]
 │       ├── repositories/      # SQL access, one module per aggregate
@@ -143,7 +149,7 @@ dota-coach/
 └── frontend/
     ├── Dockerfile
     └── src/
-        ├── app/               # App Router: /, /matches, /matches/[id], /profile
+        ├── app/               # App Router: /, /matches, /benchmark, /profile
         ├── components/        # shell / dashboard / matches / charts / ui
         └── lib/               # api client, types, hero map, formatters
 ```
@@ -231,6 +237,7 @@ Copy `.env.example` to `.env`. Never commit the real file.
 | `DOTA_API_KEY`           | backend  | Optional. Raises OpenDota's rate limit.                             |
 | `SYNC_MATCH_LIMIT`       | backend  | Matches pulled per sync, 1-100. Default 20.                         |
 | `SYNC_COOLDOWN_SECONDS`  | backend  | Per-player sync throttle. Default 30; `0` disables.                 |
+| `BENCHMARK_TTL_HOURS`    | backend  | How long a cached peer distribution stays fresh. Default 24.        |
 | `LLM_BASE_URL`           | backend  | Any OpenAI-compatible base URL.                                     |
 | `LLM_API_KEY`            | backend  | **Server-side only.** Never prefixed with `NEXT_PUBLIC_`.           |
 | `LLM_MODEL`              | backend  | Model identifier.                                                   |
@@ -304,6 +311,8 @@ answer with redirects, not JSON — OpenID cannot be completed from `fetch`.
 | `GET`  | `/api/matches`            | Own history, newest first. `?page=1&limit=20`      |
 | `GET`  | `/api/matches/:id`        | One own match, with its derived KDA                |
 | `GET`  | `/api/stats`              | Aggregates: overall, per hero, per role            |
+| `GET`  | `/api/benchmark`          | Peer comparison. `?hero_id=` picks the hero        |
+| `GET`  | `/api/benchmark/:metric`  | The same, narrowed to one metric                   |
 | `GET`  | `/health`, `/health/live` | Readiness and liveness; no session required        |
 
 Pagination is validated, not clamped: `page` must be ≥ 1 and `limit` must be
@@ -316,8 +325,6 @@ JavaScript number. `dota_account_id` is a plain number — it is 32-bit.
 Planned, in roadmap order:
 
 ```text
-GET    /api/benchmark            peer comparison            phase 5
-GET    /api/benchmark/:metric
 GET    /api/heroes               hero pool                  phase 6
 GET    /api/heroes/recommendations
 GET    /api/hero-intelligence
@@ -478,17 +485,63 @@ landed.
 
 ---
 
+## Benchmarking
+
+The engine answers one question: **how does this player compare to appropriate
+players?** It owns the arithmetic and the honesty rules; a `BenchmarkProvider`
+only supplies a distribution, so STRATZ can replace OpenDota later without the
+percentile, confidence or gap logic moving.
+
+### What the current provider can and cannot do
+
+`GET /benchmarks?hero_id=N` — verified against the live endpoint before the
+provider was written — returns 11 percentile buckets (p0.1 … p0.99) across 10
+metrics, **segmented by hero only**. No rank bracket, no role, no patch, and no
+sample size for the peer group.
+
+That is a real limitation, not a temporary gap, so it is reported rather than
+hidden. Every response carries `segmented_by: ["hero"]` and a null
+`peer_sample_size`, and the UI says in plain words that these are percentiles
+against *everyone who plays this hero*, not against players of the same rank.
+Claiming rank-awareness the data cannot support would be exactly the
+fabrication the spec forbids.
+
+### The rules the engine enforces
+
+- **No percentile below the sample floor.** Under five matches on a hero, the
+  player's own value and the reference distribution are both shown, but no rank
+  is asserted — an average over three games measures variance, not skill.
+  Between five and fifteen the figure is returned with `confidence: "low"`.
+- **Direction is honoured.** Sitting in the 90th percentile for *deaths* is a
+  bad result. Percentiles are inverted for less-is-better metrics, so 90 always
+  means "better than 90% of players", whichever row you are reading.
+- **Gaps are signed consistently.** `gap_to_top_20` is positive whenever there
+  is work to do, in both directions, so a client never has to know which way a
+  metric runs to render it.
+- **Values outside the reported range clamp to its edges** rather than
+  extrapolating a percentile the provider never measured.
+- **A missing metric is omitted, not defaulted.** No distribution means no
+  percentile and an explanatory note, never a zero.
+- **A provider outage degrades the page.** The player's own figures are local;
+  they are still shown, with the comparison marked unavailable.
+
+Distributions are cached in `benchmark_snapshots` (Postgres, `BENCHMARK_TTL_HOURS`,
+default 24). They are identical for every user, so they are fetched once, shared,
+and survive a restart rather than costing each deploy a fresh stampede.
+
+---
+
 ## How the AI coaching pipeline will work
 
-Phases 5-9 build on the metrics layer. The shape is fixed even where the code
-is not yet written:
+Phases 6-9 build on the metrics and benchmark layers. The shape is fixed even
+where the code is not yet written:
 
 1. **Normalize.** The provider converts payloads into domain models. Duplicates
    are impossible: the planner diffs stored ids and `UNIQUE (dota_player_id,
    match_id)` backstops concurrent syncs.
 2. **Compute.** Deterministic metrics, above.
-3. **Benchmark.** Compare against comparable players, segmented by hero, role,
-   rank bracket and patch. No percentile is claimed below a minimum sample.
+3. **Benchmark.** Done — see above. Currently hero-scoped; rank and role
+   segmentation wait on a provider that offers them.
 4. **Aggregate.** Hero pool and player model, evolving as matches arrive rather
    than being rebuilt per match.
 5. **Analyse.** The LLM receives a compact structured payload — never raw API
@@ -532,15 +585,18 @@ Nothing in the suite touches OpenDota or Valve:
 - **Unit tests** cover provider normalization (from recorded OpenDota payloads
   in `backend/tests/fixtures/`), the metric formulas (KDA, per-10 rates, kill
   participation, series indexing, item timings), role estimation, the sync
-  planner, session token hashing, cookie flags, OpenID claimed-id parsing,
-  pagination validation and error mapping. No database, no network.
+  planner, percentile interpolation and direction, sample-size gating, provider
+  payload parsing (from a recorded `/benchmarks` response), session token
+  hashing, cookie flags, OpenID claimed-id parsing, pagination validation and
+  error mapping. No database, no network.
 - **Integration tests** (`backend/tests/api.rs`) drive the *real* router with a
   mock `DotaDataProvider` and a stub `SteamVerifier`, against a real Postgres.
   They cover the login round trip, rejection of anonymous, forged and expired
   sessions, login-nonce mismatches, sync idempotency, duplicate match ids,
   provider outages/rate limits/bad responses, pagination, metric computation
-  and invalidation, and that one user can read neither another's matches nor
-  another's statistics.
+  and invalidation, benchmark ranking and its refusal to rank a thin sample,
+  and that one user can read neither another's matches nor another's
+  statistics.
 
 Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
 `SKIPPED <name>` rather than passing silently.
@@ -582,7 +638,11 @@ Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
   15 and item timings exist only where OpenDota parsed the replay, which is a
   minority of public matches. They are reported as `null`, with
   `parsed_matches` alongside so the UI can explain the gap.
-- **Benchmarks are not implemented yet**, so no percentile is claimed anywhere.
+- **Benchmarks are hero-scoped, not rank-scoped.** OpenDota's distribution
+  covers every rank playing that hero. A rank-aware comparison needs STRATZ,
+  which the `BenchmarkProvider` trait is shaped for but which is not wired up.
+- **Peer sample sizes are unknown.** The provider does not publish them, so
+  `peer_sample_size` is always `null` rather than a guess.
 - **`SYNC_MATCH_LIMIT` caps history at 100.** There is no backfill of a full
   career.
 - **Integration tests share one database** and clean up after themselves, so a
@@ -603,8 +663,8 @@ Phases follow `PRODUCT_SPEC.md`.
 | 2     | Steam OpenID, users, sessions, auth middleware                 | ✅ done |
 | 3     | DotaProvider, player resolution, match sync and persistence    | ✅ done |
 | 4     | Deterministic metrics, player/hero/role statistics             | ✅ done |
-| 5     | Benchmark engine: percentiles, segmentation, sample validation | next    |
-| 6     | Hero intelligence: meta providers, hero pool, fit score        |         |
+| 5     | Benchmark engine: percentiles, top 20%, sample validation      | ✅ done |
+| 6     | Hero intelligence: meta providers, hero pool, fit score        | next    |
 | 7     | AI coach: LLM provider, evidence-based insights                |         |
 | 8     | Player model and recurring pattern detection                   |         |
 | 9     | Training focus and progress tracking                           |         |

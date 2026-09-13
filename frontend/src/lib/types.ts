@@ -155,3 +155,37 @@ export interface ApiErrorBody {
     message: string;
   };
 }
+
+/** How much weight a player's own figure can bear. */
+export type Confidence = "insufficient" | "low" | "adequate";
+
+/** Dimensions a benchmark was genuinely segmented on. */
+export type Segment = "hero" | "role" | "rank_bracket" | "patch";
+
+export interface BenchmarkResult {
+  metric: string;
+  label: string;
+  higher_is_better: boolean;
+  player_value: number;
+  player_sample: number;
+  /** The provider's 50th percentile — a median, not a mean. */
+  peer_median: number | null;
+  top_20_value: number | null;
+  /** 0-100, direction-corrected. Null when the sample is too thin to rank. */
+  percentile: number | null;
+  /** Positive always means "work to do". */
+  gap_to_top_20: number | null;
+  peer_sample_size: number | null;
+  confidence: Confidence;
+  segmented_by: Segment[];
+  note: string | null;
+}
+
+export interface BenchmarkResponse {
+  hero_id: number;
+  hero_name: string;
+  sample: number;
+  results: BenchmarkResult[];
+  segmented_by: Segment[];
+  note: string | null;
+}

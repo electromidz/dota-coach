@@ -1,5 +1,6 @@
 import type {
   ApiErrorBody,
+  BenchmarkResponse,
   HealthResponse,
   MatchListResponse,
   MatchResponse,
@@ -95,6 +96,12 @@ export function syncMatches(): Promise<SyncResponse> {
 /** Aggregated analytics. All arithmetic happens in the backend. */
 export function getStats(): Promise<StatsResponse> {
   return apiFetch<StatsResponse>("/api/stats");
+}
+
+/** Peer comparison for one hero. Defaults to the most-played. */
+export function getBenchmark(heroId?: number): Promise<BenchmarkResponse> {
+  const query = heroId === undefined ? "" : `?hero_id=${heroId}`;
+  return apiFetch<BenchmarkResponse>(`/api/benchmark${query}`);
 }
 
 export function getMatches(page = 1, limit = 20): Promise<MatchListResponse> {

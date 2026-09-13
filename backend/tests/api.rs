@@ -9,8 +9,8 @@ mod support;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use support::{
-    app, app_with_config, sample_matches, skip, test_config, unique_steam_id, Failure, MockDota,
-    StubVerifier,
+    app, app_with, app_with_config, sample_matches, skip, test_config, unique_steam_id, Failure,
+    MockDota, StubBenchmarks, StubVerifier,
 };
 
 // ---------------------------------------------------------------------------
@@ -31,6 +31,8 @@ async fn an_anonymous_request_is_rejected_everywhere() {
         ("GET", "/api/matches/00000000-0000-0000-0000-000000000000"),
         ("GET", "/api/auth/me"),
         ("GET", "/api/stats"),
+        ("GET", "/api/benchmark"),
+        ("GET", "/api/benchmark/gold_per_min"),
     ] {
         let response = if method == "GET" {
             app.get(path, None).await
@@ -758,6 +760,211 @@ async fn one_user_cannot_read_another_users_stats() {
     assert_eq!(alice_stats.json()["overall"]["matches"], 5);
 
     app.cleanup(&[alice_steam, bob_steam]).await;
+}
+
+// ---------------------------------------------------------------------------
+// Benchmarks
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn benchmarks_place_the_player_in_the_peer_distribution() {
+    let Some(db) = support::pool().await else {
+        return skip("benchmarks_place_the_player_in_the_peer_distribution");
+    };
+    let steam_id = unique_steam_id();
+    // 20 matches on one hero clears the sample floor comfortably.
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app.get("/api/benchmark", Some(&session.token)).await.json();
+
+    assert_eq!(body["sample"], 20);
+    // Hero only: the provider cannot segment by rank, and must not imply it.
+    assert_eq!(body["segmented_by"][0], "hero");
+
+    let gpm = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["metric"] == "gold_per_min")
+        .expect("gold_per_min result");
+
+    assert_eq!(gpm["peer_median"], 500.0);
+    assert_eq!(gpm["top_20_value"], 800.0);
+    assert_eq!(gpm["confidence"], "adequate");
+    assert!(gpm["percentile"].as_f64().unwrap() > 0.0);
+    // Sample matches sit at 550 gpm, below the 800 top-20 line.
+    assert!(gpm["gap_to_top_20"].as_f64().unwrap() > 0.0);
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_thin_sample_is_shown_without_a_percentile() {
+    let Some(db) = support::pool().await else {
+        return skip("a_thin_sample_is_shown_without_a_percentile");
+    };
+    let steam_id = unique_steam_id();
+    // Two matches: below the floor for any percentile claim.
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(2)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app.get("/api/benchmark", Some(&session.token)).await.json();
+    let gpm = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["metric"] == "gold_per_min")
+        .unwrap();
+
+    assert_eq!(gpm["confidence"], "insufficient");
+    assert!(
+        gpm["percentile"].is_null(),
+        "must not rank a two-game average"
+    );
+    // The player's own value and the reference are still shown.
+    assert!(gpm["player_value"].as_f64().unwrap() > 0.0);
+    assert_eq!(gpm["peer_median"], 500.0);
+    assert!(gpm["note"].as_str().unwrap().contains("Not enough matches"));
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_lower_is_better_metric_ranks_in_the_right_direction() {
+    let Some(db) = support::pool().await else {
+        return skip("a_lower_is_better_metric_ranks_in_the_right_direction");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app.get("/api/benchmark", Some(&session.token)).await.json();
+    let deaths = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["metric"] == "deaths_per_min")
+        .expect("deaths_per_min result");
+
+    assert_eq!(deaths["higher_is_better"], false);
+    // Sample matches die 4 times in 40 minutes = 0.1/min, better than the
+    // stub's 0.15 median, so this must rank *above* the 50th percentile.
+    assert!(
+        deaths["percentile"].as_f64().unwrap() > 50.0,
+        "fewer deaths than the median must rank better, got {}",
+        deaths["percentile"]
+    );
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_provider_outage_still_shows_the_players_own_numbers() {
+    let Some(db) = support::pool().await else {
+        return skip("a_provider_outage_still_shows_the_players_own_numbers");
+    };
+    let steam_id = unique_steam_id();
+    let app = app_with(
+        db,
+        MockDota::with_matches(sample_matches(10)),
+        StubVerifier::rejecting(),
+        StubBenchmarks::unavailable(),
+        test_config(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let response = app.get("/api/benchmark", Some(&session.token)).await;
+
+    // Degrades rather than failing: the local figures are still worth showing.
+    assert_eq!(response.status, StatusCode::OK);
+    let body = response.json();
+    assert!(body["note"].as_str().unwrap().contains("unavailable"));
+    assert!(!body["results"].as_array().unwrap().is_empty());
+    assert!(body["results"][0]["percentile"].is_null());
+    // And no leak of the provider's own error text.
+    assert!(!response.body.contains("offline"));
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_single_metric_can_be_requested() {
+    let Some(db) = support::pool().await else {
+        return skip("a_single_metric_can_be_requested");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app
+        .get("/api/benchmark/gold_per_min", Some(&session.token))
+        .await
+        .json();
+
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["metric"], "gold_per_min");
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn an_unknown_metric_is_rejected() {
+    let Some(db) = support::pool().await else {
+        return skip("an_unknown_metric_is_rejected");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+
+    let response = app
+        .get("/api/benchmark/not_a_metric", Some(&session.token))
+        .await;
+
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(response.error_code(), "BAD_REQUEST");
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn benchmarks_with_no_matches_explain_rather_than_error() {
+    let Some(db) = support::pool().await else {
+        return skip("benchmarks_with_no_matches_explain_rather_than_error");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+
+    let response = app.get("/api/benchmark", Some(&session.token)).await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.json()["sample"], 0);
+    assert!(response.json()["note"].as_str().unwrap().contains("Sync"));
+
+    app.cleanup(&[steam_id]).await;
 }
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 use dota_coach_backend::config::Config;
 use dota_coach_backend::services::auth::steam_openid::{self, SteamOpenId};
+use dota_coach_backend::services::benchmarks::opendota::OpenDotaBenchmarkProvider;
 use dota_coach_backend::services::dota::opendota::OpenDotaProvider;
 use dota_coach_backend::state::AppState;
 use dota_coach_backend::{api, db, repositories};
@@ -64,7 +65,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "steam openid ready"
     );
 
-    let state = AppState::new(pool, config.clone(), dota, steam.clone(), steam);
+    let benchmarks = OpenDotaBenchmarkProvider::new(
+        reqwest::Client::new(),
+        &config.dota.base_url,
+        config.dota.api_key.clone(),
+        pool.clone(),
+        config.dota.benchmark_ttl_hours,
+    );
+
+    let state = AppState::new(pool, config.clone(), dota, steam.clone(), steam, benchmarks);
     let app = api::routes::build(state, &config);
 
     let listener = TcpListener::bind(&addr).await?;

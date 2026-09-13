@@ -22,7 +22,8 @@ export type IconName =
   | "coins"
   | "skull"
   | "clock"
-  | "spark";
+  | "spark"
+  | "gauge";
 
 const PATHS: Record<IconName, React.ReactNode> = {
   // Simple Icons' Steam mark, 24x24, filled.
@@ -118,6 +119,12 @@ const PATHS: Record<IconName, React.ReactNode> = {
   ),
   spark: (
     <path d="M12 3v3m0 12v3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1M3 12h3m12 0h3M5.6 18.4l2.1-2.1m8.6-8.6 2.1-2.1" />
+  ),
+  gauge: (
+    <>
+      <path d="m12 14 4-4" />
+      <path d="M3.34 19a10 10 0 1 1 17.32 0" />
+    </>
   ),
   trophy: (
     <>

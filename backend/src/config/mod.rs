@@ -46,6 +46,9 @@ pub struct DotaConfig {
     /// Minimum gap between two syncs of the same player, in seconds.
     pub sync_cooldown_seconds: i64,
     pub request_timeout_seconds: u64,
+    /// How long a cached peer distribution stays fresh. These move slowly —
+    /// a day-old distribution is still a fair comparison.
+    pub benchmark_ttl_hours: i64,
 }
 
 #[allow(dead_code)]
@@ -107,6 +110,7 @@ impl Config {
                 sync_match_limit: parsed("SYNC_MATCH_LIMIT", 20)?.clamp(1, 100),
                 sync_cooldown_seconds: parsed("SYNC_COOLDOWN_SECONDS", 30)?,
                 request_timeout_seconds: parsed("DOTA_API_TIMEOUT_SECONDS", 10)?,
+                benchmark_ttl_hours: parsed("BENCHMARK_TTL_HOURS", 24)?,
             },
             llm: LlmConfig {
                 base_url: optional("LLM_BASE_URL", "https://api.openai.com/v1"),
@@ -195,6 +199,7 @@ mod tests {
                 sync_match_limit: 20,
                 sync_cooldown_seconds: 30,
                 request_timeout_seconds: 10,
+                benchmark_ttl_hours: 24,
             },
             llm: llm(None),
         };

@@ -15,9 +15,11 @@ use axum::Router;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use dota_coach_backend::api;
 use dota_coach_backend::config::{AuthConfig, Config, DotaConfig, LlmConfig};
+use dota_coach_backend::domain::benchmark::{BenchmarkContext, BenchmarkMetric, Bucket, Segment};
 use dota_coach_backend::domain::r#match::NormalizedMatch;
 use dota_coach_backend::domain::session::{hash_token, NewToken};
 use dota_coach_backend::services::auth::steam_openid::{OpenIdError, SteamOpenId, SteamVerifier};
+use dota_coach_backend::services::benchmarks::{BenchmarkError, BenchmarkProvider, Distribution};
 use dota_coach_backend::services::dota::{DotaDataProvider, ProviderError, ProviderPlayer};
 use dota_coach_backend::state::AppState;
 use http_body_util::BodyExt;
@@ -196,6 +198,72 @@ impl SteamVerifier for StubVerifier {
 }
 
 // ---------------------------------------------------------------------------
+// Stub benchmark provider
+// ---------------------------------------------------------------------------
+
+/// Stands in for OpenDota's `/benchmarks`. Returns a fixed distribution, or
+/// refuses, so the engine's honesty rules can be tested without a network.
+pub struct StubBenchmarks {
+    failure: Option<&'static str>,
+}
+
+impl StubBenchmarks {
+    /// A distribution whose gold-per-minute median is 500 and top-20% is 800.
+    pub fn serving() -> Arc<Self> {
+        Arc::new(Self { failure: None })
+    }
+
+    pub fn unavailable() -> Arc<Self> {
+        Arc::new(Self {
+            failure: Some("offline"),
+        })
+    }
+}
+
+#[async_trait]
+impl BenchmarkProvider for StubBenchmarks {
+    async fn get_distribution(
+        &self,
+        _context: &BenchmarkContext,
+    ) -> Result<Distribution, BenchmarkError> {
+        if let Some(reason) = self.failure {
+            return Err(BenchmarkError::Unavailable(reason.to_string()));
+        }
+
+        let buckets = |lo: f32, mid: f32, hi: f32| {
+            vec![
+                Bucket {
+                    percentile: 0.1,
+                    value: lo,
+                },
+                Bucket {
+                    percentile: 0.5,
+                    value: mid,
+                },
+                Bucket {
+                    percentile: 0.8,
+                    value: hi,
+                },
+                Bucket {
+                    percentile: 0.9,
+                    value: hi * 1.2,
+                },
+            ]
+        };
+
+        Ok(Distribution {
+            buckets: HashMap::from([
+                (BenchmarkMetric::GoldPerMin, buckets(200.0, 500.0, 800.0)),
+                (BenchmarkMetric::XpPerMin, buckets(250.0, 550.0, 850.0)),
+                (BenchmarkMetric::DeathsPerMin, buckets(0.05, 0.15, 0.30)),
+            ]),
+            segmented_by: vec![Segment::Hero],
+            sample_size: None,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
 
@@ -227,6 +295,7 @@ pub fn test_config() -> Config {
             // cooldown itself is unit-tested.
             sync_cooldown_seconds: 0,
             request_timeout_seconds: 5,
+            benchmark_ttl_hours: 24,
         },
         llm: LlmConfig {
             base_url: "https://llm.example/v1".into(),
@@ -264,10 +333,27 @@ pub fn skip(test: &str) {
 }
 
 pub fn app(db: PgPool, dota: Arc<MockDota>, verifier: Arc<dyn SteamVerifier>) -> TestApp {
-    let config = test_config();
+    app_with(db, dota, verifier, StubBenchmarks::serving(), test_config())
+}
+
+/// Full control over every stubbed dependency.
+pub fn app_with(
+    db: PgPool,
+    dota: Arc<MockDota>,
+    verifier: Arc<dyn SteamVerifier>,
+    benchmarks: Arc<dyn BenchmarkProvider>,
+    config: Config,
+) -> TestApp {
     let steam = Arc::new(SteamOpenId::new(reqwest::Client::new(), &config.auth));
 
-    let state = AppState::new(db.clone(), config.clone(), dota.clone(), steam, verifier);
+    let state = AppState::new(
+        db.clone(),
+        config.clone(),
+        dota,
+        steam,
+        verifier,
+        benchmarks,
+    );
 
     TestApp {
         router: api::routes::build(state, &config),
@@ -281,13 +367,7 @@ pub fn app_with_config(
     verifier: Arc<dyn SteamVerifier>,
     config: Config,
 ) -> TestApp {
-    let steam = Arc::new(SteamOpenId::new(reqwest::Client::new(), &config.auth));
-    let state = AppState::new(db.clone(), config.clone(), dota, steam, verifier);
-
-    TestApp {
-        router: api::routes::build(state, &config),
-        db,
-    }
+    app_with(db, dota, verifier, StubBenchmarks::serving(), config)
 }
 
 impl TestApp {

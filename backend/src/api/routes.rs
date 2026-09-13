@@ -7,7 +7,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::api::handlers::{auth, health, matches, players, stats};
+use crate::api::handlers::{auth, benchmark, health, matches, players, stats};
 use crate::config::Config;
 use crate::error::AppError;
 use crate::state::AppState;
@@ -31,6 +31,8 @@ pub fn build(state: AppState, config: &Config) -> Router {
         .route("/players/me", get(players::me))
         .route("/players/me/sync", post(players::sync))
         .route("/stats", get(stats::get))
+        .route("/benchmark", get(benchmark::overview))
+        .route("/benchmark/{metric}", get(benchmark::metric))
         .route("/matches", get(matches::list))
         .route("/matches/{id}", get(matches::get));
 
