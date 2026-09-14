@@ -121,6 +121,14 @@ pub async fn sync_player(
     // Metrics are derived, so they are recomputed rather than trusted: this
     // also repairs rows written by an older formula version.
     let metrics_computed = recompute_metrics(pool, player.id).await?;
+
+    // Patterns are read off the metrics that were just recomputed. A failure
+    // here must not fail the sync: the matches are stored either way, and the
+    // model is rebuilt on the next read.
+    if let Err(e) = crate::services::player_model::refresh(pool, player.id).await {
+        tracing::warn!(error = %e, "player model refresh failed after sync");
+    }
+
     // Returns the row as it now stands, including the rank refresh above.
     let player = repositories::dota_player::mark_synced(pool, player.id).await?;
 

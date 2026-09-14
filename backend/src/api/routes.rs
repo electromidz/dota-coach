@@ -7,7 +7,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::api::handlers::{auth, benchmark, health, matches, players, stats};
+use crate::api::handlers::{auth, benchmark, coach, health, heroes, matches, players, stats};
 use crate::config::Config;
 use crate::error::AppError;
 use crate::state::AppState;
@@ -18,7 +18,9 @@ use crate::state::AppState;
 /// requirement is expressed by the `CurrentUser` extractor in each handler
 /// rather than by a layer, so a route cannot silently lose it.
 ///
-/// Phase 4 adds `POST /api/matches/:id/analyze` and the coaching endpoints.
+/// Generation endpoints answer `503 FEATURE_UNAVAILABLE` when no model is
+/// configured, and `429` when a player is over their budget; every read path
+/// keeps working either way.
 pub fn build(state: AppState, config: &Config) -> Router {
     let api = Router::new()
         .route("/health", get(health::health))
@@ -33,8 +35,21 @@ pub fn build(state: AppState, config: &Config) -> Router {
         .route("/stats", get(stats::get))
         .route("/benchmark", get(benchmark::overview))
         .route("/benchmark/{metric}", get(benchmark::metric))
+        // Hero Intelligence. `/heroes` is local-only by design, so it keeps
+        // answering while the meta provider is down.
+        .route("/heroes", get(heroes::pool))
+        .route("/heroes/recommendations", get(heroes::recommendations))
+        .route("/hero-intelligence", get(heroes::intelligence))
+        // Coaching. Reading is free and always answers; generating is the
+        // only rate-limited verb in the API.
+        .route("/coach", get(coach::get))
+        .route("/coach/analyze", post(coach::analyze))
+        .route("/coach/player-model", get(coach::player_model))
+        .route("/coach/training-focus", get(coach::training_focus))
         .route("/matches", get(matches::list))
-        .route("/matches/{id}", get(matches::get));
+        .route("/matches/{id}", get(matches::get))
+        .route("/matches/{id}/analysis", get(coach::match_analysis))
+        .route("/matches/{id}/analyze", post(coach::analyze_match));
 
     Router::new()
         .route("/health", get(health::health))

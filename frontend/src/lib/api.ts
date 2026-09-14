@@ -1,12 +1,17 @@
 import type {
   ApiErrorBody,
   BenchmarkResponse,
+  CoachResponse,
   HealthResponse,
+  HeroIntelligenceResponse,
+  HeroPoolResponse,
   MatchListResponse,
   MatchResponse,
   MeResponse,
+  PlayerModelResponse,
   StatsResponse,
   SyncResponse,
+  TrainingFocusResponse,
 } from "./types";
 
 /**
@@ -102,6 +107,61 @@ export function getStats(): Promise<StatsResponse> {
 export function getBenchmark(heroId?: number): Promise<BenchmarkResponse> {
   const query = heroId === undefined ? "" : `?hero_id=${heroId}`;
   return apiFetch<BenchmarkResponse>(`/api/benchmark${query}`);
+}
+
+/**
+ * The player's own hero pool.
+ *
+ * Reads no provider, so it keeps answering when the meta is unavailable.
+ */
+export function getHeroPool(): Promise<HeroPoolResponse> {
+  return apiFetch<HeroPoolResponse>("/api/heroes");
+}
+
+/** Pool, meta and scored recommendations in one payload. */
+export function getHeroIntelligence(limit?: number): Promise<HeroIntelligenceResponse> {
+  const query = limit === undefined ? "" : `?limit=${limit}`;
+  return apiFetch<HeroIntelligenceResponse>(`/api/hero-intelligence${query}`);
+}
+
+/** Measured evidence plus the last analysis. Never spends a model call. */
+export function getCoach(): Promise<CoachResponse> {
+  return apiFetch<CoachResponse>("/api/coach");
+}
+
+/** The only call that asks the model. Rate limited server-side. */
+export function analyzeCoach(): Promise<CoachResponse> {
+  return apiFetch<CoachResponse>("/api/coach/analyze", { method: "POST" });
+}
+
+/**
+ * The long-term model: traits, role affinity and recurring patterns.
+ *
+ * Deterministic throughout — reading it never calls a model, and it is
+ * meaningful on a deployment with no LLM configured at all.
+ */
+export function getPlayerModel(): Promise<PlayerModelResponse> {
+  return apiFetch<PlayerModelResponse>("/api/coach/player-model");
+}
+
+/**
+ * The one thing to work on, its progress, and the runners-up.
+ *
+ * Reading this is what selects a focus when none is set — deliberately, so
+ * that opening the coach does not commit a player to a goal by accident.
+ */
+export function getTrainingFocus(): Promise<TrainingFocusResponse> {
+  return apiFetch<TrainingFocusResponse>("/api/coach/training-focus");
+}
+
+export function getMatchAnalysis(id: string): Promise<CoachResponse> {
+  return apiFetch<CoachResponse>(`/api/matches/${id}/analysis`);
+}
+
+export function analyzeMatch(id: string): Promise<CoachResponse> {
+  return apiFetch<CoachResponse>(`/api/matches/${id}/analyze`, {
+    method: "POST",
+  });
 }
 
 export function getMatches(page = 1, limit = 20): Promise<MatchListResponse> {

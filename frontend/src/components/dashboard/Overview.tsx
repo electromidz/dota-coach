@@ -7,6 +7,7 @@ import { BarList } from "@/components/charts/BarList";
 import { FormStrip } from "@/components/charts/FormStrip";
 import { Meter } from "@/components/charts/Meter";
 import { Sparkline } from "@/components/charts/Sparkline";
+import { TrainingFocusCard } from "@/components/coach/TrainingFocusCard";
 import { StatTile } from "@/components/dashboard/StatTile";
 import { SignedOut } from "@/components/shell/SignedOut";
 import { Alert } from "@/components/ui/Alert";
@@ -149,6 +150,10 @@ export function Overview({ loginError }: { loginError?: string }) {
       </div>
 
       {matchesError ? <Alert>{matchesError}</Alert> : null}
+
+      {/* The dashboard's first question is "what should I work on", not "what
+          are my numbers". Statistics follow underneath. */}
+      {hasMatches ? <TrainingFocusCard compact /> : null}
 
       {!hasMatches && !matchesError ? (
         <Card>

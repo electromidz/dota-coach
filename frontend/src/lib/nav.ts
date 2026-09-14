@@ -17,6 +17,8 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Overview", icon: "home" },
   { href: "/matches", label: "Matches", icon: "swords" },
   { href: "/benchmark", label: "Benchmark", icon: "gauge" },
+  { href: "/heroes", label: "Heroes", icon: "spark" },
+  { href: "/coach", label: "Coach", icon: "trophy" },
   { href: "/profile", label: "Profile", icon: "user" },
 ];
 

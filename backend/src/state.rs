@@ -6,12 +6,14 @@ use crate::config::Config;
 use crate::services::auth::steam_openid::{SteamOpenId, SteamVerifier};
 use crate::services::benchmarks::BenchmarkProvider;
 use crate::services::dota::DotaDataProvider;
+use crate::services::hero_meta::HeroMetaProvider;
+use crate::services::llm::LlmProvider;
 
 /// Shared, cheaply-cloneable application state handed to every handler.
 ///
-/// Handlers depend on abstractions — never on OpenDota or on Valve's OpenID
-/// endpoint directly — so both can be stubbed in tests and swapped in
-/// production. Phase 4 adds `Arc<dyn LlmProvider>` alongside them.
+/// Handlers depend on abstractions — never on OpenDota, Valve's OpenID
+/// endpoint or an LLM vendor directly — so every one of them can be stubbed in
+/// tests and swapped in production without a handler changing.
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
@@ -23,24 +25,38 @@ pub struct AppState {
     pub steam_verifier: Arc<dyn SteamVerifier>,
     /// Peer distributions. Swappable for STRATZ without touching the engine.
     pub benchmarks: Arc<dyn BenchmarkProvider>,
+    /// What the wider player base is doing. Degradable: Hero Intelligence
+    /// still answers from the player's own history when this is down.
+    pub hero_meta: Arc<dyn HeroMetaProvider>,
+    /// Interpretation only. Every number it is shown was computed here first,
+    /// and everything it returns is validated against that evidence.
+    pub llm: Arc<dyn LlmProvider>,
+}
+
+/// Every external dependency, chosen once at startup.
+///
+/// Grouped rather than passed one by one: the list grows with each phase, and
+/// a positional call of eight trait objects is a swap waiting to happen.
+pub struct Providers {
+    pub dota: Arc<dyn DotaDataProvider>,
+    pub steam: Arc<SteamOpenId>,
+    pub steam_verifier: Arc<dyn SteamVerifier>,
+    pub benchmarks: Arc<dyn BenchmarkProvider>,
+    pub hero_meta: Arc<dyn HeroMetaProvider>,
+    pub llm: Arc<dyn LlmProvider>,
 }
 
 impl AppState {
-    pub fn new(
-        db: PgPool,
-        config: Config,
-        dota: Arc<dyn DotaDataProvider>,
-        steam: Arc<SteamOpenId>,
-        steam_verifier: Arc<dyn SteamVerifier>,
-        benchmarks: Arc<dyn BenchmarkProvider>,
-    ) -> Self {
+    pub fn new(db: PgPool, config: Config, providers: Providers) -> Self {
         Self {
             db,
             config: Arc::new(config),
-            dota,
-            steam,
-            steam_verifier,
-            benchmarks,
+            dota: providers.dota,
+            steam: providers.steam,
+            steam_verifier: providers.steam_verifier,
+            benchmarks: providers.benchmarks,
+            hero_meta: providers.hero_meta,
+            llm: providers.llm,
         }
     }
 }

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { MatchAnalysis } from "@/components/coach/MatchAnalysis";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
@@ -20,8 +21,10 @@ type State =
   | { kind: "error"; message: string };
 
 /**
- * Phase 3 shows the stored facts only. Deterministic metrics and the AI report
- * arrive in Phase 4 and slot in below the performance grid.
+ * The stored facts, then the coaching section.
+ *
+ * The analysis loads separately and never blocks the match itself: a coaching
+ * outage must not stop a player reading their own game.
  */
 export function MatchDetail({ id }: { id: string }) {
   const [state, setState] = useState<State>({ kind: "loading" });
@@ -183,6 +186,8 @@ export function MatchDetail({ id }: { id: string }) {
           ) : null}
         </section>
       </div>
+
+      <MatchAnalysis id={match.id} />
 
       <p className="text-xs leading-relaxed text-ink-faint">
         Role is an estimate: Dota does not publish positions, so it is derived

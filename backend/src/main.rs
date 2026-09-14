@@ -9,7 +9,9 @@ use dota_coach_backend::config::Config;
 use dota_coach_backend::services::auth::steam_openid::{self, SteamOpenId};
 use dota_coach_backend::services::benchmarks::opendota::OpenDotaBenchmarkProvider;
 use dota_coach_backend::services::dota::opendota::OpenDotaProvider;
-use dota_coach_backend::state::AppState;
+use dota_coach_backend::services::hero_meta::opendota::OpenDotaHeroMetaProvider;
+use dota_coach_backend::services::llm::openai::OpenAiLlmProvider;
+use dota_coach_backend::state::{AppState, Providers};
 use dota_coach_backend::{api, db, repositories};
 
 #[tokio::main]
@@ -73,7 +75,34 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.dota.benchmark_ttl_hours,
     );
 
-    let state = AppState::new(pool, config.clone(), dota, steam.clone(), steam, benchmarks);
+    // Hero meta shares OpenDota's base URL and key, but not its client-side
+    // limits: it is one document for the whole roster, cached for a day.
+    let hero_meta = OpenDotaHeroMetaProvider::new(
+        reqwest::Client::new(),
+        &config.dota.base_url,
+        config.dota.api_key.clone(),
+        pool.clone(),
+        config.heroes.meta_ttl_hours,
+        config.heroes.meta_weights,
+    );
+
+    let llm = OpenAiLlmProvider::new(
+        &config.llm,
+        std::time::Duration::from_secs(config.coach.request_timeout_seconds),
+    )?;
+
+    let state = AppState::new(
+        pool,
+        config.clone(),
+        Providers {
+            dota,
+            steam: steam.clone(),
+            steam_verifier: steam,
+            benchmarks,
+            hero_meta,
+            llm,
+        },
+    );
     let app = api::routes::build(state, &config);
 
     let listener = TcpListener::bind(&addr).await?;

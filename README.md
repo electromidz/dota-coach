@@ -12,12 +12,16 @@ The product answers:
 - Which heroes fit me, and which are strong for my rank and role right now?
 - What should I work on next — and is it actually improving?
 
-> Status: **Phase 5 complete.** Sign in with Steam, the backend resolves your
+> Status: **Phase 9 complete.** Sign in with Steam, the backend resolves your
 > Dota account, syncs matches into Postgres, computes a deterministic
-> version-stamped metrics layer, and benchmarks you against the peer
-> distribution for each hero — with percentiles withheld when the sample is too
-> thin to support one. Hero intelligence and the AI coach follow — see
-> [Roadmap](#roadmap).
+> version-stamped metrics layer, benchmarks you against the peer distribution
+> for each hero — with percentiles withheld when the sample is too thin to
+> support one — scores which currently-strong heroes actually fit *you*, keeps
+> a long-term model of your habits that only calls something recurring once it
+> has the evidence, picks **one** training focus with a checkable target and
+> tracks whether it is actually improving, and has an LLM interpret all of it
+> into insights it is **not allowed to make numbers up in**. Billing and launch
+> follow — see [Roadmap](#roadmap).
 
 Engineering rules that hold everywhere in this repo:
 
@@ -62,22 +66,22 @@ Deterministic metrics  KDA, per-10 rates, participation, timings  [done]
 Benchmark engine       percentile, top 20%, gap, confidence       [done]
         │
         ▼
-Hero pool              signature / comfort / stretch / risk       [phase 6]
+Hero pool              signature / comfort / stretch / risk       [done]
         │
         ▼
-Hero intelligence      which strong heroes actually fit you       [phase 6]
+Hero intelligence      which strong heroes actually fit you       [done]
         │
         ▼
-Player model           strengths, weaknesses, recurring patterns  [phase 7-8]
+Player model           strengths, weaknesses, recurring patterns  [done]
         │
         ▼
-AI coaching            LLM reasons over structured data only      [phase 7]
+AI coaching            LLM reasons over structured data only      [done]
         │
         ▼
-Training focus         exactly one current focus                  [phase 9]
+Training focus         exactly one current focus                  [done]
         │
         ▼
-Progress tracking      is the focus actually improving?           [phase 9]
+Progress tracking      is the focus actually improving?           [done]
 ```
 
 Four rules hold the design together:
@@ -135,22 +139,27 @@ dota-coach/
 │       │   ├── routes.rs      # every route mounted in one place
 │       │   ├── extract.rs     # CurrentUser + rejections via the error envelope
 │       │   └── handlers/
-│       ├── domain/            # user, session, player, match, metrics
+│       ├── domain/            # user, session, player, match, metrics, hero,
+│       │                       #   coaching, player_model, training
 │       ├── services/
 │       │   ├── auth/          # Steam OpenID + server-side sessions
 │       │   ├── dota/          # DotaDataProvider trait + OpenDota impl
 │       │   ├── sync/          # fetch -> dedupe -> enrich -> store -> compute
 │       │   ├── metrics/       # deterministic metric engine (pure functions)
 │       │   ├── benchmarks/    # BenchmarkProvider + percentile engine
-│       │   ├── coaching/      # profile, patterns, training focus  [phase 7+]
-│       │   └── llm/           # LlmProvider trait                  [phase 7]
+│       │   ├── hero_meta/     # HeroMetaProvider + meta strength scoring
+│       │   ├── heroes/        # hero pool + fit score (pure functions)
+│       │   ├── player_model/  # pattern detectors + long-term model
+│       │   ├── training/      # focus selection, goals, progress series
+│       │   ├── coaching/      # evidence builder, prompt, answer validation
+│       │   └── llm/           # LlmProvider trait + OpenAI-compatible impl
 │       ├── repositories/      # SQL access, one module per aggregate
 │       └── tests/             # integration suite against the real router
 └── frontend/
     ├── Dockerfile
     └── src/
-        ├── app/               # App Router: /, /matches, /benchmark, /profile
-        ├── components/        # shell / dashboard / matches / charts / ui
+        ├── app/               # App Router: /, /matches, /benchmark, /heroes, /coach, /profile
+        ├── components/        # shell / dashboard / matches / heroes / coach / charts / ui
         └── lib/               # api client, types, hero map, formatters
 ```
 
@@ -238,6 +247,28 @@ Copy `.env.example` to `.env`. Never commit the real file.
 | `SYNC_MATCH_LIMIT`       | backend  | Matches pulled per sync, 1-100. Default 20.                         |
 | `SYNC_COOLDOWN_SECONDS`  | backend  | Per-player sync throttle. Default 30; `0` disables.                 |
 | `BENCHMARK_TTL_HOURS`    | backend  | How long a cached peer distribution stays fresh. Default 24.        |
+| `HERO_META_TTL_HOURS`    | backend  | How long a cached hero meta cohort stays fresh. Default 24.         |
+| `FOCUS_WEIGHT_GAP`       | backend  | Focus weight: benchmark gap. Default 0.25.                          |
+| `FOCUS_WEIGHT_PATTERN`   | backend  | Focus weight: historical pattern. Default 0.20.                     |
+| `FOCUS_WEIGHT_RECENT`    | backend  | Focus weight: recent performance. Default 0.15.                     |
+| `FOCUS_WEIGHT_IMPACT`    | backend  | Focus weight: impact. Default 0.20.                                 |
+| `FOCUS_WEIGHT_CONFIDENCE`| backend  | Focus weight: confidence. Default 0.10.                             |
+| `FOCUS_WEIGHT_RECENCY`   | backend  | Focus weight: recency. Default 0.10.                                |
+| `FOCUS_HISTORY_LIMIT`    | backend  | Past focuses returned with the current one. Default 10.             |
+| `COACH_COOLDOWN_SECONDS` | backend  | Minimum gap between two generations per player. Default 30.         |
+| `COACH_DAILY_LIMIT`      | backend  | Generations per player per rolling 24h. Default 20; `0` disables.   |
+| `COACH_MAX_INSIGHTS`     | backend  | Insights kept from one answer. Default 5.                           |
+| `COACH_MAX_OUTPUT_TOKENS`| backend  | Output ceiling for one model call. Default 900.                     |
+| `COACH_TEMPERATURE`      | backend  | Default 0.2 — interpretation, not creative writing.                 |
+| `COACH_RECENT_MATCHES`   | backend  | Matches feeding the recent-form evidence. Default 10.               |
+| `LLM_TIMEOUT_SECONDS`    | backend  | How long one model call may take. Default 30.                       |
+| `HERO_RECOMMENDATION_LIMIT` | backend | Candidates returned by default, 1-50. Default 8.                  |
+| `HERO_BENCHMARK_LOOKUPS` | backend  | Peer distributions fetched per recommendation request. Default 5.   |
+| `FIT_WEIGHT_PERFORMANCE` | backend  | Fit weight: your performance. Default 0.30.                         |
+| `FIT_WEIGHT_META`        | backend  | Fit weight: meta strength. Default 0.25.                            |
+| `FIT_WEIGHT_EXPERIENCE`  | backend  | Fit weight: experience. Default 0.20.                               |
+| `FIT_WEIGHT_BENCHMARK`   | backend  | Fit weight: benchmark. Default 0.15.                                |
+| `FIT_WEIGHT_RECENT_FORM` | backend  | Fit weight: recent form. Default 0.10.                              |
 | `LLM_BASE_URL`           | backend  | Any OpenAI-compatible base URL.                                     |
 | `LLM_API_KEY`            | backend  | **Server-side only.** Never prefixed with `NEXT_PUBLIC_`.           |
 | `LLM_MODEL`              | backend  | Model identifier.                                                   |
@@ -313,6 +344,15 @@ answer with redirects, not JSON — OpenID cannot be completed from `fetch`.
 | `GET`  | `/api/stats`              | Aggregates: overall, per hero, per role            |
 | `GET`  | `/api/benchmark`          | Peer comparison. `?hero_id=` picks the hero        |
 | `GET`  | `/api/benchmark/:metric`  | The same, narrowed to one metric                   |
+| `GET`  | `/api/heroes`             | Your hero pool. No provider call — always answers  |
+| `GET`  | `/api/heroes/recommendations` | Scored candidates, best fit first. `?limit=`   |
+| `GET`  | `/api/hero-intelligence`  | Pool, meta and recommendations in one payload      |
+| `GET`  | `/api/coach`              | Measured evidence + the last analysis. No model call |
+| `POST` | `/api/coach/analyze`      | Generates one. Rate limited; the only paid call    |
+| `GET`  | `/api/coach/player-model` | Traits, role affinity and recurring patterns       |
+| `GET`  | `/api/coach/training-focus` | The one focus, its progress, and the runners-up  |
+| `GET`  | `/api/matches/:id/analysis` | The stored analysis for one match, if any        |
+| `POST` | `/api/matches/:id/analyze`  | Generates one for that match                     |
 | `GET`  | `/health`, `/health/live` | Readiness and liveness; no session required        |
 
 Pagination is validated, not clamped: `page` must be ≥ 1 and `limit` must be
@@ -325,12 +365,6 @@ JavaScript number. `dota_account_id` is a plain number — it is 32-bit.
 Planned, in roadmap order:
 
 ```text
-GET    /api/heroes               hero pool                  phase 6
-GET    /api/heroes/recommendations
-GET    /api/hero-intelligence
-POST   /api/matches/:id/analyze  AI analysis (rate-limited) phase 7
-GET    /api/coach                insights, patterns         phase 7-8
-GET    /api/coach/training-focus                            phase 9
 GET    /api/billing              subscription + payments    phase 10
 POST   /api/billing/checkout
 POST   /api/billing/webhook
@@ -352,8 +386,10 @@ through the same type, so no serde or SQL text ever reaches a client:
 | `UNAUTHENTICATED`        | 401    | No session, or an expired/unknown cookie      |
 | `NOT_FOUND`              | 404    | Unknown route, or a match the caller does not own |
 | `DOTA_ACCOUNT_NOT_LINKED`| 409    | Signed in, but no Dota identity is linked     |
-| `RATE_LIMITED`           | 429    | Sync cooldown, or the provider throttling us  |
-| `UPSTREAM_UNAVAILABLE`   | 502    | OpenDota unreachable or malformed             |
+| `PRECONDITION_UNMET`     | 409    | Nothing to analyse yet — no synced matches    |
+| `RATE_LIMITED`           | 429    | Sync or coaching cooldown, or a provider throttling us |
+| `FEATURE_UNAVAILABLE`    | 503    | The feature is not configured on this deployment (no `LLM_API_KEY`) |
+| `UPSTREAM_UNAVAILABLE`   | 502    | OpenDota or the coaching model unreachable, or its answer unusable |
 | `DATABASE_ERROR`         | 500    | Storage failure                               |
 
 Asking for someone else's match returns **404, not 403**: whether an id exists
@@ -531,9 +567,378 @@ and survive a restart rather than costing each deploy a fresh stampede.
 
 ---
 
+## How hero intelligence works
+
+The question is **not** "which hero has the highest win rate". It is:
+
+> Among the heroes that are currently strong, which ones are actually a good
+> fit for *me*?
+
+Three inputs, combined deterministically in Rust:
+
+```text
+HeroMetaProvider ──► meta strength   what the ladder is doing
+matches + metrics ─► hero pool       what you have actually done
+benchmark engine ──► percentile      how you compare on each hero
+                        │
+                        ▼
+                  Hero Fit Score ──► Recommended / Consider / Avoid for now
+```
+
+### Meta strength is not the win rate
+
+Dota win rates live between roughly 45% and 55%, so ordering by win rate alone
+is both unreadable and wrong — a 52% hero nobody picks and a 52% hero a quarter
+of the ladder picks are not equally strong. `meta_strength` is a 0-100 score
+over three signals the provider genuinely publishes:
+
+- **Win rate**, measured against the spread of the whole cohort rather than
+  against 50%.
+- **Pick rate**, by *rank* within the cohort — pick rates are long-tailed, and
+  a linear scale would flatten the entire middle of the roster.
+- **Recent trend**, when the provider publishes one.
+
+Heroes with few recorded picks are pulled toward the neutral midpoint in
+proportion to how short they fall, so 50 games at 70% never outranks 10,000 at
+55%. Ban rate is deliberately **absent**: the only ban figure OpenDota publishes
+comes from professional matches, a different population from the pubs this
+product coaches.
+
+### The hero pool classifies from your history, not from opinion
+
+| Tier      | Meaning                                                      |
+| --------- | ------------------------------------------------------------ |
+| Signature | 10+ matches, win rate clearly above **your own** average      |
+| Comfort   | 5+ matches, results around your average                       |
+| Stretch   | Fewer than 5 matches — not enough evidence to judge yet       |
+| Risk      | 5+ matches, results clearly below your average                |
+
+Relative to the player, not to 50%: a 48% hero is a strength for a 42% player
+and a weakness for a 55% one. A 3-0 hero is `Stretch`, because three games
+cannot tell a signature hero from a lucky streak.
+
+### The fit score explains itself
+
+Five weighted components, defaults from `PRODUCT_SPEC.md` §19 and all
+overridable by environment variable:
+
+| Component        | Default weight | Source                                     |
+| ---------------- | -------------- | ------------------------------------------ |
+| Your performance | 30%            | hero win rate and KDA vs your own baseline  |
+| Meta strength    | 25%            | `HeroMetaProvider`                          |
+| Experience       | 20%            | matches on the hero, square-rooted          |
+| Benchmark        | 15%            | mean percentile from the benchmark engine   |
+| Recent form      | 10%            | your last 10 matches **on that hero**       |
+
+A component whose input is *unknowable* — meta down, no peer distribution — is
+dropped and the remaining weights are renormalized, so an outage lowers
+confidence rather than the score. Every response reports the weights that
+actually produced the total, plus a one-line reason per component.
+
+Zero experience is not unknowable, it is knowledge: an unplayed hero scores 0
+there and is weighted normally. Two rules then override the score itself,
+because the spec forbids the meta from overriding coaching context:
+
+- Under five matches, a hero is **never** a full recommendation, however strong
+  the meta says it is.
+- Five or more recent matches below a 35% win rate demote a hero regardless of
+  its lifetime record.
+
+### Providers
+
+Spec priority is STRATZ, then OpenDota, then an optional Dotabuff. Only
+OpenDota is implemented. STRATZ's GraphQL API answers `403` to unauthenticated
+requests, so its response shape cannot be verified without a token, and
+inventing fields is exactly what the provider rules forbid — `HeroMetaProvider`
+is the seam it drops into once one exists. Dotabuff is not a dependency and no
+HTML is scraped.
+
+OpenDota's `/heroStats` **does** segment by rank bracket, so unlike the
+benchmark endpoint, hero meta is genuinely rank-aware and reports
+`segmented_by: ["rank_bracket"]`. Two honest limits are surfaced rather than
+hidden: the trend arrays are published across all brackets, and the Immortal
+columns are currently empty — asking for Immortal falls back to all brackets
+and says so. Cohorts are cached in `hero_meta_snapshots` (`HERO_META_TTL_HOURS`,
+default 24).
+
+There are no `hero_pool` or `hero_recommendations` tables. Both are pure
+functions of `matches`, `match_metrics` and the meta snapshot; persisting them
+would only create a second, staler answer.
+---
+
+## How the player model works
+
+The spec's framing: a new user gets generic analysis, a player with a hundred
+matches gets something personal. The model is the thing that makes the second
+possible, and the confidence dial is what stops the first pretending to be it.
+
+```text
+matches + metrics ──► detectors ──► patterns ──► stored (first seen, resolved)
+                                        │
+benchmarks + hero pool + roles ─────────┴──────► player model
+```
+
+### A pattern needs evidence, and evidence has a denominator
+
+Every detector answers one question per match with **three** possible answers:
+yes, no, or *not measurable here*. The third is what makes this honest — last
+hits at ten minutes only exist on a parsed replay, so a detector that read a
+missing value as "fine" would report a clean laning phase for a player nobody
+ever measured.
+
+A pattern is reported only when it clears three separate bars:
+
+| Bar               | Value | Why                                             |
+| ----------------- | ----- | ----------------------------------------------- |
+| Measurable in     | 8     | Fewer is a sample, not a history                |
+| Occurrences       | 3     | 3 of 3 is a 100% rate and no evidence           |
+| Rate              | 40%   | 8 of 40 is a solid sample of something rare     |
+
+All three matter independently. Each stored pattern carries both numbers, and
+the sentence the UI and the coach share states them: *"Dies too often in 12 of
+the 20 matches this could be measured in (60%)."* Detectors that stayed silent
+are listed with the count they managed, because silence would otherwise read as
+a pass.
+
+The detectors: death rate, teamfight participation, farming well while absent
+from fights, laning stage (cores), losing a lane you won, late Black King Bar,
+and objective damage. Thresholds are documented constants — the line between
+"worth mentioning" and "not", not a skill rating. Grading against real players
+is the benchmark engine's job.
+
+### Why any of it is stored
+
+Almost all of the model is derived and recomputed on read: strengths and
+weaknesses from benchmark percentiles, role affinity, form, hero confidence.
+Two things about a pattern cannot be:
+
+- **When it was first noticed.** `first_detected_at` survives every
+  recomputation, which is what lets the coach say how long something has been
+  true.
+- **That it used to be true.** A resolved pattern is invisible in the data that
+  resolved it — the whole point is that it no longer happens. Deleting the row
+  would erase the fact that a player fixed something.
+
+So a pattern that stops clearing the threshold is marked `resolved` rather than
+dropped, and one that comes back has its resolution cleared. A pattern that is
+still present overall but markedly rarer lately is `improving`, which is a
+different claim from either.
+
+### Confidence
+
+| Matches | Confidence   | What it means                                   |
+| ------- | ------------ | ----------------------------------------------- |
+| < 10    | `sparse`     | A first impression, not a model                 |
+| 10–29   | `developing` | Enough to see trends, not to be sure of them    |
+| 30+     | `established`| Enough history for the claims to carry weight   |
+
+Patterns feed the coach as evidence with ids like `pattern.high_death_rate`, so
+an insight of kind `recurring_pattern` is pinned to a measured rate with a real
+denominator instead of extrapolating a habit from an average. Detection runs on
+every sync and on every read of the model; it is arithmetic over stored rows
+and never touches a provider.
+
+---
+
+## How the training focus works
+
+The product's question is "what should I do next?", and the spec is blunt about
+both halves of the answer: **one** focus at a time, and **not** simply the
+lowest statistic.
+
+```text
+recurring patterns ─┐
+                    ├─► candidates ─► score ─► one focus ─► progress series
+benchmark gaps ─────┘                               │
+                                                    └─► hero fit modifier
+```
+
+### Selection weighs six things, and says so
+
+Each candidate is scored on the inputs the spec names, and the parts come back
+with the total so "why this one" is answerable:
+
+| Input               | Default weight | What it reads                          |
+| ------------------- | -------------- | -------------------------------------- |
+| Benchmark gap       | 25%            | How far below the peer distribution     |
+| Historical pattern  | 20%            | Whether a detected pattern agrees       |
+| Recent performance  | 15%            | Whether it is getting worse             |
+| Impact              | 20%            | How much moving it tends to change games |
+| Confidence          | 10%            | The sample behind the figure            |
+| Recency             | 10%            | How recently it was observed            |
+
+All six are `FOCUS_WEIGHT_*` environment variables. Impact is a stated
+judgement rather than a derived number — dying less changes more games than
+last-hitting slightly faster — and it lives in one table in the domain rather
+than smeared through a scoring expression.
+
+The effect of weighing them together is that a spectacular benchmark gap on a
+low-impact measure loses to a moderate, corroborated pattern on a high-impact
+one. That is the point.
+
+### A focus is a promise with a number on it
+
+Every focus carries a **measure**, a **baseline**, a **target** and a
+direction, because "is this improving?" has to be arithmetic:
+
+```text
+Dies too often
+  when set   5.0 deaths per 10 minutes
+  now        3.2
+  target     2.0          ← the peer median, not an aspiration
+  progress   60%
+```
+
+Targets are chosen to be reachable: the peer median first, and only the top-20%
+line for a player already past it. A pattern's target is set comfortably below
+the rate at which the detector flags it in the first place.
+
+The progress series buckets the player's history into fixed ten-match slices
+rather than calendar weeks — a player who plays twice one week and thirty times
+the next would otherwise get two points of wildly different weight plotted as
+equals. A bucket nobody can measure is omitted, never zeroed.
+
+### Stability, and knowing when to stop
+
+The chosen focus is **stored**, for two reasons a recompute-on-read design
+would lose:
+
+- A focus recomputed on every request would change whenever a match landed.
+  That is a feed, not a training plan.
+- Progress is measured against where the player stood *when the focus was set*,
+  and that baseline only exists if it was captured at the time.
+
+It is replaced only when it is finished or its evidence has gone:
+
+- **Achieved** — the target is met across a full recent window. The finished
+  focus is excluded from the next selection, so a player is never handed back
+  the goal they just met.
+- **Retired** — the pattern behind it stopped being detected. Not claimed as a
+  success, because it was not one.
+
+`UNIQUE … WHERE status = 'active'` enforces one focus per player in the
+database, rather than trusting the code that writes it.
+
+### Where it shows up
+
+The focus leads the dashboard and the coach page, it is fed to the LLM as
+`focus.current` evidence so the advice points at the same thing the product
+does, and it applies a **bounded modifier** to hero fit — at most ±5 points —
+per `PRODUCT_SPEC.md` §19. The modifier makes no claim about what a hero
+teaches: it only compares the player's own figures on that hero against their
+own overall figures for the thing they are working on. It breaks ties between
+heroes a player could reasonably pick; it never manufactures a recommendation.
+
+One deliberate asymmetry: `GET /api/coach/training-focus` *selects* a focus
+when none is set, and `GET /api/coach` does not. Reading the coach must not
+have the side effect of committing a player to a goal.
+
+---
+
+## How the AI coach works
+
+The rule the whole phase is built to enforce:
+
+> The backend computes. The model interprets. An insight that cannot be traced
+> back to a computed number does not get shown.
+
+```text
+metrics + benchmarks + hero pool
+            │
+            ▼
+   evidence  (sentences this backend composed, each with a stable id)
+            │
+            ▼
+     prompt  (JSON payload: ids, labels, statements, samples)
+            │
+            ▼
+      model  (returns JSON: summary + insights citing evidence ids)
+            │
+            ▼
+ validation  (unknown kind → dropped; unknown citation → stripped;
+            │  no citation left → insight dropped; none left → 502)
+            ▼
+    storage  (coaching_analyses + coaching_insights)
+```
+
+### Evidence is the product, not the prose
+
+Each piece of evidence is a sentence the backend wrote from its own figures:
+
+```text
+overall.record        Across 42 stored matches, you have won 24 and lost 18 (57%).
+benchmark.gold_per_min  On Luna, your gold per minute averages 512; the peer median
+                        is 500 and the top 20% start at 684. That places you at the
+                        46th percentile.
+match.deaths          That is 2.4 deaths per 10 minutes, against your average of 1.4.
+```
+
+The UI renders these verbatim, under the insight that cites them. **Every
+number a user reads comes from this list**, so a model that hallucinates a
+figure hallucinates it into a field nobody displays.
+
+`GET /api/coach` returns the evidence whether or not a model is configured — it
+is useful on its own, and a deployment with no `LLM_API_KEY` still has a
+working coaching page.
+
+### What the model may and may not do
+
+The system prompt forbids arithmetic and requires a citation per insight, but
+instructions are not a mechanism, so the answer is verified on the way back:
+
+- **Kind** must be one of six (`strength`, `weakness`, `recurring_pattern`,
+  `recommendation`, `warning`, `improvement`). An invented seventh is dropped,
+  not mapped to the nearest real one.
+- **Citations** are filtered against the evidence that was actually sent. An
+  insight left with none is dropped; if nothing survives, the whole answer is
+  discarded and the request answers `502` rather than showing unverified advice.
+- **Lengths** are clamped on character boundaries, and the insight count is
+  capped by `COACH_MAX_INSIGHTS`.
+- Answers wrapped in prose or a ```` ```json ```` fence are still read; a
+  truncated one (`finish_reason: "length"`) is rejected with a message that
+  says so.
+
+Nothing user-controlled reaches the model. The payload is built from typed
+domain values and backend-composed sentences only — no persona name, no free
+text, no provider blob — so there is no field for a player to write
+instructions into.
+
+What the validation guarantees is **provenance, not reasoning quality**: every
+figure shown traces to a computed one, and every insight traces to evidence
+that exists. It cannot catch a model that cites the right number and draws a
+poor conclusion from it — that is a question of model choice, and the answer is
+attributed with the model that produced it so a bad one is identifiable.
+
+### Cost control
+
+An LLM call is the only operation in this service that costs money per request,
+so it is the only one with a budget:
+
+- `POST` is the only verb that calls a model. Opening a page never does.
+- Identical evidence is answered from storage. The cache key is a SHA-256 over
+  the prompt version, scope, configured model and every evidence statement, so
+  a repeated question costs nothing and does not consume the daily budget.
+- `COACH_COOLDOWN_SECONDS` bounds frequency, `COACH_DAILY_LIMIT` bounds volume,
+  and both are checked **before** the call rather than after it.
+
+Generation is synchronous: one user-triggered call, bounded by
+`LLM_TIMEOUT_SECONDS`. That needs no job queue. Background or scheduled
+analysis would — and that is where a queue belongs when it arrives.
+
+### Degradation
+
+| What is down          | What still works                                    |
+| --------------------- | --------------------------------------------------- |
+| No `LLM_API_KEY`      | Everything except generation; `GET /api/coach` says so |
+| Model unreachable     | All reads; `POST` answers `502` without leaking the cause |
+| Benchmark provider    | Coaching, with fewer pieces of evidence             |
+| Hero meta provider    | Coaching, with fewer pieces of evidence             |
+
+---
+
 ## How the AI coaching pipeline will work
 
-Phases 6-9 build on the metrics and benchmark layers. The shape is fixed even
+Phases 7-9 build on the metrics, benchmark and hero layers. The shape is fixed even
 where the code is not yet written:
 
 1. **Normalize.** The provider converts payloads into domain models. Duplicates
@@ -542,8 +947,8 @@ where the code is not yet written:
 2. **Compute.** Deterministic metrics, above.
 3. **Benchmark.** Done — see above. Currently hero-scoped; rank and role
    segmentation wait on a provider that offers them.
-4. **Aggregate.** Hero pool and player model, evolving as matches arrive rather
-   than being rebuilt per match.
+4. **Aggregate.** Hero pool done — see above. The player model and recurring
+   patterns evolve as matches arrive rather than being rebuilt per match.
 5. **Analyse.** The LLM receives a compact structured payload — never raw API
    blobs, never user-controlled prompt text — and must return strict JSON that
    is validated before anything is stored.
@@ -632,8 +1037,29 @@ Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
   account shows no persona until the first sync. Avoiding a second provider and
   a second API key was the tradeoff.
 - **`role` is an estimate.** See [Why roles are estimates](#why-roles-are-estimates).
-- **Sync is synchronous.** A sync holds the request open for a few seconds;
-  there is no job queue yet. Phase 7's per-match LLM calls will need one.
+- **Sync and coaching are synchronous.** Both hold the request open for a few
+  seconds; there is no job queue. That is fine while every call is
+  user-triggered and bounded by a timeout — scheduled or background analysis is
+  what would need a queue.
+- **Model quality is a deployment choice.** The prompt carries a worked example
+  because small models otherwise echo the evidence back instead of interpreting
+  it; the validator catches that (`502`, nothing stored), but the feature is
+  only as good as the model behind `LLM_MODEL`.
+- **The coach only knows what the evidence says.** It cannot see drafts, item
+  builds, positioning or comms, so its advice is bounded by what the metrics,
+  benchmark, hero and pattern layers measure.
+- **Most pattern detectors need a parsed replay.** Laning, item timings and
+  the won-lane check only run on matches OpenDota parsed, which is a minority
+  of public games. Those detectors stay silent and say so, with the count they
+  managed, rather than reporting a clean laning phase nobody measured.
+- **Only two benchmark metrics can become a training focus.** A metric
+  qualifies only when the same quantity can be read back out of a single
+  stored match, because otherwise there is no honest way to plot progress
+  against it — so gold per minute and deaths qualify, and the rest reach the
+  coach as evidence but never as a goal.
+- **Pattern thresholds are documented constants, not a skill rating.** Three
+  deaths per 10 minutes is the line between "worth mentioning" and "not worth
+  mentioning". Comparison against real players is the benchmark engine's job.
 - **Time-sliced metrics need a parsed replay.** Last hits at 10, net worth at
   15 and item timings exist only where OpenDota parsed the replay, which is a
   minority of public matches. They are reported as `null`, with

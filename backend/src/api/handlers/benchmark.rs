@@ -67,7 +67,9 @@ pub async fn metric(
         .map(Json)
 }
 
-async fn build(
+/// The comparison itself, shared with the coaching layer so an insight and the
+/// benchmark page can never disagree about a percentile.
+pub(crate) async fn build(
     state: &AppState,
     player: &DotaPlayer,
     hero_id: Option<i32>,
@@ -182,7 +184,11 @@ fn bare_results(values: &PlayerValues, only: Option<BenchmarkMetric>) -> Vec<Ben
 
 /// Map the SQL averages onto metric keys, dropping anything the player has no
 /// data for rather than sending a zero.
-fn player_values(a: &HeroAverages) -> HashMap<BenchmarkMetric, f32> {
+///
+/// Shared with Hero Intelligence, which needs the same player-side values to
+/// derive a per-hero percentile; duplicating the mapping would be a second
+/// place for a unit mismatch to hide.
+pub(crate) fn player_values(a: &HeroAverages) -> HashMap<BenchmarkMetric, f32> {
     let pairs = [
         (BenchmarkMetric::GoldPerMin, a.gold_per_min),
         (BenchmarkMetric::XpPerMin, a.xp_per_min),

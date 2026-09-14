@@ -6,8 +6,12 @@
 //! Phase 4 adds `metrics`; Phase 5 `coaching`.
 
 pub mod benchmark;
+pub mod coaching;
+pub mod hero;
 pub mod r#match;
 pub mod metrics;
 pub mod player;
+pub mod player_model;
 pub mod session;
+pub mod training;
 pub mod user;

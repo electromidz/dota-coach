@@ -101,7 +101,7 @@ pub struct BenchmarkContext {
 ///
 /// This is about the *player's* sample, not the peer group: an average over
 /// three games is noise however good the reference distribution is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
     /// Below the floor. No percentile is claimed.

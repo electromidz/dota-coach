@@ -9,8 +9,8 @@ mod support;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use support::{
-    app, app_with, app_with_config, sample_matches, skip, test_config, unique_steam_id, Failure,
-    MockDota, StubBenchmarks, StubVerifier,
+    app, app_with, app_with_config, app_with_llm, matches_with, sample_matches, skip, test_config,
+    unique_steam_id, Failure, MockDota, StubBenchmarks, StubHeroMeta, StubLlm, StubVerifier,
 };
 
 // ---------------------------------------------------------------------------
@@ -33,6 +33,21 @@ async fn an_anonymous_request_is_rejected_everywhere() {
         ("GET", "/api/stats"),
         ("GET", "/api/benchmark"),
         ("GET", "/api/benchmark/gold_per_min"),
+        ("GET", "/api/heroes"),
+        ("GET", "/api/heroes/recommendations"),
+        ("GET", "/api/hero-intelligence"),
+        ("GET", "/api/coach"),
+        ("GET", "/api/coach/player-model"),
+        ("GET", "/api/coach/training-focus"),
+        ("POST", "/api/coach/analyze"),
+        (
+            "GET",
+            "/api/matches/00000000-0000-0000-0000-000000000000/analysis",
+        ),
+        (
+            "POST",
+            "/api/matches/00000000-0000-0000-0000-000000000000/analyze",
+        ),
     ] {
         let response = if method == "GET" {
             app.get(path, None).await
@@ -963,6 +978,1151 @@ async fn benchmarks_with_no_matches_explain_rather_than_error() {
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.json()["sample"], 0);
     assert!(response.json()["note"].as_str().unwrap().contains("Sync"));
+
+    app.cleanup(&[steam_id]).await;
+}
+
+// ---------------------------------------------------------------------------
+// Hero Intelligence
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_hero_pool_is_built_from_the_players_own_history() {
+    let Some(db) = support::pool().await else {
+        return skip("the_hero_pool_is_built_from_the_players_own_history");
+    };
+    let steam_id = unique_steam_id();
+    // 20 matches on Luna, alternating wins.
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app.get("/api/heroes", Some(&session.token)).await.json();
+
+    let luna = &body["pool"][0];
+    assert_eq!(luna["hero_id"], 35);
+    assert_eq!(luna["matches"], 20);
+    assert_eq!(luna["wins"], 10);
+    assert_eq!(luna["losses"], 10);
+    // Recent form is the last ten on *this* hero, not the last ten overall.
+    assert_eq!(luna["recent_matches"], 10);
+    // Even results against an even baseline: comfort, not signature.
+    assert_eq!(luna["tier"], "comfort");
+    assert_eq!(luna["confidence"], "adequate");
+
+    assert_eq!(body["summary"]["heroes"], 1);
+    assert_eq!(body["summary"]["comfort"], 1);
+    assert_eq!(body["summary"]["established"], 1);
+    assert_eq!(body["recent_window"], 10);
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn the_hero_pool_answers_with_every_provider_down() {
+    let Some(db) = support::pool().await else {
+        return skip("the_hero_pool_answers_with_every_provider_down");
+    };
+    let steam_id = unique_steam_id();
+    let app = support::app_with_providers(
+        db,
+        MockDota::with_matches(sample_matches(10)),
+        StubVerifier::rejecting(),
+        StubBenchmarks::unavailable(),
+        StubHeroMeta::unavailable(),
+        StubLlm::answering(),
+        test_config(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let response = app.get("/api/heroes", Some(&session.token)).await;
+
+    // The player's own repertoire is local data; no outage can withhold it.
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.json()["pool"][0]["matches"], 10);
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_played_hero_outranks_a_stronger_meta_hero_the_player_has_never_touched() {
+    let Some(db) = support::pool().await else {
+        return skip("a_played_hero_outranks_a_stronger_meta_hero_the_player_has_never_touched");
+    };
+    let steam_id = unique_steam_id();
+    // Luna: 20 games, meta strength 80. Puck: never played, meta strength 95.
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app
+        .get("/api/heroes/recommendations", Some(&session.token))
+        .await
+        .json();
+
+    let recommendations = body["recommendations"].as_array().unwrap();
+    let position = |hero_id: i64| {
+        recommendations
+            .iter()
+            .position(|r| r["hero_id"] == hero_id)
+            .unwrap_or_else(|| panic!("hero {hero_id} missing from recommendations"))
+    };
+
+    assert!(
+        position(35) < position(13),
+        "the hero with real history must outrank the stronger meta stranger"
+    );
+
+    let puck = &recommendations[position(13)];
+    assert_ne!(
+        puck["level"], "recommended",
+        "a hero with no games on it is never a full recommendation"
+    );
+    assert_eq!(puck["matches"], 0);
+
+    // And the score explains itself rather than arriving as a bare number.
+    let luna = &recommendations[position(35)];
+    assert!(!luna["parts"].as_array().unwrap().is_empty());
+    assert!(luna["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|p| p["detail"].as_str().is_some_and(|d| !d.is_empty())));
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn hero_intelligence_reports_the_segmentation_it_actually_used() {
+    let Some(db) = support::pool().await else {
+        return skip("hero_intelligence_reports_the_segmentation_it_actually_used");
+    };
+    let steam_id = unique_steam_id();
+    // The stubbed provider reports rank_tier 55 — Legend.
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(12)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app
+        .get("/api/hero-intelligence", Some(&session.token))
+        .await
+        .json();
+
+    assert_eq!(body["meta"]["available"], true);
+    assert_eq!(body["meta"]["bracket"], "legend");
+    assert_eq!(body["meta"]["bracket_label"], "Legend");
+    assert_eq!(body["meta"]["segmented_by"][0], "rank_bracket");
+    assert_eq!(body["meta"]["source"], "StubMeta");
+
+    // The meta section is its own thing, ordered by strength.
+    let leaders = body["meta_leaders"].as_array().unwrap();
+    assert_eq!(leaders[0]["hero_id"], 13, "Puck is the strongest stub hero");
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_meta_outage_degrades_the_recommendations_rather_than_failing() {
+    let Some(db) = support::pool().await else {
+        return skip("a_meta_outage_degrades_the_recommendations_rather_than_failing");
+    };
+    let steam_id = unique_steam_id();
+    let app = support::app_with_providers(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+        StubBenchmarks::serving(),
+        StubHeroMeta::unavailable(),
+        StubLlm::answering(),
+        test_config(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let response = app
+        .get("/api/heroes/recommendations", Some(&session.token))
+        .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    let body = response.json();
+
+    assert_eq!(body["meta"]["available"], false);
+    assert!(body["meta"]["note"]
+        .as_str()
+        .unwrap()
+        .contains("unavailable"));
+    // Scored on the player's own history alone, and honest about it.
+    let luna = &body["recommendations"][0];
+    assert_eq!(luna["hero_id"], 35);
+    assert!(luna["meta_strength"].is_null());
+    assert!(luna["caveats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c.as_str().unwrap().contains("Meta data")));
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn recommendations_honour_a_limit() {
+    let Some(db) = support::pool().await else {
+        return skip("recommendations_honour_a_limit");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(6)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app
+        .get("/api/heroes/recommendations?limit=2", Some(&session.token))
+        .await
+        .json();
+
+    assert_eq!(body["recommendations"].as_array().unwrap().len(), 2);
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn hero_intelligence_with_no_matches_explains_rather_than_erroring() {
+    let Some(db) = support::pool().await else {
+        return skip("hero_intelligence_with_no_matches_explains_rather_than_erroring");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+
+    let response = app
+        .get("/api/hero-intelligence", Some(&session.token))
+        .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    let body = response.json();
+    assert!(body["pool"].as_array().unwrap().is_empty());
+    assert!(body["note"].as_str().unwrap().contains("Sync"));
+    // Meta heroes are still scored, and still held back for lack of history.
+    assert!(!body["recommendations"].as_array().unwrap().is_empty());
+    assert!(body["recommendations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["level"] != "recommended"));
+
+    app.cleanup(&[steam_id]).await;
+}
+
+// ---------------------------------------------------------------------------
+// AI coaching
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reading_the_coach_shows_measured_evidence_without_calling_the_model() {
+    let Some(db) = support::pool().await else {
+        return skip("reading_the_coach_shows_measured_evidence_without_calling_the_model");
+    };
+    let steam_id = unique_steam_id();
+    let llm = StubLlm::answering();
+    let app = app_with_llm(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+        llm.clone(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app.get("/api/coach", Some(&session.token)).await.json();
+
+    assert!(!body["evidence"].as_array().unwrap().is_empty());
+    assert!(body["analysis"].is_null(), "reading never generates");
+    assert_eq!(body["llm_available"], true);
+    assert_eq!(
+        llm.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "opening the coach must not spend a model call"
+    );
+
+    // Every statement is a sentence the backend composed from its own numbers.
+    let record = body["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "overall.record")
+        .expect("career record evidence");
+    assert!(record["statement"]
+        .as_str()
+        .unwrap()
+        .contains("20 stored matches"));
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn an_analysis_may_only_cite_evidence_that_exists() {
+    let Some(db) = support::pool().await else {
+        return skip("an_analysis_may_only_cite_evidence_that_exists");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app
+        .post("/api/coach/analyze", Some(&session.token))
+        .await
+        .json();
+
+    let ids: Vec<&str> = body["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_str().unwrap())
+        .collect();
+
+    let insights = body["analysis"]["insights"].as_array().unwrap();
+    assert!(!insights.is_empty());
+
+    for insight in insights {
+        let refs = insight["evidence"].as_array().unwrap();
+        assert!(
+            !refs.is_empty(),
+            "an insight with no evidence is not stored"
+        );
+        for reference in refs {
+            assert!(
+                ids.contains(&reference.as_str().unwrap()),
+                "insight cited {reference}, which is not in the evidence"
+            );
+        }
+        assert_eq!(insight["kind"], "weakness");
+        assert_eq!(insight["kind_label"], "Weakness");
+    }
+
+    assert_eq!(body["analysis"]["model"], "stub-model");
+    assert_eq!(body["cached"], false);
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn an_answer_citing_invented_evidence_is_rejected_rather_than_shown() {
+    let Some(db) = support::pool().await else {
+        return skip("an_answer_citing_invented_evidence_is_rejected_rather_than_shown");
+    };
+    let steam_id = unique_steam_id();
+    // A plausible-sounding insight about a statistic this backend never
+    // measured — exactly the failure mode the validation exists for.
+    let inventing = StubLlm::with_answer(
+        r#"{"summary": "Ward more.", "insights": [{
+            "kind": "weakness",
+            "title": "You place too few wards",
+            "explanation": "You average 2.1 observer wards per game, well below your bracket.",
+            "evidence": ["benchmark.wards_placed"]
+        }]}"#,
+    );
+    let app = app_with_llm(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+        inventing,
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let response = app.post("/api/coach/analyze", Some(&session.token)).await;
+
+    assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(response.error_code(), "UPSTREAM_UNAVAILABLE");
+    // And nothing was stored, so the next read is still clean.
+    let body = app.get("/api/coach", Some(&session.token)).await.json();
+    assert!(body["analysis"].is_null());
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn asking_the_same_question_twice_costs_one_model_call() {
+    let Some(db) = support::pool().await else {
+        return skip("asking_the_same_question_twice_costs_one_model_call");
+    };
+    let steam_id = unique_steam_id();
+    let llm = StubLlm::answering();
+    let app = app_with_llm(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+        llm.clone(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let first = app
+        .post("/api/coach/analyze", Some(&session.token))
+        .await
+        .json();
+    let second = app
+        .post("/api/coach/analyze", Some(&session.token))
+        .await
+        .json();
+
+    assert_eq!(first["cached"], false);
+    assert_eq!(second["cached"], true);
+    assert_eq!(
+        llm.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "identical evidence must be answered from storage"
+    );
+    assert_eq!(first["analysis"]["id"], second["analysis"]["id"]);
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_deployment_without_a_model_still_serves_the_evidence() {
+    let Some(db) = support::pool().await else {
+        return skip("a_deployment_without_a_model_still_serves_the_evidence");
+    };
+    let steam_id = unique_steam_id();
+    let app = app_with_llm(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+        StubLlm::unconfigured(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let read = app.get("/api/coach", Some(&session.token)).await;
+    assert_eq!(read.status, StatusCode::OK);
+    let body = read.json();
+    assert_eq!(body["llm_available"], false);
+    assert!(!body["evidence"].as_array().unwrap().is_empty());
+    assert!(body["note"].as_str().unwrap().contains("not configured"));
+
+    // Asking for a generation says so plainly rather than pretending.
+    let generate = app.post("/api/coach/analyze", Some(&session.token)).await;
+    assert_eq!(generate.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(generate.error_code(), "FEATURE_UNAVAILABLE");
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_model_outage_fails_the_generation_and_nothing_else() {
+    let Some(db) = support::pool().await else {
+        return skip("a_model_outage_fails_the_generation_and_nothing_else");
+    };
+    let steam_id = unique_steam_id();
+    let app = app_with_llm(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+        StubLlm::unavailable(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let generate = app.post("/api/coach/analyze", Some(&session.token)).await;
+    assert_eq!(generate.status, StatusCode::BAD_GATEWAY);
+    // The provider's own message never reaches the client.
+    assert!(!generate.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("offline"));
+
+    assert_eq!(
+        app.get("/api/coach", Some(&session.token)).await.status,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        app.get("/api/stats", Some(&session.token)).await.status,
+        StatusCode::OK,
+        "an LLM outage must not touch the deterministic API"
+    );
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_match_analysis_reads_the_game_against_the_players_own_averages() {
+    let Some(db) = support::pool().await else {
+        return skip("a_match_analysis_reads_the_game_against_the_players_own_averages");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let matches = app.get("/api/matches", Some(&session.token)).await.json();
+    let id = matches["matches"][0]["id"].as_str().unwrap().to_string();
+
+    // Reading first: no analysis yet, but the evidence is already there.
+    let before = app
+        .get(&format!("/api/matches/{id}/analysis"), Some(&session.token))
+        .await
+        .json();
+    assert!(before["analysis"].is_null());
+
+    let kda = before["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "match.kda")
+        .expect("match KDA evidence");
+    assert!(
+        kda["statement"].as_str().unwrap().contains("your average"),
+        "a single match is only coachable against the player's own baseline: {}",
+        kda["statement"]
+    );
+
+    let generated = app
+        .post(&format!("/api/matches/{id}/analyze"), Some(&session.token))
+        .await;
+    assert_eq!(generated.status, StatusCode::OK);
+    assert_eq!(generated.json()["analysis"]["scope"], "match");
+    assert_eq!(generated.json()["analysis"]["match_id"], id.as_str());
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn one_user_cannot_analyse_another_users_match() {
+    let Some(db) = support::pool().await else {
+        return skip("one_user_cannot_analyse_another_users_match");
+    };
+    let (owner, intruder) = (unique_steam_id(), unique_steam_id());
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(5)),
+        StubVerifier::rejecting(),
+    );
+
+    let owner_session = app.login_as(owner).await;
+    app.post("/api/players/me/sync", Some(&owner_session.token))
+        .await;
+    let matches = app
+        .get("/api/matches", Some(&owner_session.token))
+        .await
+        .json();
+    let id = matches["matches"][0]["id"].as_str().unwrap().to_string();
+
+    let intruder_session = app.login_as(intruder).await;
+    let response = app
+        .post(
+            &format!("/api/matches/{id}/analyze"),
+            Some(&intruder_session.token),
+        )
+        .await;
+
+    // 404, not 403: whether an id exists is not theirs to learn.
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+
+    app.cleanup(&[owner, intruder]).await;
+}
+
+#[tokio::test]
+async fn analysing_an_empty_history_is_a_precondition_error() {
+    let Some(db) = support::pool().await else {
+        return skip("analysing_an_empty_history_is_a_precondition_error");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+
+    let response = app.post("/api/coach/analyze", Some(&session.token)).await;
+
+    assert_eq!(response.status, StatusCode::CONFLICT);
+    assert_eq!(response.error_code(), "PRECONDITION_UNMET");
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn the_cooldown_caps_how_often_a_player_can_spend_a_model_call() {
+    let Some(db) = support::pool().await else {
+        return skip("the_cooldown_caps_how_often_a_player_can_spend_a_model_call");
+    };
+    let steam_id = unique_steam_id();
+    let llm = StubLlm::answering();
+
+    let mut config = test_config();
+    config.coach.cooldown_seconds = 60;
+
+    let app = support::app_with_providers(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+        StubBenchmarks::serving(),
+        StubHeroMeta::serving(),
+        llm.clone(),
+        config,
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    assert_eq!(
+        app.post("/api/coach/analyze", Some(&session.token))
+            .await
+            .status,
+        StatusCode::OK,
+    );
+
+    // A different question — a match rather than the career — so this is not
+    // served from the cache and genuinely wants a second model call.
+    let matches = app.get("/api/matches", Some(&session.token)).await.json();
+    let id = matches["matches"][0]["id"].as_str().unwrap().to_string();
+
+    let second = app
+        .post(&format!("/api/matches/{id}/analyze"), Some(&session.token))
+        .await;
+
+    assert_eq!(second.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(second.error_code(), "RATE_LIMITED");
+    assert_eq!(
+        llm.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the limiter must stop the call, not merely report it"
+    );
+
+    app.cleanup(&[steam_id]).await;
+}
+
+// ---------------------------------------------------------------------------
+// Player model and recurring patterns
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_habit_across_a_real_history_becomes_a_recurring_pattern() {
+    let Some(db) = support::pool().await else {
+        return skip("a_habit_across_a_real_history_becomes_a_recurring_pattern");
+    };
+    let steam_id = unique_steam_id();
+    // 12 matches at 20 deaths in 40 minutes: 5 per 10 minutes, every game.
+    let app = app(
+        db,
+        MockDota::with_matches(matches_with(12, 1, 20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app
+        .get("/api/coach/player-model", Some(&session.token))
+        .await
+        .json();
+
+    let pattern = body["model"]["patterns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "high_death_rate")
+        .expect("the death-rate pattern");
+
+    assert_eq!(pattern["occurrences"], 12);
+    assert_eq!(pattern["measured"], 12);
+    assert_eq!(pattern["status"], "active");
+    // Both denominators are in the sentence, not just the verdict.
+    assert!(pattern["statement"]
+        .as_str()
+        .unwrap()
+        .contains("12 of the 12 matches"));
+    assert!(!pattern["examples"].as_array().unwrap().is_empty());
+    assert!(pattern["first_detected_at"].is_string());
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn no_pattern_is_claimed_from_a_thin_history() {
+    let Some(db) = support::pool().await else {
+        return skip("no_pattern_is_claimed_from_a_thin_history");
+    };
+    let steam_id = unique_steam_id();
+    // Four terrible matches. A real tendency, and nowhere near evidence.
+    let app = app(
+        db,
+        MockDota::with_matches(matches_with(4, 1, 20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app
+        .get("/api/coach/player-model", Some(&session.token))
+        .await
+        .json();
+
+    assert!(body["model"]["patterns"].as_array().unwrap().is_empty());
+    assert_eq!(body["thresholds"]["min_measured"], 8);
+    // And the silence is explained rather than read as a clean bill of health.
+    let unmeasurable = body["unmeasurable"].as_array().unwrap();
+    assert!(unmeasurable
+        .iter()
+        .any(|d| d["id"] == "high_death_rate" && d["measured"] == 4));
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_detector_with_no_data_stays_silent_and_says_why() {
+    let Some(db) = support::pool().await else {
+        return skip("a_detector_with_no_data_stays_silent_and_says_why");
+    };
+    let steam_id = unique_steam_id();
+    // Unparsed replays throughout, so the laning detector can never speak.
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app
+        .get("/api/coach/player-model", Some(&session.token))
+        .await
+        .json();
+
+    let laning = body["unmeasurable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == "low_cs_at_10")
+        .expect("the laning detector reports its own silence");
+
+    assert_eq!(laning["measured"], 0);
+    assert!(!body["model"]["patterns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["id"] == "low_cs_at_10"));
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_pattern_the_player_stops_repeating_is_resolved_not_forgotten() {
+    let Some(db) = support::pool().await else {
+        return skip("a_pattern_the_player_stops_repeating_is_resolved_not_forgotten");
+    };
+    let steam_id = unique_steam_id();
+    let dota = MockDota::with_matches(matches_with(12, 1, 20));
+    let app = app(db, dota.clone(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let before = app
+        .get("/api/coach/player-model", Some(&session.token))
+        .await
+        .json();
+    assert!(before["model"]["patterns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["id"] == "high_death_rate"));
+
+    // Thirty clean matches later, the rate falls under the floor.
+    dota.set_matches(matches_with(30, 100, 2));
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let after = app
+        .get("/api/coach/player-model", Some(&session.token))
+        .await
+        .json();
+
+    assert!(
+        !after["model"]["patterns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "high_death_rate"),
+        "it no longer clears the threshold"
+    );
+
+    // But it is not erased: the fact that it was fixed is invisible in the
+    // data that fixed it, which is why the model is persisted.
+    let resolved = after["model"]["resolved_patterns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "high_death_rate")
+        .expect("the resolved pattern is remembered");
+
+    assert_eq!(resolved["status"], "resolved");
+    assert!(resolved["statement"]
+        .as_str()
+        .unwrap()
+        .contains("no longer meets the threshold"));
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn recurring_patterns_reach_the_coach_as_citable_evidence() {
+    let Some(db) = support::pool().await else {
+        return skip("recurring_patterns_reach_the_coach_as_citable_evidence");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(matches_with(12, 1, 20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app.get("/api/coach", Some(&session.token)).await.json();
+
+    let evidence = body["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "pattern.high_death_rate")
+        .expect("the pattern is evidence the model may cite");
+
+    assert_eq!(evidence["kind"], "pattern");
+    // The sample is what the pattern could be checked in, not the career.
+    assert_eq!(evidence["sample"], 12);
+    assert!(!body["patterns"].as_array().unwrap().is_empty());
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn the_model_says_how_well_it_knows_the_player() {
+    let Some(db) = support::pool().await else {
+        return skip("the_model_says_how_well_it_knows_the_player");
+    };
+    let (new_player, veteran) = (unique_steam_id(), unique_steam_id());
+    let dota = MockDota::with_matches(sample_matches(5));
+    let app = app(db, dota.clone(), StubVerifier::rejecting());
+
+    let session = app.login_as(new_player).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+    let sparse = app
+        .get("/api/coach/player-model", Some(&session.token))
+        .await
+        .json();
+
+    assert_eq!(sparse["model"]["confidence"], "sparse");
+    assert_eq!(sparse["model"]["matches_analyzed"], 5);
+    assert!(sparse["model"]["confidence_caveat"]
+        .as_str()
+        .unwrap()
+        .contains("first impression"));
+
+    dota.set_matches(sample_matches(40));
+    let session = app.login_as(veteran).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+    let established = app
+        .get("/api/coach/player-model", Some(&session.token))
+        .await
+        .json();
+
+    assert_eq!(established["model"]["confidence"], "established");
+    assert_eq!(established["model"]["matches_analyzed"], 40);
+    // Role affinity and recent form are part of knowing someone.
+    assert_eq!(established["model"]["preferred_roles"][0]["role"], "Carry");
+    assert_eq!(established["model"]["recent_form"]["matches"], 10);
+
+    app.cleanup(&[new_player, veteran]).await;
+}
+
+#[tokio::test]
+async fn one_user_never_sees_another_users_model() {
+    let Some(db) = support::pool().await else {
+        return skip("one_user_never_sees_another_users_model");
+    };
+    let (owner, other) = (unique_steam_id(), unique_steam_id());
+    let dota = MockDota::with_matches(matches_with(12, 1, 20));
+    let app = app(db, dota.clone(), StubVerifier::rejecting());
+
+    let owner_session = app.login_as(owner).await;
+    app.post("/api/players/me/sync", Some(&owner_session.token))
+        .await;
+
+    // The second account syncs nothing at all.
+    dota.set_matches(Vec::new());
+    let other_session = app.login_as(other).await;
+    app.post("/api/players/me/sync", Some(&other_session.token))
+        .await;
+
+    let body = app
+        .get("/api/coach/player-model", Some(&other_session.token))
+        .await
+        .json();
+
+    assert_eq!(body["model"]["matches_analyzed"], 0);
+    assert!(body["model"]["patterns"].as_array().unwrap().is_empty());
+
+    app.cleanup(&[owner, other]).await;
+}
+
+// ---------------------------------------------------------------------------
+// Training focus and progress
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_player_gets_exactly_one_training_focus_with_a_checkable_goal() {
+    let Some(db) = support::pool().await else {
+        return skip("the_player_gets_exactly_one_training_focus_with_a_checkable_goal");
+    };
+    let steam_id = unique_steam_id();
+    // A death-heavy history: a pattern, and a benchmark gap, both present.
+    let app = app(
+        db,
+        MockDota::with_matches(matches_with(20, 1, 20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app
+        .get("/api/coach/training-focus", Some(&session.token))
+        .await
+        .json();
+
+    let focus = &body["focus"];
+    assert!(focus.is_object(), "one focus, not a list of weaknesses");
+    assert_eq!(focus["status"], "active");
+
+    // A goal is only a goal if it can be checked.
+    assert!(focus["baseline_value"].is_number());
+    assert!(focus["target_value"].is_number());
+    assert!(focus["measure"].is_string());
+    assert!(focus["higher_is_better"].is_boolean());
+
+    // And the choice explains itself with every input the spec names.
+    let parts: Vec<&str> = focus["score_parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        parts,
+        vec![
+            "gap",
+            "pattern",
+            "recent",
+            "impact",
+            "confidence",
+            "recency"
+        ]
+    );
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn the_focus_is_stable_across_requests() {
+    let Some(db) = support::pool().await else {
+        return skip("the_focus_is_stable_across_requests");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(matches_with(20, 1, 20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let first = app
+        .get("/api/coach/training-focus", Some(&session.token))
+        .await
+        .json();
+    let second = app
+        .get("/api/coach/training-focus", Some(&session.token))
+        .await
+        .json();
+
+    // A focus that changed on every request would be a feed, not a plan.
+    assert_eq!(first["focus"]["id"], second["focus"]["id"]);
+    assert_eq!(first["focus"]["started_at"], second["focus"]["started_at"]);
+    // The baseline is the promise made when it was set, so it does not drift.
+    assert_eq!(
+        first["focus"]["baseline_value"],
+        second["focus"]["baseline_value"]
+    );
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn progress_is_measured_against_where_the_player_started() {
+    let Some(db) = support::pool().await else {
+        return skip("progress_is_measured_against_where_the_player_started");
+    };
+    let steam_id = unique_steam_id();
+    let dota = MockDota::with_matches(matches_with(20, 1, 20));
+    let app = app(db, dota.clone(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let before = app
+        .get("/api/coach/training-focus", Some(&session.token))
+        .await
+        .json();
+    let baseline = before["focus"]["baseline_value"].as_f64().unwrap();
+    let focus_id = before["focus"]["id"].clone();
+
+    // Ten clean matches later.
+    dota.set_matches(matches_with(10, 100, 1));
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let after = app
+        .get("/api/coach/training-focus", Some(&session.token))
+        .await
+        .json();
+
+    // The series plots the measure over time, oldest bucket first.
+    let points = after["progress"]["points"].as_array().unwrap();
+    assert!(points.len() >= 2, "history is bucketed into a trend");
+    assert!(
+        points[0]["value"].as_f64().unwrap() > points[points.len() - 1]["value"].as_f64().unwrap()
+    );
+    assert_eq!(after["progress"]["window"], 10);
+
+    // Either the same focus is now showing progress, or it was met and closed.
+    if after["focus"]["id"] == focus_id {
+        assert_eq!(after["focus"]["baseline_value"].as_f64().unwrap(), baseline);
+        assert!(after["focus"]["progress"].as_f64().unwrap() > 0.0);
+    } else {
+        let history = after["history"].as_array().unwrap();
+        assert!(history.iter().any(|f| f["id"] == focus_id));
+    }
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_finished_focus_is_replaced_and_kept_as_history() {
+    let Some(db) = support::pool().await else {
+        return skip("a_finished_focus_is_replaced_and_kept_as_history");
+    };
+    let steam_id = unique_steam_id();
+    let dota = MockDota::with_matches(matches_with(20, 1, 20));
+    let app = app(db, dota.clone(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let first = app
+        .get("/api/coach/training-focus", Some(&session.token))
+        .await
+        .json();
+    let first_key = first["focus"]["key"].as_str().unwrap().to_string();
+
+    // Twenty clean matches: the death rate over the recent window collapses.
+    dota.set_matches(matches_with(20, 100, 1));
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let after = app
+        .get("/api/coach/training-focus", Some(&session.token))
+        .await
+        .json();
+
+    let history = after["history"].as_array().unwrap();
+    let previous = history
+        .iter()
+        .find(|f| f["key"] == first_key.as_str())
+        .expect("the finished focus is kept");
+
+    assert_ne!(previous["status"], "active");
+    assert!(previous["ended_at"].is_string());
+    // And whatever is active now is not the one just finished.
+    if after["focus"].is_object() {
+        assert_ne!(after["focus"]["key"], first_key.as_str());
+    }
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_player_with_nothing_to_fix_is_told_so_rather_than_given_busywork() {
+    let Some(db) = support::pool().await else {
+        return skip("a_player_with_nothing_to_fix_is_told_so_rather_than_given_busywork");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+
+    let body = app
+        .get("/api/coach/training-focus", Some(&session.token))
+        .await
+        .json();
+
+    assert!(body["focus"].is_null());
+    assert!(body["note"].as_str().unwrap().contains("Sync"));
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn the_current_focus_reaches_the_coach_as_evidence() {
+    let Some(db) = support::pool().await else {
+        return skip("the_current_focus_reaches_the_coach_as_evidence");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(matches_with(20, 1, 20)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    // Reading the coach before a focus exists must not create one.
+    let before = app.get("/api/coach", Some(&session.token)).await.json();
+    assert!(
+        !before["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == "focus.current"),
+        "reading the coach must not commit the player to a goal"
+    );
+
+    // Selecting one is what the training-focus endpoint is for.
+    app.get("/api/coach/training-focus", Some(&session.token))
+        .await;
+
+    let after = app.get("/api/coach", Some(&session.token)).await.json();
+    let evidence = after["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "focus.current")
+        .expect("the focus is evidence the model may cite");
+
+    assert_eq!(evidence["kind"], "focus");
+    assert!(evidence["statement"].as_str().unwrap().contains("target"));
 
     app.cleanup(&[steam_id]).await;
 }

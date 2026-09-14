@@ -32,6 +32,16 @@ pub enum AppError {
     #[error("{0}")]
     TooManyRequests(String),
 
+    /// The request is well-formed, but the account is not in a state that can
+    /// answer it — no synced matches to analyse, for instance.
+    #[error("{0}")]
+    PreconditionUnmet(String),
+
+    /// The feature exists but is not configured on this deployment. Distinct
+    /// from an outage: waiting will not help, and the fix is not the user's.
+    #[error("{0}")]
+    FeatureUnavailable(String),
+
     #[error("database error")]
     Database(#[from] sqlx::Error),
 
@@ -48,6 +58,10 @@ impl AppError {
             AppError::DotaAccountNotLinked => (StatusCode::CONFLICT, "DOTA_ACCOUNT_NOT_LINKED"),
             AppError::Upstream(_) => (StatusCode::BAD_GATEWAY, "UPSTREAM_UNAVAILABLE"),
             AppError::TooManyRequests(_) => (StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED"),
+            AppError::PreconditionUnmet(_) => (StatusCode::CONFLICT, "PRECONDITION_UNMET"),
+            AppError::FeatureUnavailable(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "FEATURE_UNAVAILABLE")
+            }
             AppError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
         }
@@ -57,9 +71,11 @@ impl AppError {
     /// stack traces, SQL, or provider payloads reach the client.
     fn public_message(&self) -> String {
         match self {
-            AppError::BadRequest(m) | AppError::NotFound(m) | AppError::TooManyRequests(m) => {
-                m.clone()
-            }
+            AppError::BadRequest(m)
+            | AppError::NotFound(m)
+            | AppError::TooManyRequests(m)
+            | AppError::PreconditionUnmet(m)
+            | AppError::FeatureUnavailable(m) => m.clone(),
             AppError::Unauthenticated => "Sign in with Steam to continue.".into(),
             AppError::DotaAccountNotLinked => {
                 "No Dota account is linked to your Steam profile yet.".into()

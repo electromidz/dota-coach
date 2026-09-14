@@ -45,6 +45,23 @@ pub async fn upsert(pool: &PgPool, m: &MatchMetrics) -> Result<(), sqlx::Error> 
     Ok(())
 }
 
+/// The stored metrics for one match, if they have been computed.
+///
+/// Returned as an option rather than defaulted: a match whose metrics have not
+/// been computed yet is a different thing from one whose every metric is zero.
+pub async fn for_match(pool: &PgPool, match_id: Uuid) -> Result<Option<MatchMetrics>, sqlx::Error> {
+    sqlx::query_as::<_, MatchMetrics>(
+        "SELECT match_id, metrics_version, kda, kills_per_10, deaths_per_10, assists_per_10,
+                last_hits_per_min, hero_damage_per_min, tower_damage_per_min,
+                kill_participation, gold_advantage_at_10
+           FROM match_metrics
+          WHERE match_id = $1",
+    )
+    .bind(match_id)
+    .fetch_optional(pool)
+    .await
+}
+
 /// Aggregate across every stored match for a player.
 ///
 /// Averages that depend on an optional input are averaged over the rows that

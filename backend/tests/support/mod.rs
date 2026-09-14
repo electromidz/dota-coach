@@ -14,14 +14,22 @@ use axum::http::{header, Request, StatusCode};
 use axum::Router;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use dota_coach_backend::api;
-use dota_coach_backend::config::{AuthConfig, Config, DotaConfig, LlmConfig};
+use dota_coach_backend::config::{
+    AuthConfig, CoachConfig, Config, DotaConfig, HeroConfig, LlmConfig, TrainingConfig,
+};
 use dota_coach_backend::domain::benchmark::{BenchmarkContext, BenchmarkMetric, Bucket, Segment};
+use dota_coach_backend::domain::hero::FitWeights;
+use dota_coach_backend::domain::hero::{HeroMeta, HeroMetaContext};
 use dota_coach_backend::domain::r#match::NormalizedMatch;
 use dota_coach_backend::domain::session::{hash_token, NewToken};
+use dota_coach_backend::domain::training::FocusWeights;
 use dota_coach_backend::services::auth::steam_openid::{OpenIdError, SteamOpenId, SteamVerifier};
 use dota_coach_backend::services::benchmarks::{BenchmarkError, BenchmarkProvider, Distribution};
 use dota_coach_backend::services::dota::{DotaDataProvider, ProviderError, ProviderPlayer};
-use dota_coach_backend::state::AppState;
+use dota_coach_backend::services::hero_meta::strength::MetaWeights;
+use dota_coach_backend::services::hero_meta::{HeroMetaError, HeroMetaProvider, HeroMetaSet};
+use dota_coach_backend::services::llm::{LlmCompletion, LlmError, LlmProvider, LlmRequest};
+use dota_coach_backend::state::{AppState, Providers};
 use http_body_util::BodyExt;
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -264,6 +272,152 @@ impl BenchmarkProvider for StubBenchmarks {
 }
 
 // ---------------------------------------------------------------------------
+// Stub hero meta provider
+// ---------------------------------------------------------------------------
+
+/// Stands in for OpenDota's `/heroStats`.
+///
+/// Meta strengths are set directly rather than scored, so a test asserting on
+/// a recommendation is not also asserting on the strength formula — that has
+/// its own unit tests.
+pub struct StubHeroMeta {
+    failure: Option<&'static str>,
+}
+
+impl StubHeroMeta {
+    /// Luna strong, Crystal Maiden weak — the two heroes `MockDota` knows.
+    /// Puck is a hero no fixture player has ever touched.
+    pub fn serving() -> Arc<Self> {
+        Arc::new(Self { failure: None })
+    }
+
+    pub fn unavailable() -> Arc<Self> {
+        Arc::new(Self {
+            failure: Some("offline"),
+        })
+    }
+}
+
+#[async_trait]
+impl HeroMetaProvider for StubHeroMeta {
+    async fn get_hero_meta(&self, context: &HeroMetaContext) -> Result<HeroMetaSet, HeroMetaError> {
+        if let Some(reason) = self.failure {
+            return Err(HeroMetaError::Unavailable(reason.to_string()));
+        }
+
+        let hero = |id: i32, name: &str, win_rate: f32, strength: f32| HeroMeta {
+            hero_id: id,
+            hero_name: name.to_string(),
+            roles: vec!["Carry".to_string()],
+            picks: 50_000,
+            wins: (50_000.0 * win_rate) as i64,
+            win_rate,
+            pick_rate: 0.05,
+            trend: Some(0.0),
+            meta_strength: strength,
+            bracket: context.bracket,
+        };
+
+        Ok(HeroMetaSet {
+            heroes: vec![
+                hero(35, "Luna", 0.54, 80.0),
+                hero(5, "Crystal Maiden", 0.47, 30.0),
+                hero(13, "Puck", 0.55, 95.0),
+            ],
+            segmented_by: context
+                .bracket
+                .map(|_| vec![Segment::RankBracket])
+                .unwrap_or_default(),
+            bracket: context.bracket,
+            source: "StubMeta",
+            note: None,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stub LLM provider
+// ---------------------------------------------------------------------------
+
+/// Stands in for the coaching model.
+///
+/// Records every call, so a test can prove that a cached analysis costs no
+/// model call at all rather than merely producing the same text.
+#[derive(Default)]
+pub struct StubLlm {
+    pub calls: AtomicUsize,
+    answer: Option<String>,
+    failure: Option<&'static str>,
+    configured: bool,
+}
+
+impl StubLlm {
+    /// Answers with a valid analysis citing evidence every player has.
+    pub fn answering() -> Arc<Self> {
+        Self::with_answer(
+            r#"{
+                "summary": "You win more than you lose, and your farm is the thing holding you back.",
+                "insights": [
+                    {
+                        "kind": "weakness",
+                        "title": "Your farm trails the hero's peers",
+                        "explanation": "Closing the gap is the single biggest lever you have right now.",
+                        "evidence": ["overall.record"]
+                    }
+                ]
+            }"#,
+        )
+    }
+
+    pub fn with_answer(answer: &str) -> Arc<Self> {
+        Arc::new(Self {
+            answer: Some(answer.to_string()),
+            configured: true,
+            ..Default::default()
+        })
+    }
+
+    /// Configured, but the endpoint is down.
+    pub fn unavailable() -> Arc<Self> {
+        Arc::new(Self {
+            failure: Some("offline"),
+            configured: true,
+            ..Default::default()
+        })
+    }
+
+    /// No API key on this deployment.
+    pub fn unconfigured() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+}
+
+#[async_trait]
+impl LlmProvider for StubLlm {
+    fn is_configured(&self) -> bool {
+        self.configured
+    }
+
+    async fn generate(&self, _request: &LlmRequest) -> Result<LlmCompletion, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+
+        if !self.configured {
+            return Err(LlmError::NotConfigured);
+        }
+        if let Some(reason) = self.failure {
+            return Err(LlmError::Unavailable(reason.to_string()));
+        }
+
+        Ok(LlmCompletion {
+            text: self.answer.clone().unwrap_or_default(),
+            model: "stub-model".to_string(),
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
 
@@ -296,6 +450,28 @@ pub fn test_config() -> Config {
             sync_cooldown_seconds: 0,
             request_timeout_seconds: 5,
             benchmark_ttl_hours: 24,
+        },
+        coach: CoachConfig {
+            // Disabled by default so a test can analyse twice in a row; the
+            // limiter has its own test that turns it back on.
+            cooldown_seconds: 0,
+            daily_limit: 20,
+            max_insights: 5,
+            max_output_tokens: 900,
+            temperature: 0.0,
+            request_timeout_seconds: 5,
+            recent_matches: 10,
+        },
+        training: TrainingConfig {
+            focus_weights: FocusWeights::default(),
+            history_limit: 10,
+        },
+        heroes: HeroConfig {
+            meta_ttl_hours: 24,
+            recommendation_limit: 8,
+            benchmark_lookups: 5,
+            fit_weights: FitWeights::default(),
+            meta_weights: MetaWeights::default(),
         },
         llm: LlmConfig {
             base_url: "https://llm.example/v1".into(),
@@ -336,7 +512,25 @@ pub fn app(db: PgPool, dota: Arc<MockDota>, verifier: Arc<dyn SteamVerifier>) ->
     app_with(db, dota, verifier, StubBenchmarks::serving(), test_config())
 }
 
-/// Full control over every stubbed dependency.
+/// The default harness with one specific coaching model.
+pub fn app_with_llm(
+    db: PgPool,
+    dota: Arc<MockDota>,
+    verifier: Arc<dyn SteamVerifier>,
+    llm: Arc<dyn LlmProvider>,
+) -> TestApp {
+    app_with_providers(
+        db,
+        dota,
+        verifier,
+        StubBenchmarks::serving(),
+        StubHeroMeta::serving(),
+        llm,
+        test_config(),
+    )
+}
+
+/// Control over every stubbed dependency except hero meta, which serves.
 pub fn app_with(
     db: PgPool,
     dota: Arc<MockDota>,
@@ -344,15 +538,40 @@ pub fn app_with(
     benchmarks: Arc<dyn BenchmarkProvider>,
     config: Config,
 ) -> TestApp {
+    app_with_providers(
+        db,
+        dota,
+        verifier,
+        benchmarks,
+        StubHeroMeta::serving(),
+        StubLlm::answering(),
+        config,
+    )
+}
+
+/// Full control over every stubbed dependency.
+pub fn app_with_providers(
+    db: PgPool,
+    dota: Arc<MockDota>,
+    verifier: Arc<dyn SteamVerifier>,
+    benchmarks: Arc<dyn BenchmarkProvider>,
+    hero_meta: Arc<dyn HeroMetaProvider>,
+    llm: Arc<dyn LlmProvider>,
+    config: Config,
+) -> TestApp {
     let steam = Arc::new(SteamOpenId::new(reqwest::Client::new(), &config.auth));
 
     let state = AppState::new(
         db.clone(),
         config.clone(),
-        dota,
-        steam,
-        verifier,
-        benchmarks,
+        Providers {
+            dota,
+            steam,
+            steam_verifier: verifier,
+            benchmarks,
+            hero_meta,
+            llm,
+        },
     );
 
     TestApp {
@@ -585,6 +804,24 @@ pub fn sample_match(match_id: i64, started_at: DateTime<Utc>) -> NormalizedMatch
         midas_seconds: None,
         teamfight_participation: None,
     }
+}
+
+/// Matches with a controllable id range and death count.
+///
+/// Pattern detection is about rates across a history, so a test needs to be
+/// able to append a *second* batch that does not collide with the first.
+pub fn matches_with(count: i64, start_id: i64, deaths: i32) -> Vec<NormalizedMatch> {
+    (0..count)
+        .map(|i| {
+            let started = Utc
+                .timestamp_opt(1_700_000_000 + (start_id + i) * 3_600, 0)
+                .single()
+                .unwrap();
+            let mut m = sample_match(start_id + i, started);
+            m.deaths = deaths;
+            m
+        })
+        .collect()
 }
 
 pub fn sample_matches(count: i64) -> Vec<NormalizedMatch> {
