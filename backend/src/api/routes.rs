@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
@@ -10,6 +11,7 @@ use tower_http::trace::TraceLayer;
 use crate::api::handlers::{
     auth, benchmark, billing, coach, health, heroes, matches, players, stats,
 };
+use crate::api::observability;
 use crate::config::Config;
 use crate::error::AppError;
 use crate::state::AppState;
@@ -51,6 +53,9 @@ pub fn build(state: AppState, config: &Config) -> Router {
         // Billing. Reading is always allowed — an expired account still needs
         // to see why it is expired and how to fix it.
         .route("/billing", get(billing::overview))
+        // The offer itself, for the signed-out landing page. No session, and
+        // nothing on it that is not public pricing copy.
+        .route("/billing/plan", get(billing::plan))
         .route("/billing/subscription", get(billing::subscription))
         .route("/billing/payments", get(billing::payments))
         .route("/billing/checkout", post(billing::checkout))
@@ -68,6 +73,9 @@ pub fn build(state: AppState, config: &Config) -> Router {
         .nest("/api", api)
         // Unknown paths answer with the same envelope as everything else.
         .fallback(not_found)
+        // Outermost, so the request id is on every log line the request
+        // produces — including the timeout layer's and the handler's.
+        .layer(middleware::from_fn(observability::request_id))
         .layer(TraceLayer::new_for_http())
         // Upstream Dota/LLM calls must not hold a request open indefinitely;
         // 504 is the honest answer.
@@ -97,5 +105,8 @@ fn cors_layer(config: &Config) -> CorsLayer {
         .allow_origin(origins)
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE])
+        // So a user reporting a failure can quote the id the server logged
+        // against it; without this the browser hides the header.
+        .expose_headers([observability::REQUEST_ID_HEADER])
         .allow_credentials(true)
 }

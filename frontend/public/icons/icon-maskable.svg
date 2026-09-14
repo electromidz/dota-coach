@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Dota Coach">
+  <!-- Maskable variant: same mark, scaled into the central 80% safe zone so a
+       launcher can crop it to a circle or a squircle without clipping the
+       crosshair. The background is full-bleed for the same reason. -->
+  <rect width="512" height="512" fill="#1a1b26"/>
+  <g transform="translate(256 256) scale(0.72)">
+    <circle r="150" fill="none" stroke="#bb9af7" stroke-width="26" opacity="0.9"/>
+    <circle r="54" fill="#7aa2f7"/>
+    <g stroke="#7aa2f7" stroke-width="26" stroke-linecap="round">
+      <path d="M0 -214V-178"/>
+      <path d="M0 178V214"/>
+      <path d="M-214 0H-178"/>
+      <path d="M178 0H214"/>
+    </g>
+  </g>
+</svg>

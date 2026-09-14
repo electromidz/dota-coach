@@ -44,12 +44,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("LLM_API_KEY not set - AI analysis will be unavailable");
     }
 
-    if !config.auth.cookie_secure && !config.auth.public_base_url.starts_with("http://localhost") {
-        tracing::warn!(
-            public_base_url = %config.auth.public_base_url,
-            "COOKIE_SECURE is false outside localhost - session cookies will be sent over plain HTTP"
-        );
-    }
+    warn_about_deployment(&config);
 
     match repositories::session::delete_expired(&pool).await {
         Ok(0) => {}
@@ -142,6 +137,42 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
+}
+
+/// Say out loud, once at boot, what is wrong with this deployment.
+///
+/// None of these are fatal — a misconfigured origin should not stop a service
+/// that is otherwise fine from starting — but every one of them is something an
+/// operator would rather read in the first ten log lines than discover from a
+/// user whose login silently fails.
+fn warn_about_deployment(config: &Config) {
+    let local = |url: &str| url.starts_with("http://localhost") || url.starts_with("http://127.");
+
+    if !config.auth.cookie_secure && !local(&config.auth.public_base_url) {
+        tracing::warn!(
+            public_base_url = %config.auth.public_base_url,
+            "COOKIE_SECURE is false outside localhost - session cookies will be sent over plain HTTP"
+        );
+    }
+
+    // The inverse mistake, and a worse one to debug: `Secure` cookies are
+    // silently dropped by the browser over plain HTTP, so login appears to
+    // succeed and every subsequent request is anonymous.
+    if config.auth.cookie_secure && config.auth.public_base_url.starts_with("http://") {
+        tracing::warn!(
+            public_base_url = %config.auth.public_base_url,
+            "COOKIE_SECURE is true but the public base URL is plain HTTP - the browser will discard the session cookie"
+        );
+    }
+
+    if config.cors_origins.is_empty() {
+        tracing::warn!("CORS_ORIGINS is empty - no browser origin may call this API");
+    } else if !config.cors_origins.contains(&config.auth.frontend_base_url) {
+        tracing::warn!(
+            frontend_base_url = %config.auth.frontend_base_url,
+            "FRONTEND_BASE_URL is not in CORS_ORIGINS - the frontend it redirects to cannot call the API"
+        );
+    }
 }
 
 fn init_tracing() {

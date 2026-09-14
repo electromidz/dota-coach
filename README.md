@@ -12,8 +12,8 @@ The product answers:
 - Which heroes fit me, and which are strong for my rank and role right now?
 - What should I work on next — and is it actually improving?
 
-> Status: **Phase 10 complete.** Sign in with Steam, the backend resolves your
-> Dota account, syncs matches into Postgres, computes a deterministic
+> Status: **Phase 11 complete — the roadmap is done.** Sign in with Steam, the
+> backend resolves your Dota account, syncs matches into Postgres, computes a deterministic
 > version-stamped metrics layer, benchmarks you against the peer distribution
 > for each hero — with percentiles withheld when the sample is too thin to
 > support one — scores which currently-strong heroes actually fit *you*, keeps
@@ -22,8 +22,8 @@ The product answers:
 > tracks whether it is actually improving, and has an LLM interpret all of it
 > into insights it is **not allowed to make numbers up in** — free for fourteen
 > days, then $1/month for the AI coaching, settled in crypto and activated only
-> by a payment the provider signed for. Launch polish follows — see
-> [Roadmap](#roadmap).
+> by a payment the provider signed for. It installs as a PWA, says something
+> useful when it is offline, and tags every request with an id you can quote.
 
 Engineering rules that hold everywhere in this repo:
 
@@ -139,7 +139,8 @@ dota-coach/
 │       ├── db/                # pool creation + migration runner
 │       ├── api/
 │       │   ├── routes.rs      # every route mounted in one place
-│       │   ├── extract.rs     # CurrentUser + rejections via the error envelope
+│       │   ├── extract.rs     # CurrentUser/EntitledUser + JSON rejections
+│       │   ├── observability.rs # request ids and one log line per request
 │       │   └── handlers/
 │       ├── domain/            # user, session, player, match, metrics, hero,
 │       │                       #   coaching, player_model, training
@@ -162,8 +163,11 @@ dota-coach/
 └── frontend/
     ├── Dockerfile
     └── src/
-        ├── app/               # App Router: /, /matches, /benchmark, /heroes, /coach, /billing, /profile
-        ├── components/        # shell / dashboard / matches / heroes / coach / charts / ui
+        ├── app/               # App Router: /, /matches, /benchmark, /heroes,
+        │                      #   /coach, /billing, /profile, /offline
+        │                      #   + manifest, error, not-found, loading states
+        ├── components/        # shell / dashboard / matches / heroes / coach /
+        │                      #   billing / charts / ui
         └── lib/               # api client, types, hero map, formatters
 ```
 
@@ -375,6 +379,7 @@ answer with redirects, not JSON — OpenID cannot be completed from `fetch`.
 
 | Method | Path                        | Description                                      |
 | ------ | --------------------------- | ------------------------------------------------ |
+| `GET`  | `/api/billing/plan`         | The offer alone. **No session** — the landing page quotes it |
 | `GET`  | `/api/billing`              | Entitlement, subscription, plan and charges      |
 | `GET`  | `/api/billing/subscription` | The entitlement on its own                       |
 | `GET`  | `/api/billing/payments`     | This account's charges, newest first             |
@@ -1078,6 +1083,90 @@ all of these as estimates.
 
 ---
 
+## Installable app, offline behaviour and observability
+
+### The PWA
+
+The frontend installs: a manifest route (`/manifest.webmanifest`), maskable and
+plain icons rendered from one SVG, `display: standalone`, and a theme colour
+that matches the shell so an install does not flash white on launch. On a phone
+the installed app is the design the UI was built for in the first place — the
+bottom tab bar is the navigation once there is no URL bar above it.
+
+The service worker (`public/sw.js`) is deliberately small, and deliberately not
+a data cache:
+
+- **`/api/` is never intercepted.** Every response is session-scoped and
+  time-sensitive; a cached benchmark or, worse, a cached entitlement is a wrong
+  answer that looks like a right one.
+- **Only content-hashed assets are cached.** `/_next/static/` URLs change when
+  their bytes change, so a hit is always current.
+- **Navigations fall back rather than go stale.** With no network, `/offline`
+  explains that the connection is missing and the data is not — it makes no
+  claims about the account, because it cannot check any.
+
+`sw.js` itself is served `no-store`, so a deploy cannot be shadowed by a worker
+the browser cached yesterday. In development the worker is unregistered instead
+of installed: a cached shell in front of a hot-reloading dev server is exactly
+the bug whose fix is "hard refresh".
+
+### Error and loading states
+
+Failures are handled where they happen. A component whose request fails renders
+a message in place, because losing a whole page over one unavailable panel is a
+worse answer — that is why an LLM outage still shows the evidence, and a lapsed
+trial still shows every measured number. Above that sit three boundaries for
+the cases a component cannot absorb: `error.tsx` for a render that threw (retry
+plus the digest to quote), `global-error.tsx` for a failure in the root layout
+itself (fully inline, since no CSS or font is guaranteed), and `not-found.tsx`
+for an address that does not exist.
+
+Loading is the same story twice: a route-level `loading.tsx` while the route's
+code is in flight, then each component's own skeleton while its data is. Both
+use the same pulsing panels, so the handover is not a second visible jump.
+
+### Observability
+
+Every request gets an id — the caller's `x-request-id` if it sent a usable one,
+a fresh UUID otherwise — attached to a span around the whole request, echoed
+back in the response, and exposed through CORS so a user can quote it. It
+appears on every log line the request produced, including ones emitted three
+layers down, which is what makes "it failed at 14:05" findable.
+
+An inbound id is treated as untrusted input: it ends up in log lines, so
+anything that is not a short plain token is replaced rather than repeated. A
+newline in a header must never be able to forge a log entry.
+
+One line closes each request with its method, path, status and latency, at
+`error` for a `5xx` and `info` otherwise. `/health` reports the database and
+whether an LLM is configured; `/health/live` never touches a dependency, so a
+liveness probe cannot be taken down by Postgres.
+
+The backend also says what is wrong with a deployment at boot rather than
+leaving it to be discovered from a failing login: `COOKIE_SECURE` disagreeing
+with the scheme in either direction, an empty `CORS_ORIGINS`, or a
+`FRONTEND_BASE_URL` that is not in it.
+
+### Production checklist
+
+| Setting                              | Why                                                     |
+| ------------------------------------ | ------------------------------------------------------- |
+| `COOKIE_SECURE=true`                 | Sessions over HTTPS only. False outside localhost is a warning at boot. |
+| `PUBLIC_BASE_URL` on HTTPS           | Steam signs `return_to`; it must match what the browser reaches. |
+| `CORS_ORIGINS` = the real frontend origin | Credentials are allowed, so a wildcard is impossible.  |
+| `NEXT_PUBLIC_API_URL` = public API URL | Baked into the bundle *and* into the CSP `connect-src`; rebuild the image to change it. |
+| `NOWPAYMENTS_*` set, or `BILLING_ENFORCE` left alone | Otherwise checkout answers `503` — and, by default, nobody is locked out either. |
+| `LLM_API_KEY` set                    | Without it the product runs; only generation is unavailable. |
+| `RUST_LOG`                           | `dota_coach_backend=info` keeps one line per request.   |
+
+The frontend ships strict response headers: a CSP with no external origins
+beyond Valve's image CDNs and the API, `frame-ancestors 'none'`, `nosniff`,
+`strict-origin-when-cross-origin` and a `Permissions-Policy` that turns off
+camera, microphone, geolocation and payment. `'unsafe-eval'` and websockets are
+added **only** in development, where React Refresh needs them.
+
+---
+
 ## Testing
 
 ```bash
@@ -1099,8 +1188,8 @@ Nothing in the suite touches OpenDota or Valve:
   payload parsing (from a recorded `/benchmarks` response), session token
   hashing, cookie flags, OpenID claimed-id parsing, pagination validation,
   entitlement windows and period arithmetic, IPN signature verification
-  (including a reordered body and a tampered amount) and error mapping. No
-  database, no network.
+  (including a reordered body and a tampered amount), request-id sanitization
+  and error mapping. No database, no network.
 - **Integration tests** (`backend/tests/api.rs`) drive the *real* router with a
   mock `DotaDataProvider` and a stub `SteamVerifier`, against a real Postgres.
   They cover the login round trip, rejection of anonymous, forged and expired
@@ -1114,7 +1203,10 @@ Nothing in the suite touches OpenDota or Valve:
   checkout reusing an open charge instead of opening a second invoice, an
   unsigned or forged notification buying nothing, a verified one activating the
   subscription, a redelivery not buying a second month, a wrong amount granting
-  nothing, and a settled charge that a later notification cannot reopen.
+  nothing, and a settled charge that a later notification cannot reopen. The
+  public plan endpoint is covered too: readable without a session, carrying
+  pricing copy and nothing else, and every response — including a `401` —
+  carrying a request id, with a hostile one replaced rather than echoed.
 
 Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
 `SKIPPED <name>` rather than passing silently.
@@ -1202,6 +1294,13 @@ Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
 - **A lost notification needs a visit.** If the provider's callback never
   arrives, the charge is reconciled the next time checkout is opened, not by a
   background poller.
+- **Offline means offline.** The service worker caches the app shell, not data:
+  every number in this product is computed by the backend, so without a
+  connection the app says so rather than showing yesterday's figures. There is
+  no background sync and no push.
+- **Observability stops at logs.** Request ids, one line per request and the
+  health endpoints are all there is — no metrics endpoint, no tracing exporter,
+  no error aggregator.
 - **Integration tests share one database** and clean up after themselves, so a
   test that fails mid-way can leave rows behind.
 - **`npm run lint` is broken** by an ESLint 9 / `eslint-config-next` flat-config
@@ -1226,7 +1325,7 @@ Phases follow `PRODUCT_SPEC.md`.
 | 8     | Player model and recurring pattern detection                   | ✅ done |
 | 9     | Training focus and progress tracking                           | ✅ done |
 | 10    | Trial, entitlements, crypto billing, webhooks                  | ✅ done |
-| 11    | PWA, landing page, production configuration, observability     | next    |
+| 11    | PWA, landing page, production configuration, observability     | ✅ done |
 
 Deliberately **out of scope** until the core loop is excellent: microservices,
 live overlay, voice coaching, replay parsing, native apps, social features,

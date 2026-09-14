@@ -637,3 +637,9 @@ export interface BillingResponse {
 export interface CheckoutResponse {
   payment: Payment;
 }
+
+/** The offer, readable without a session so the landing page can quote it. */
+export interface PlanResponse {
+  plan: Plan;
+  checkout_available: boolean;
+}

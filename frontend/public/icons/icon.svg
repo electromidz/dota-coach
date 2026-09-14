@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Dota Coach">
+  <!-- The app mark at icon scale: the same crosshair the header wears, on the
+       page's own background so an installed icon matches the app it opens. -->
+  <rect width="512" height="512" rx="112" fill="#1a1b26"/>
+  <g transform="translate(256 256)">
+    <circle r="150" fill="none" stroke="#bb9af7" stroke-width="26" opacity="0.9"/>
+    <circle r="54" fill="#7aa2f7"/>
+    <g stroke="#7aa2f7" stroke-width="26" stroke-linecap="round">
+      <path d="M0 -214V-178"/>
+      <path d="M0 178V214"/>
+      <path d="M-214 0H-178"/>
+      <path d="M178 0H214"/>
+    </g>
+  </g>
+</svg>

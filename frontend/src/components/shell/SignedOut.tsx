@@ -1,4 +1,5 @@
 import { Brand } from "@/components/shell/Brand";
+import { TrialOffer } from "@/components/shell/TrialOffer";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
 import { SteamLoginButton } from "@/components/ui/SteamLoginButton";
@@ -90,6 +91,10 @@ export function SignedOut({ loginError }: { loginError?: string }) {
             {message ?? "Please try signing in again."}
           </Alert>
         ) : null}
+
+        {/* The offer sits directly above the only button on the page, so the
+            price is read before the commitment, not after it. */}
+        <TrialOffer className="text-sm leading-relaxed" />
 
         <SteamLoginButton className="w-full" />
 

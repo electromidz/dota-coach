@@ -34,9 +34,26 @@ services:
       DOTA_API_TIMEOUT_SECONDS: ${DOTA_API_TIMEOUT_SECONDS:-10}
       SYNC_MATCH_LIMIT: ${SYNC_MATCH_LIMIT:-20}
       SYNC_COOLDOWN_SECONDS: ${SYNC_COOLDOWN_SECONDS:-30}
+      # Cache lifetimes for the two provider-backed layers.
+      BENCHMARK_TTL_HOURS: ${BENCHMARK_TTL_HOURS:-24}
+      HERO_META_TTL_HOURS: ${HERO_META_TTL_HOURS:-24}
+      # Coaching limits. Every one of these bounds something a user can trigger.
+      COACH_COOLDOWN_SECONDS: ${COACH_COOLDOWN_SECONDS:-30}
+      COACH_DAILY_LIMIT: ${COACH_DAILY_LIMIT:-20}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
+      # Billing. The price lives here and nowhere else.
+      BILLING_PRICE_CENTS: ${BILLING_PRICE_CENTS:-100}
+      BILLING_CURRENCY: ${BILLING_CURRENCY:-usd}
+      BILLING_TRIAL_DAYS: ${BILLING_TRIAL_DAYS:-14}
+      BILLING_PERIOD_DAYS: ${BILLING_PERIOD_DAYS:-30}
+      BILLING_ENFORCE: ${BILLING_ENFORCE:-}
+      NOWPAYMENTS_BASE_URL: ${NOWPAYMENTS_BASE_URL:-https://api.nowpayments.io/v1}
+      NOWPAYMENTS_API_KEY: ${NOWPAYMENTS_API_KEY:-}
+      NOWPAYMENTS_IPN_SECRET: ${NOWPAYMENTS_IPN_SECRET:-}
+      NOWPAYMENTS_PAY_CURRENCY: ${NOWPAYMENTS_PAY_CURRENCY:-}
       RUST_LOG: ${RUST_LOG:-dota_coach_backend=info,tower_http=info}
     ports:
       - "${BACKEND_PORT:-8080}:8080"
@@ -52,9 +69,24 @@ services:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
+    # The backend's own HEALTHCHECK gates this: the frontend is useless until
+    # the API answers, and starting it first only produces a broken first load.
     depends_on:
       backend:
         condition: service_healthy
+    # Node has no curl in the runtime image, so the probe is Node itself.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
 
 volumes:
   postgres-data:

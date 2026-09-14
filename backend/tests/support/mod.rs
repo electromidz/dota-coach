@@ -794,6 +794,14 @@ impl TestApp {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
 
+        let headers: HashMap<String, String> = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+            })
+            .collect();
+
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body = String::from_utf8_lossy(&bytes).to_string();
 
@@ -801,6 +809,7 @@ impl TestApp {
             status,
             cookies,
             location,
+            headers,
             body,
         }
     }
@@ -953,6 +962,7 @@ pub struct TestResponse {
     pub status: StatusCode,
     pub cookies: Vec<String>,
     pub location: Option<String>,
+    pub headers: HashMap<String, String>,
     pub body: String,
 }
 
@@ -967,6 +977,11 @@ impl TestResponse {
             .as_str()
             .unwrap_or("")
             .to_string()
+    }
+
+    /// A response header, lowercased as HTTP/2 and Axum store them.
+    pub fn header(&self, name: &str) -> Option<String> {
+        self.headers.get(&name.to_lowercase()).cloned()
     }
 
     pub fn cookie_value(&self, name: &str) -> Option<String> {

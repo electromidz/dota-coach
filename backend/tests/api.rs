@@ -2861,3 +2861,77 @@ async fn billing_endpoints_require_a_session_but_the_webhook_does_not() {
         .await;
     assert_eq!(response.status, StatusCode::NOT_FOUND);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 11: the public offer, and request identity
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_plan_is_readable_without_a_session_so_the_landing_page_can_quote_it() {
+    let Some(db) = support::pool().await else {
+        return skip("the_plan_is_readable_without_a_session_so_the_landing_page_can_quote_it");
+    };
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+
+    let response = app.get("/api/billing/plan", None).await;
+    assert_eq!(response.status, StatusCode::OK);
+
+    let body = response.json();
+    assert_eq!(body["plan"]["amount_cents"], 100);
+    assert_eq!(body["plan"]["currency"], "usd");
+    assert_eq!(body["plan"]["trial_days"], 14);
+    assert_eq!(body["checkout_available"], true);
+
+    // Pricing copy and nothing else: no account, no provider identifiers.
+    assert!(!response.body.contains("subscription"));
+    assert!(!response.body.contains("secret"));
+}
+
+#[tokio::test]
+async fn every_response_carries_a_request_id() {
+    let Some(db) = support::pool().await else {
+        return skip("every_response_carries_a_request_id");
+    };
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+
+    // Including the ones nobody is signed in for.
+    let response = app.get("/api/stats", None).await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    assert!(
+        response.header("x-request-id").is_some(),
+        "a failed request is exactly the one a user will ask about"
+    );
+}
+
+#[tokio::test]
+async fn a_caller_supplied_request_id_is_echoed_but_only_when_it_is_safe_to_log() {
+    let Some(db) = support::pool().await else {
+        return skip("a_caller_supplied_request_id_is_echoed_but_only_when_it_is_safe_to_log");
+    };
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+
+    let joined = app
+        .post_body(
+            "/api/billing/webhook",
+            "{}",
+            &[("x-request-id", "req-01hzy8abcdef")],
+        )
+        .await;
+    assert_eq!(
+        joined.header("x-request-id").as_deref(),
+        Some("req-01hzy8abcdef"),
+        "a sane correlation id should survive so traces join up"
+    );
+
+    // A header that would forge a log line is replaced, not repeated.
+    let hostile = app
+        .post_body(
+            "/api/billing/webhook",
+            "{}",
+            &[("x-request-id", "abcdefgh ERROR payment settled")],
+        )
+        .await;
+    let echoed = hostile.header("x-request-id").expect("an id is always set");
+    assert_ne!(echoed, "abcdefgh ERROR payment settled");
+    assert!(!echoed.contains(' '));
+}

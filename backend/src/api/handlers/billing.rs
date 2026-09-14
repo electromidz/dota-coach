@@ -34,6 +34,29 @@ pub async fn overview(
 }
 
 #[derive(Serialize)]
+pub struct PlanResponse {
+    pub plan: Plan,
+    /// Whether this deployment can actually sell the plan. The landing page
+    /// says "start your trial" either way; the billing page uses this to stop
+    /// offering a button that would answer `503`.
+    pub checkout_available: bool,
+}
+
+/// `GET /api/billing/plan` — the offer, for visitors who are not signed in.
+///
+/// The only billing route without a session, and deliberately so: the landing
+/// page has to state the trial length and the price, and the alternative is
+/// hard-coding them in the markup where they would drift from
+/// `BILLING_PRICE_CENTS`. It exposes nothing that is not already on the pricing
+/// copy — no account, no provider identifiers, no credentials.
+pub async fn plan(State(state): State<AppState>) -> Json<PlanResponse> {
+    Json(PlanResponse {
+        plan: billing::plan(&state.config.billing),
+        checkout_available: state.payments.is_configured(),
+    })
+}
+
+#[derive(Serialize)]
 pub struct SubscriptionResponse {
     pub entitlement: Entitlement,
     pub subscription: Subscription,

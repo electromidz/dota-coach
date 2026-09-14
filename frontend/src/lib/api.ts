@@ -3,6 +3,7 @@ import type {
   BenchmarkResponse,
   BillingResponse,
   CheckoutResponse,
+  PlanResponse,
   CoachResponse,
   HealthResponse,
   HeroIntelligenceResponse,
@@ -184,6 +185,16 @@ export function getMatch(id: string): Promise<MatchResponse> {
 
 export function logout(): Promise<unknown> {
   return apiFetch("/api/auth/logout", { method: "POST" });
+}
+
+/**
+ * The offer alone — trial length and price — with no session required.
+ *
+ * The landing page has to state both, and the alternative is hard-coding them
+ * where they would drift from what the backend actually charges.
+ */
+export function getPlan(): Promise<PlanResponse> {
+  return apiFetch<PlanResponse>("/api/billing/plan");
 }
 
 /** Trial, subscription, price and charge history in one payload. */
