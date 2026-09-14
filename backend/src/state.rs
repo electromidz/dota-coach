@@ -8,6 +8,7 @@ use crate::services::benchmarks::BenchmarkProvider;
 use crate::services::dota::DotaDataProvider;
 use crate::services::hero_meta::HeroMetaProvider;
 use crate::services::llm::LlmProvider;
+use crate::services::payments::PaymentProvider;
 
 /// Shared, cheaply-cloneable application state handed to every handler.
 ///
@@ -31,6 +32,9 @@ pub struct AppState {
     /// Interpretation only. Every number it is shown was computed here first,
     /// and everything it returns is validated against that evidence.
     pub llm: Arc<dyn LlmProvider>,
+    /// Takes money and signs for it. Never decides what a payment *means* —
+    /// that stays in `services::billing`.
+    pub payments: Arc<dyn PaymentProvider>,
 }
 
 /// Every external dependency, chosen once at startup.
@@ -44,6 +48,7 @@ pub struct Providers {
     pub benchmarks: Arc<dyn BenchmarkProvider>,
     pub hero_meta: Arc<dyn HeroMetaProvider>,
     pub llm: Arc<dyn LlmProvider>,
+    pub payments: Arc<dyn PaymentProvider>,
 }
 
 impl AppState {
@@ -57,6 +62,7 @@ impl AppState {
             benchmarks: providers.benchmarks,
             hero_meta: providers.hero_meta,
             llm: providers.llm,
+            payments: providers.payments,
         }
     }
 }

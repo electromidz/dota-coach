@@ -3,7 +3,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
+use crate::services::billing::BillingError;
 use crate::services::dota::ProviderError;
+use crate::services::payments::PaymentError;
 use crate::services::sync::SyncError;
 
 /// Every error the API can return. Variants carry only what is safe to show a
@@ -42,7 +44,14 @@ pub enum AppError {
     #[error("{0}")]
     FeatureUnavailable(String),
 
-    #[error("database error")]
+    /// Authenticated, but the trial has run out and nothing is paid for.
+    /// Nothing is wrong with the request; the account simply is not entitled.
+    #[error("{0}")]
+    PaymentRequired(String),
+
+    /// The cause is carried in `Display` because that is what reaches the log;
+    /// `public_message` stays generic, so nothing of it reaches the client.
+    #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
     #[error("internal error")]
@@ -62,6 +71,7 @@ impl AppError {
             AppError::FeatureUnavailable(_) => {
                 (StatusCode::SERVICE_UNAVAILABLE, "FEATURE_UNAVAILABLE")
             }
+            AppError::PaymentRequired(_) => (StatusCode::PAYMENT_REQUIRED, "PAYMENT_REQUIRED"),
             AppError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
         }
@@ -75,7 +85,8 @@ impl AppError {
             | AppError::NotFound(m)
             | AppError::TooManyRequests(m)
             | AppError::PreconditionUnmet(m)
-            | AppError::FeatureUnavailable(m) => m.clone(),
+            | AppError::FeatureUnavailable(m)
+            | AppError::PaymentRequired(m) => m.clone(),
             AppError::Unauthenticated => "Sign in with Steam to continue.".into(),
             AppError::DotaAccountNotLinked => {
                 "No Dota account is linked to your Steam profile yet.".into()
@@ -140,6 +151,39 @@ impl From<ProviderError> for AppError {
                 tracing::warn!(detail, "dota provider returned an unexpected shape");
                 AppError::Upstream("the Dota data provider".into())
             }
+        }
+    }
+}
+
+/// Billing failures, translated once. The distinction that matters here is
+/// between "this deployment cannot take money" (503, the operator's problem)
+/// and "this notification does not describe the charge it names" (400, and
+/// nothing is granted).
+impl From<BillingError> for AppError {
+    fn from(error: BillingError) -> Self {
+        match error {
+            BillingError::Provider(PaymentError::NotConfigured) => {
+                AppError::FeatureUnavailable(PaymentError::NotConfigured.user_note().into())
+            }
+            BillingError::Provider(PaymentError::InvalidSignature) => {
+                // Never explained: an unsigned notification is indistinguishable
+                // from someone probing the endpoint.
+                AppError::BadRequest("That notification could not be verified.".into())
+            }
+            BillingError::Provider(PaymentError::RateLimited) => {
+                AppError::TooManyRequests(PaymentError::RateLimited.user_note().into())
+            }
+            BillingError::Provider(e) => {
+                tracing::warn!(error = %e, "payment provider failed");
+                AppError::Upstream("the payment provider".into())
+            }
+            BillingError::UnknownPayment => {
+                AppError::NotFound("No charge matches that notification.".into())
+            }
+            BillingError::AmountMismatch => {
+                AppError::BadRequest("That notification does not match the charge it names.".into())
+            }
+            BillingError::Database(e) => AppError::Database(e),
         }
     }
 }

@@ -4,6 +4,7 @@
 //! the crate builds without a live database (Docker image builds offline).
 
 pub mod benchmark;
+pub mod billing;
 pub mod coaching;
 pub mod dota_player;
 pub mod hero_meta;

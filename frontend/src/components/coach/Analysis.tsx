@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 
 import { EvidenceList } from "@/components/coach/EvidenceList";
@@ -32,13 +33,20 @@ export function Analysis({
   const [current, setCurrent] = useState(data);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** A lapsed trial is a state, not a failure, and gets its own treatment. */
+  const [paywalled, setPaywalled] = useState(false);
 
   async function generate() {
     setBusy(true);
     setError(null);
+    setPaywalled(false);
     try {
       setCurrent(await onGenerate());
     } catch (e) {
+      if (e instanceof ApiError && e.isPaymentRequired) {
+        setPaywalled(true);
+        return;
+      }
       setError(
         e instanceof ApiError ? e.message : "Could not reach the coach.",
       );
@@ -53,6 +61,19 @@ export function Analysis({
     <div className="flex flex-col gap-6">
       {current.note ? <Alert tone="info">{current.note}</Alert> : null}
       {error ? <Alert>{error}</Alert> : null}
+
+      {/* Everything measured on this page is still there; only the model call
+          is gated, so this says what is missing and where to fix it. */}
+      {paywalled ? (
+        <Alert tone="info" title="Your free trial has ended">
+          The measured evidence below is unchanged. To have the coach interpret
+          it again,{" "}
+          <Link href="/billing" className="text-function hover:underline">
+            subscribe
+          </Link>
+          .
+        </Alert>
+      ) : null}
 
       {analysis ? (
         <section className="flex flex-col gap-4">

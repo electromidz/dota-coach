@@ -7,7 +7,9 @@ use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::api::handlers::{auth, benchmark, coach, health, heroes, matches, players, stats};
+use crate::api::handlers::{
+    auth, benchmark, billing, coach, health, heroes, matches, players, stats,
+};
 use crate::config::Config;
 use crate::error::AppError;
 use crate::state::AppState;
@@ -46,6 +48,15 @@ pub fn build(state: AppState, config: &Config) -> Router {
         .route("/coach/analyze", post(coach::analyze))
         .route("/coach/player-model", get(coach::player_model))
         .route("/coach/training-focus", get(coach::training_focus))
+        // Billing. Reading is always allowed — an expired account still needs
+        // to see why it is expired and how to fix it.
+        .route("/billing", get(billing::overview))
+        .route("/billing/subscription", get(billing::subscription))
+        .route("/billing/payments", get(billing::payments))
+        .route("/billing/checkout", post(billing::checkout))
+        // The only unauthenticated write in the API. It is safe because it
+        // believes nothing that is not signed by the payment provider.
+        .route("/billing/webhook", post(billing::webhook))
         .route("/matches", get(matches::list))
         .route("/matches/{id}", get(matches::get))
         .route("/matches/{id}/analysis", get(coach::match_analysis))

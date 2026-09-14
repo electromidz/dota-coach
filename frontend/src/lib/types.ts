@@ -562,3 +562,78 @@ export interface TrainingFocusResponse {
   history: TrainingFocus[];
   note: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Billing
+// ---------------------------------------------------------------------------
+
+/** What the account may do right now. Decided by the backend, never here. */
+export type Entitlement = "free" | "trial" | "pro";
+
+export type SubscriptionStatus =
+  | "trialing"
+  | "active"
+  | "expired"
+  | "cancelled"
+  | "past_due";
+
+export type PaymentStatus =
+  | "pending"
+  | "confirming"
+  | "paid"
+  | "failed"
+  | "expired"
+  | "refunded";
+
+export interface Subscription {
+  id: string;
+  status: SubscriptionStatus;
+  status_label: string;
+  plan: string;
+  trial_started_at: string;
+  trial_ends_at: string;
+  current_period_start: string | null;
+  current_period_end: string | null;
+  provider: string | null;
+  created_at: string;
+}
+
+export interface Payment {
+  id: string;
+  provider: string;
+  status: PaymentStatus;
+  status_label: string;
+  /** Minor units of `currency`. Formatted for display, never recomputed. */
+  amount_cents: number;
+  currency: string;
+  /** The coin the charge was actually paid in, once one is known. */
+  pay_currency: string | null;
+  payment_url: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+/** The offer, as the backend is configured. The price is never hard-coded here. */
+export interface Plan {
+  name: string;
+  amount_cents: number;
+  currency: string;
+  period_days: number;
+  trial_days: number;
+}
+
+export interface BillingResponse {
+  entitlement: Entitlement;
+  subscription: Subscription;
+  plan: Plan;
+  /** Whole days of access left, or null once it has run out. */
+  days_remaining: number | null;
+  access_ends_at: string | null;
+  payments: Payment[];
+  /** False when the deployment has no payment provider configured. */
+  checkout_available: boolean;
+}
+
+export interface CheckoutResponse {
+  payment: Payment;
+}

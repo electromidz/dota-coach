@@ -11,6 +11,8 @@ use dota_coach_backend::services::benchmarks::opendota::OpenDotaBenchmarkProvide
 use dota_coach_backend::services::dota::opendota::OpenDotaProvider;
 use dota_coach_backend::services::hero_meta::opendota::OpenDotaHeroMetaProvider;
 use dota_coach_backend::services::llm::openai::OpenAiLlmProvider;
+use dota_coach_backend::services::payments::nowpayments::NowPaymentsProvider;
+use dota_coach_backend::services::payments::{PaymentProvider, UnconfiguredPaymentProvider};
 use dota_coach_backend::state::{AppState, Providers};
 use dota_coach_backend::{api, db, repositories};
 
@@ -91,6 +93,32 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::time::Duration::from_secs(config.coach.request_timeout_seconds),
     )?;
 
+    // Billing is optional: without credentials the product runs in full, and
+    // only checkout is unavailable. Choosing the null provider here rather than
+    // branching later keeps every caller free of the question.
+    let payments: Arc<dyn PaymentProvider> = if config.billing.is_configured() {
+        NowPaymentsProvider::new(
+            &config.billing,
+            std::time::Duration::from_secs(config.billing.request_timeout_seconds),
+        )?
+    } else {
+        tracing::warn!(
+            "NOWPAYMENTS_API_KEY/NOWPAYMENTS_IPN_SECRET not set - checkout will be unavailable"
+        );
+        Arc::new(UnconfiguredPaymentProvider)
+    };
+
+    if config.billing.enforce {
+        tracing::info!(
+            price_cents = config.billing.price_cents,
+            currency = %config.billing.currency,
+            trial_days = config.billing.trial_days,
+            "billing entitlements are enforced"
+        );
+    } else {
+        tracing::warn!("BILLING_ENFORCE is off - premium features are open to every account");
+    }
+
     let state = AppState::new(
         pool,
         config.clone(),
@@ -101,6 +129,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             benchmarks,
             hero_meta,
             llm,
+            payments,
         },
     );
     let app = api::routes::build(state, &config);

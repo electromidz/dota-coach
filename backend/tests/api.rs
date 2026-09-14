@@ -2390,3 +2390,474 @@ async fn a_malformed_match_id_still_requires_a_session() {
 
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
 }
+
+// ---------------------------------------------------------------------------
+// Billing: trial, entitlement, checkout, settlement
+// ---------------------------------------------------------------------------
+
+/// The body a provider would POST, in this harness's stub vocabulary.
+fn notification(order_id: &str, provider_payment_id: &str, status: &str) -> String {
+    serde_json::json!({
+        "payment_id": provider_payment_id,
+        "order_id": order_id,
+        "status": status,
+        "amount_cents": 100,
+        "currency": "usd",
+    })
+    .to_string()
+}
+
+fn signed() -> [(&'static str, &'static str); 1] {
+    [("x-stub-signature", support::VALID_SIGNATURE)]
+}
+
+/// Open a charge and return `(our order id, the id the notification will use)`.
+///
+/// A notification is matched on the order id, which is ours and is stable from
+/// the moment the charge is reserved — the provider's own id is not knowable
+/// from the response, and with a hosted invoice it changes once the charge
+/// exists, which is exactly why matching does not depend on it.
+async fn checkout(app: &support::TestApp, token: &str) -> (String, String) {
+    let response = app.post("/api/billing/checkout", Some(token)).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+
+    let order_id = response.json()["payment"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let provider_payment_id = format!("provider-{order_id}");
+
+    (order_id, provider_payment_id)
+}
+
+#[tokio::test]
+async fn a_new_account_is_on_a_trial_it_never_asked_for() {
+    let Some(db) = support::pool().await else {
+        return skip("a_new_account_is_on_a_trial_it_never_asked_for");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+
+    let body = app.get("/api/billing", Some(&session.token)).await.json();
+
+    assert_eq!(body["entitlement"], "trial");
+    assert_eq!(body["subscription"]["status"], "trialing");
+    assert_eq!(body["plan"]["trial_days"], 14);
+    // The price lives in configuration and reaches the page from there.
+    assert_eq!(body["plan"]["amount_cents"], 100);
+    assert_eq!(body["plan"]["currency"], "usd");
+    // Fourteen days, minus however much of the first day has already elapsed.
+    assert_eq!(body["days_remaining"], 13);
+    assert!(body["payments"].as_array().unwrap().is_empty());
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn the_trial_is_anchored_to_the_account_not_to_the_first_visit() {
+    let Some(db) = support::pool().await else {
+        return skip("the_trial_is_anchored_to_the_account_not_to_the_first_visit");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+
+    // An account created before this phase existed: no subscription row, and a
+    // creation date well in the past.
+    sqlx::query("UPDATE users SET created_at = now() - interval '20 days' WHERE steam_id = $1")
+        .bind(steam_id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    let body = app.get("/api/billing", Some(&session.token)).await.json();
+
+    // Materialising the row late must not hand out a fresh fortnight.
+    assert_eq!(body["entitlement"], "free");
+    assert_eq!(body["subscription"]["status"], "expired");
+    assert!(body["days_remaining"].is_null());
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn an_expired_trial_closes_generation_but_not_the_product() {
+    let Some(db) = support::pool().await else {
+        return skip("an_expired_trial_closes_generation_but_not_the_product");
+    };
+    let steam_id = unique_steam_id();
+    let app = app_with_llm(
+        db,
+        MockDota::with_matches(sample_matches(12)),
+        StubVerifier::rejecting(),
+        StubLlm::answering(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    // Materialise the trial, then age it out.
+    app.get("/api/billing", Some(&session.token)).await;
+    app.expire_trial(steam_id).await;
+
+    let refused = app.post("/api/coach/analyze", Some(&session.token)).await;
+    assert_eq!(refused.status, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(refused.error_code(), "PAYMENT_REQUIRED");
+
+    // Everything measured keeps answering: an expired trial is not a lockout.
+    for path in [
+        "/api/stats",
+        "/api/coach",
+        "/api/coach/training-focus",
+        "/api/benchmark",
+        "/api/heroes",
+        "/api/hero-intelligence",
+        "/api/matches",
+        "/api/billing",
+    ] {
+        let response = app.get(path, Some(&session.token)).await;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "{path} should survive an expired trial: {}",
+            response.body
+        );
+    }
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_deployment_with_no_payment_provider_cannot_sell_but_does_not_lock_out() {
+    let Some(db) = support::pool().await else {
+        return skip("a_deployment_with_no_payment_provider_cannot_sell_but_does_not_lock_out");
+    };
+    let steam_id = unique_steam_id();
+    let mut config = test_config();
+    // What `BillingConfig::from_env` derives when no credentials are present.
+    config.billing.enforce = false;
+
+    let app = support::app_with_payments(
+        db,
+        MockDota::with_matches(sample_matches(12)),
+        StubVerifier::rejecting(),
+        support::StubPayments::unconfigured(),
+        config,
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+    app.get("/api/billing", Some(&session.token)).await;
+    app.expire_trial(steam_id).await;
+
+    let overview = app.get("/api/billing", Some(&session.token)).await.json();
+    assert_eq!(overview["checkout_available"], false);
+
+    let checkout = app
+        .post("/api/billing/checkout", Some(&session.token))
+        .await;
+    assert_eq!(checkout.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(checkout.error_code(), "FEATURE_UNAVAILABLE");
+
+    // Nobody can pay here, so nobody is told to.
+    let analyze = app.post("/api/coach/analyze", Some(&session.token)).await;
+    assert_ne!(analyze.status, StatusCode::PAYMENT_REQUIRED);
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn checkout_reuses_the_charge_that_is_still_open() {
+    let Some(db) = support::pool().await else {
+        return skip("checkout_reuses_the_charge_that_is_still_open");
+    };
+    let steam_id = unique_steam_id();
+    let payments = support::StubPayments::taking_payments();
+    let app = support::app_with_payments(
+        db,
+        MockDota::default().into(),
+        StubVerifier::rejecting(),
+        payments.clone(),
+        test_config(),
+    );
+    let session = app.login_as(steam_id).await;
+
+    let first = app
+        .post("/api/billing/checkout", Some(&session.token))
+        .await
+        .json();
+    let second = app
+        .post("/api/billing/checkout", Some(&session.token))
+        .await
+        .json();
+
+    assert_eq!(first["payment"]["id"], second["payment"]["id"]);
+    assert_eq!(first["payment"]["amount_cents"], 100);
+    assert!(first["payment"]["payment_url"].as_str().is_some());
+    assert_eq!(
+        payments.created.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "reloading the billing page must not open a second invoice"
+    );
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn an_unsigned_notification_buys_nothing() {
+    let Some(db) = support::pool().await else {
+        return skip("an_unsigned_notification_buys_nothing");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+    let (order_id, provider_payment_id) = checkout(&app, &session.token).await;
+
+    let body = notification(&order_id, &provider_payment_id, "paid");
+
+    for headers in [vec![], vec![("x-stub-signature", "forged")]] {
+        let response = app.post_body("/api/billing/webhook", &body, &headers).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        // The endpoint never explains what a correct signature would look like.
+        assert!(!response.body.contains("valid-signature"));
+    }
+
+    assert_eq!(
+        app.get("/api/billing", Some(&session.token)).await.json()["entitlement"],
+        "trial",
+        "an unverified notification must not activate anything"
+    );
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_verified_payment_activates_the_subscription() {
+    let Some(db) = support::pool().await else {
+        return skip("a_verified_payment_activates_the_subscription");
+    };
+    let steam_id = unique_steam_id();
+    let app = app_with_llm(
+        db,
+        MockDota::with_matches(sample_matches(12)),
+        StubVerifier::rejecting(),
+        StubLlm::answering(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let (order_id, provider_payment_id) = checkout(&app, &session.token).await;
+    app.expire_trial(steam_id).await;
+
+    // Refused before the money arrives.
+    assert_eq!(
+        app.post("/api/coach/analyze", Some(&session.token))
+            .await
+            .status,
+        StatusCode::PAYMENT_REQUIRED
+    );
+
+    let response = app
+        .post_body(
+            "/api/billing/webhook",
+            &notification(&order_id, &provider_payment_id, "paid"),
+            &signed(),
+        )
+        .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.json()["outcome"], "applied");
+
+    let overview = app.get("/api/billing", Some(&session.token)).await.json();
+    assert_eq!(overview["entitlement"], "pro");
+    assert_eq!(overview["subscription"]["status"], "active");
+    assert_eq!(overview["days_remaining"], 29);
+    assert_eq!(overview["payments"][0]["status"], "paid");
+    assert!(overview["payments"][0]["completed_at"].as_str().is_some());
+
+    assert_eq!(
+        app.post("/api/coach/analyze", Some(&session.token))
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_redelivered_notification_does_not_buy_a_second_month() {
+    let Some(db) = support::pool().await else {
+        return skip("a_redelivered_notification_does_not_buy_a_second_month");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+    let (order_id, provider_payment_id) = checkout(&app, &session.token).await;
+    let body = notification(&order_id, &provider_payment_id, "paid");
+
+    let first = app
+        .post_body("/api/billing/webhook", &body, &signed())
+        .await;
+    assert_eq!(first.json()["outcome"], "applied");
+    let (_, after_first) = app.stored_subscription(steam_id).await.unwrap();
+
+    let second = app
+        .post_body("/api/billing/webhook", &body, &signed())
+        .await;
+    assert_eq!(second.status, StatusCode::OK, "a retry is acknowledged");
+    assert_eq!(second.json()["outcome"], "duplicate");
+
+    let (status, after_second) = app.stored_subscription(steam_id).await.unwrap();
+    assert_eq!(status, "active");
+    assert_eq!(
+        after_first, after_second,
+        "the paid window must not move on a redelivery"
+    );
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_notification_for_the_wrong_amount_grants_nothing() {
+    let Some(db) = support::pool().await else {
+        return skip("a_notification_for_the_wrong_amount_grants_nothing");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+    let (order_id, provider_payment_id) = checkout(&app, &session.token).await;
+
+    let underpaid = serde_json::json!({
+        "payment_id": provider_payment_id,
+        "order_id": order_id,
+        "status": "paid",
+        "amount_cents": 1,
+        "currency": "usd",
+    })
+    .to_string();
+
+    let response = app
+        .post_body("/api/billing/webhook", &underpaid, &signed())
+        .await;
+
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    let (status, period_end) = app.stored_subscription(steam_id).await.unwrap();
+    assert_eq!(status, "trialing");
+    assert!(period_end.is_none(), "a cent must not buy a month");
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn a_notification_for_a_charge_we_never_opened_is_a_404() {
+    let Some(db) = support::pool().await else {
+        return skip("a_notification_for_a_charge_we_never_opened_is_a_404");
+    };
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+
+    let response = app
+        .post_body(
+            "/api/billing/webhook",
+            &notification(
+                "00000000-0000-0000-0000-000000000000",
+                "someone-elses-payment",
+                "paid",
+            ),
+            &signed(),
+        )
+        .await;
+
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+    assert_eq!(response.error_code(), "NOT_FOUND");
+}
+
+#[tokio::test]
+async fn a_settled_charge_cannot_be_reopened_by_a_later_notification() {
+    let Some(db) = support::pool().await else {
+        return skip("a_settled_charge_cannot_be_reopened_by_a_later_notification");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+    let (order_id, provider_payment_id) = checkout(&app, &session.token).await;
+
+    app.post_body(
+        "/api/billing/webhook",
+        &notification(&order_id, &provider_payment_id, "paid"),
+        &signed(),
+    )
+    .await;
+
+    // A late "failed" for the same charge: a different event, but the charge
+    // has already finished.
+    let late = app
+        .post_body(
+            "/api/billing/webhook",
+            &notification(&order_id, &provider_payment_id, "failed"),
+            &signed(),
+        )
+        .await;
+
+    assert_eq!(late.status, StatusCode::OK);
+    assert_eq!(late.json()["outcome"], "ignored");
+
+    let overview = app.get("/api/billing", Some(&session.token)).await.json();
+    assert_eq!(overview["entitlement"], "pro");
+    assert_eq!(overview["payments"][0]["status"], "paid");
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn one_user_cannot_see_another_users_charges() {
+    let Some(db) = support::pool().await else {
+        return skip("one_user_cannot_see_another_users_charges");
+    };
+    let payer = unique_steam_id();
+    let stranger = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+
+    let paying_session = app.login_as(payer).await;
+    checkout(&app, &paying_session.token).await;
+
+    let other_session = app.login_as(stranger).await;
+    let body = app
+        .get("/api/billing/payments", Some(&other_session.token))
+        .await
+        .json();
+
+    assert!(body["payments"].as_array().unwrap().is_empty());
+
+    app.cleanup(&[payer, stranger]).await;
+}
+
+#[tokio::test]
+async fn billing_endpoints_require_a_session_but_the_webhook_does_not() {
+    let Some(db) = support::pool().await else {
+        return skip("billing_endpoints_require_a_session_but_the_webhook_does_not");
+    };
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+
+    for path in [
+        "/api/billing",
+        "/api/billing/subscription",
+        "/api/billing/payments",
+    ] {
+        assert_eq!(app.get(path, None).await.status, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        app.post("/api/billing/checkout", None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // The webhook has no session to require — it is authenticated by its
+    // signature, and answers about the charge rather than about the caller.
+    let response = app
+        .post_body(
+            "/api/billing/webhook",
+            &notification("00000000-0000-0000-0000-000000000000", "x", "paid"),
+            &signed(),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+}

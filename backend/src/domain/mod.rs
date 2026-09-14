@@ -6,6 +6,7 @@
 //! Phase 4 adds `metrics`; Phase 5 `coaching`.
 
 pub mod benchmark;
+pub mod billing;
 pub mod coaching;
 pub mod hero;
 pub mod r#match;

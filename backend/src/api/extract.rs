@@ -14,6 +14,7 @@ use crate::domain::session::{hash_token, SESSION_COOKIE};
 use crate::domain::user::User;
 use crate::error::AppError;
 use crate::repositories;
+use crate::services::billing;
 use crate::state::AppState;
 
 /// The authenticated account.
@@ -45,6 +46,43 @@ where
             repositories::session::find_user_by_token_hash(&app_state.db, &hash_token(&token))
                 .await?
                 .ok_or(AppError::Unauthenticated)?;
+
+        Ok(Self(user))
+    }
+}
+
+/// An authenticated account that is entitled to premium features.
+///
+/// The centralized entitlement check: a handler asks for this instead of a
+/// `CurrentUser` and cannot forget the gate, cannot implement it slightly
+/// differently, and never sees an entitlement decision made anywhere but
+/// [`services::billing`](crate::services::billing).
+///
+/// A trial that has run out is a `402`, not a `403`: nothing is wrong with the
+/// request or the caller, and the frontend needs to tell those cases apart to
+/// show a paywall rather than an error.
+pub struct EntitledUser(pub User);
+
+impl<S> FromRequestParts<S> for EntitledUser
+where
+    AppState: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let app_state = AppState::from_ref(state);
+        let CurrentUser(user) = CurrentUser::from_request_parts(parts, state).await?;
+
+        let entitlement =
+            billing::entitlement_for(&app_state.db, &app_state.config.billing, user.id).await?;
+
+        if !entitlement.allows_premium() {
+            tracing::debug!(user_id = %user.id, entitlement = entitlement.slug(), "premium request refused");
+            return Err(AppError::PaymentRequired(
+                "Your free trial has ended. Subscribe to keep using AI coaching.".into(),
+            ));
+        }
 
         Ok(Self(user))
     }

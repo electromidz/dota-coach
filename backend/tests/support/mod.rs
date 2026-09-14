@@ -15,9 +15,11 @@ use axum::Router;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use dota_coach_backend::api;
 use dota_coach_backend::config::{
-    AuthConfig, CoachConfig, Config, DotaConfig, HeroConfig, LlmConfig, TrainingConfig,
+    AuthConfig, BillingConfig, CoachConfig, Config, DotaConfig, HeroConfig, LlmConfig,
+    TrainingConfig,
 };
 use dota_coach_backend::domain::benchmark::{BenchmarkContext, BenchmarkMetric, Bucket, Segment};
+use dota_coach_backend::domain::billing::PaymentStatus;
 use dota_coach_backend::domain::hero::FitWeights;
 use dota_coach_backend::domain::hero::{HeroMeta, HeroMetaContext};
 use dota_coach_backend::domain::r#match::NormalizedMatch;
@@ -29,6 +31,9 @@ use dota_coach_backend::services::dota::{DotaDataProvider, ProviderError, Provid
 use dota_coach_backend::services::hero_meta::strength::MetaWeights;
 use dota_coach_backend::services::hero_meta::{HeroMetaError, HeroMetaProvider, HeroMetaSet};
 use dota_coach_backend::services::llm::{LlmCompletion, LlmError, LlmProvider, LlmRequest};
+use dota_coach_backend::services::payments::{
+    CheckoutRequest, CheckoutSession, PaymentError, PaymentProvider, PaymentUpdate,
+};
 use dota_coach_backend::state::{AppState, Providers};
 use http_body_util::BodyExt;
 use sqlx::PgPool;
@@ -418,6 +423,118 @@ impl LlmProvider for StubLlm {
 }
 
 // ---------------------------------------------------------------------------
+// Mock payment provider
+// ---------------------------------------------------------------------------
+
+/// The signature this stub accepts. Real HMAC verification is NOWPayments'
+/// own problem and is unit-tested there; what these tests need is a provider
+/// that can say yes or no, so the billing rules around it are exercised
+/// without a vendor's crypto in the way.
+pub const VALID_SIGNATURE: &str = "valid-signature";
+
+/// Stands in for a crypto payment provider.
+///
+/// Records every charge it opens, so a test can prove that a second checkout
+/// reuses the first invoice rather than merely returning something similar.
+pub struct StubPayments {
+    pub created: AtomicUsize,
+    configured: bool,
+    /// What `get_payment_status` reports, when a test wants the polling path.
+    polled_status: Mutex<Option<PaymentUpdate>>,
+}
+
+impl StubPayments {
+    pub fn taking_payments() -> Arc<Self> {
+        Arc::new(Self {
+            created: AtomicUsize::new(0),
+            configured: true,
+            polled_status: Mutex::new(None),
+        })
+    }
+
+    /// A deployment with no payment credentials at all.
+    pub fn unconfigured() -> Arc<Self> {
+        Arc::new(Self {
+            created: AtomicUsize::new(0),
+            configured: false,
+            polled_status: Mutex::new(None),
+        })
+    }
+}
+
+#[async_trait]
+impl PaymentProvider for StubPayments {
+    fn name(&self) -> &'static str {
+        "stub"
+    }
+
+    fn is_configured(&self) -> bool {
+        self.configured
+    }
+
+    fn signature_header(&self) -> &'static str {
+        "x-stub-signature"
+    }
+
+    async fn create_payment(
+        &self,
+        request: &CheckoutRequest,
+    ) -> Result<CheckoutSession, PaymentError> {
+        if !self.configured {
+            return Err(PaymentError::NotConfigured);
+        }
+
+        self.created.fetch_add(1, Ordering::SeqCst);
+
+        Ok(CheckoutSession {
+            // Unique per charge: tests share a database, and the provider id is
+            // unique across every row in it.
+            provider_payment_id: format!("stub-payment-{}", Uuid::new_v4()),
+            payment_url: Some(format!("https://pay.example/i/{}", request.order_id)),
+            status: PaymentStatus::Pending,
+        })
+    }
+
+    async fn get_payment_status(
+        &self,
+        provider_payment_id: &str,
+    ) -> Result<PaymentUpdate, PaymentError> {
+        self.polled_status.lock().unwrap().clone().ok_or_else(|| {
+            PaymentError::Unavailable(format!("no stub status for {provider_payment_id}"))
+        })
+    }
+
+    /// Accepts exactly one signature, then reads the body the same way a real
+    /// provider's parser would.
+    fn handle_webhook(
+        &self,
+        signature: Option<&str>,
+        body: &[u8],
+    ) -> Result<PaymentUpdate, PaymentError> {
+        if signature != Some(VALID_SIGNATURE) {
+            return Err(PaymentError::InvalidSignature);
+        }
+
+        let body: serde_json::Value = serde_json::from_slice(body)
+            .map_err(|e| PaymentError::InvalidResponse(e.to_string()))?;
+
+        let provider_payment_id = body["payment_id"].as_str().unwrap_or_default().to_string();
+        let status = PaymentStatus::parse(body["status"].as_str().unwrap_or_default())
+            .ok_or_else(|| PaymentError::InvalidResponse("unknown status".into()))?;
+
+        Ok(PaymentUpdate {
+            event_key: format!("{provider_payment_id}:{}", status.slug()),
+            provider_payment_id,
+            order_id: body["order_id"].as_str().map(str::to_string),
+            status,
+            amount_cents: body["amount_cents"].as_i64(),
+            currency: body["currency"].as_str().map(str::to_string),
+            pay_currency: None,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
 
@@ -478,6 +595,23 @@ pub fn test_config() -> Config {
             api_key: None,
             model: "test".into(),
         },
+        billing: BillingConfig {
+            plan: "pro".into(),
+            price_cents: 100,
+            currency: "usd".into(),
+            trial_days: 14,
+            period_days: 30,
+            history_limit: 20,
+            base_url: "https://pay.example/v1".into(),
+            api_key: Some("test-key".into()),
+            ipn_secret: Some("test-secret".into()),
+            pay_currency: None,
+            request_timeout_seconds: 5,
+            // On by default: the gate is the behaviour under test, and a
+            // harness that silently disabled it would make every paywall
+            // assertion vacuous.
+            enforce: true,
+        },
     }
 }
 
@@ -486,6 +620,10 @@ pub fn test_config() -> Config {
 /// Ownership, uniqueness and pagination are enforced in SQL, so these tests
 /// need a real Postgres. They are skipped loudly rather than silently passing.
 pub async fn pool() -> Option<PgPool> {
+    // Server-side errors are logged rather than returned, so a failing test is
+    // mute without a subscriber. `try_init` because every test calls this.
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+
     let url = std::env::var("TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .ok()?;
@@ -549,7 +687,8 @@ pub fn app_with(
     )
 }
 
-/// Full control over every stubbed dependency.
+/// Full control over every stubbed dependency except payments, which take
+/// money without complaint.
 pub fn app_with_providers(
     db: PgPool,
     dota: Arc<MockDota>,
@@ -557,6 +696,49 @@ pub fn app_with_providers(
     benchmarks: Arc<dyn BenchmarkProvider>,
     hero_meta: Arc<dyn HeroMetaProvider>,
     llm: Arc<dyn LlmProvider>,
+    config: Config,
+) -> TestApp {
+    build(
+        db,
+        dota,
+        verifier,
+        benchmarks,
+        hero_meta,
+        llm,
+        StubPayments::taking_payments(),
+        config,
+    )
+}
+
+/// The default harness with one specific payment provider.
+pub fn app_with_payments(
+    db: PgPool,
+    dota: Arc<MockDota>,
+    verifier: Arc<dyn SteamVerifier>,
+    payments: Arc<dyn PaymentProvider>,
+    config: Config,
+) -> TestApp {
+    build(
+        db,
+        dota,
+        verifier,
+        StubBenchmarks::serving(),
+        StubHeroMeta::serving(),
+        StubLlm::answering(),
+        payments,
+        config,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build(
+    db: PgPool,
+    dota: Arc<MockDota>,
+    verifier: Arc<dyn SteamVerifier>,
+    benchmarks: Arc<dyn BenchmarkProvider>,
+    hero_meta: Arc<dyn HeroMetaProvider>,
+    llm: Arc<dyn LlmProvider>,
+    payments: Arc<dyn PaymentProvider>,
     config: Config,
 ) -> TestApp {
     let steam = Arc::new(SteamOpenId::new(reqwest::Client::new(), &config.auth));
@@ -571,6 +753,7 @@ pub fn app_with_providers(
             benchmarks,
             hero_meta,
             llm,
+            payments,
         },
     );
 
@@ -671,6 +854,58 @@ impl TestApp {
             dota_player_id,
             token: token.plaintext,
         }
+    }
+
+    /// POST a body with arbitrary headers — what a provider notification is.
+    pub async fn post_body(
+        &self,
+        path: &str,
+        body: &str,
+        headers: &[(&str, &str)],
+    ) -> TestResponse {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json");
+
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+
+        self.request(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+    }
+
+    /// Age an account's trial out, the way fourteen days would.
+    pub async fn expire_trial(&self, steam_id: i64) {
+        sqlx::query(
+            "UPDATE subscriptions
+                SET trial_started_at = now() - interval '30 days',
+                    trial_ends_at    = now() - interval '16 days'
+              WHERE user_id = (SELECT id FROM users WHERE steam_id = $1)",
+        )
+        .bind(steam_id)
+        .execute(&self.db)
+        .await
+        .unwrap();
+    }
+
+    /// What the database says about an account's subscription, for assertions
+    /// that must not go through the API that wrote it.
+    pub async fn stored_subscription(
+        &self,
+        steam_id: i64,
+    ) -> Option<(String, Option<DateTime<Utc>>)> {
+        sqlx::query_as(
+            "SELECT s.status, s.current_period_end
+               FROM subscriptions s
+               JOIN users u ON u.id = s.user_id
+              WHERE u.steam_id = $1",
+        )
+        .bind(steam_id)
+        .fetch_optional(&self.db)
+        .await
+        .unwrap()
     }
 
     /// Insert a session that already expired.

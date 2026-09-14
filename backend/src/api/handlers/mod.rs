@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod benchmark;
+pub mod billing;
 pub mod coach;
 pub mod health;
 pub mod heroes;

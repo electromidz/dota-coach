@@ -12,7 +12,7 @@ The product answers:
 - Which heroes fit me, and which are strong for my rank and role right now?
 - What should I work on next — and is it actually improving?
 
-> Status: **Phase 9 complete.** Sign in with Steam, the backend resolves your
+> Status: **Phase 10 complete.** Sign in with Steam, the backend resolves your
 > Dota account, syncs matches into Postgres, computes a deterministic
 > version-stamped metrics layer, benchmarks you against the peer distribution
 > for each hero — with percentiles withheld when the sample is too thin to
@@ -20,8 +20,10 @@ The product answers:
 > a long-term model of your habits that only calls something recurring once it
 > has the evidence, picks **one** training focus with a checkable target and
 > tracks whether it is actually improving, and has an LLM interpret all of it
-> into insights it is **not allowed to make numbers up in**. Billing and launch
-> follow — see [Roadmap](#roadmap).
+> into insights it is **not allowed to make numbers up in** — free for fourteen
+> days, then $1/month for the AI coaching, settled in crypto and activated only
+> by a payment the provider signed for. Launch polish follows — see
+> [Roadmap](#roadmap).
 
 Engineering rules that hold everywhere in this repo:
 
@@ -152,13 +154,15 @@ dota-coach/
 │       │   ├── player_model/  # pattern detectors + long-term model
 │       │   ├── training/      # focus selection, goals, progress series
 │       │   ├── coaching/      # evidence builder, prompt, answer validation
+│       │   ├── billing/       # trial, entitlement, idempotent settlement
+│       │   ├── payments/      # PaymentProvider trait + NOWPayments impl
 │       │   └── llm/           # LlmProvider trait + OpenAI-compatible impl
 │       ├── repositories/      # SQL access, one module per aggregate
 │       └── tests/             # integration suite against the real router
 └── frontend/
     ├── Dockerfile
     └── src/
-        ├── app/               # App Router: /, /matches, /benchmark, /heroes, /coach, /profile
+        ├── app/               # App Router: /, /matches, /benchmark, /heroes, /coach, /billing, /profile
         ├── components/        # shell / dashboard / matches / heroes / coach / charts / ui
         └── lib/               # api client, types, hero map, formatters
 ```
@@ -272,6 +276,18 @@ Copy `.env.example` to `.env`. Never commit the real file.
 | `LLM_BASE_URL`           | backend  | Any OpenAI-compatible base URL.                                     |
 | `LLM_API_KEY`            | backend  | **Server-side only.** Never prefixed with `NEXT_PUBLIC_`.           |
 | `LLM_MODEL`              | backend  | Model identifier.                                                   |
+| `BILLING_PLAN`           | backend  | Plan name stored on the subscription. Default `pro`.                |
+| `BILLING_PRICE_CENTS`    | backend  | The price, in minor units. Default 100 ($1). Must be > 0.           |
+| `BILLING_CURRENCY`       | backend  | ISO-4217 the price is denominated in. Default `usd`.                |
+| `BILLING_TRIAL_DAYS`     | backend  | Trial length, anchored to account creation. Default 14.             |
+| `BILLING_PERIOD_DAYS`    | backend  | Length of one paid period. Default 30.                              |
+| `BILLING_HISTORY_LIMIT`  | backend  | Charges returned by the billing endpoints. Default 20.              |
+| `BILLING_ENFORCE`        | backend  | Whether an expired account loses AI coaching. Defaults to on only when a payment provider is configured. |
+| `NOWPAYMENTS_BASE_URL`   | backend  | Defaults to NOWPayments.                                            |
+| `NOWPAYMENTS_API_KEY`    | backend  | **Server-side only.** Without it, checkout answers `503`.           |
+| `NOWPAYMENTS_IPN_SECRET` | backend  | **Server-side only.** Verifies callbacks; required for checkout.    |
+| `NOWPAYMENTS_PAY_CURRENCY` | backend | Restrict checkout to one coin. Unset lets the payer choose.        |
+| `BILLING_TIMEOUT_SECONDS`| backend  | How long one payment-provider call may take. Default 15.            |
 | `NEXT_PUBLIC_API_URL`    | frontend | Must be reachable **from the browser**, not from inside a container. |
 
 `NEXT_PUBLIC_*` values are inlined into the client bundle at build time, so
@@ -355,20 +371,26 @@ answer with redirects, not JSON — OpenID cannot be completed from `fetch`.
 | `POST` | `/api/matches/:id/analyze`  | Generates one for that match                     |
 | `GET`  | `/health`, `/health/live` | Readiness and liveness; no session required        |
 
+### Billing
+
+| Method | Path                        | Description                                      |
+| ------ | --------------------------- | ------------------------------------------------ |
+| `GET`  | `/api/billing`              | Entitlement, subscription, plan and charges      |
+| `GET`  | `/api/billing/subscription` | The entitlement on its own                       |
+| `GET`  | `/api/billing/payments`     | This account's charges, newest first             |
+| `POST` | `/api/billing/checkout`     | Opens a charge, or returns the one still open    |
+| `POST` | `/api/billing/webhook`      | Provider notification. Signed, not authenticated |
+
+Every billing read is derived server-side from stored timestamps. The webhook is
+the only unauthenticated write in the API, and the only request that can grant
+access — see [Billing](#billing-trial-subscription-and-settlement).
+
 Pagination is validated, not clamped: `page` must be ≥ 1 and `limit` must be
 1–100, otherwise the request is a `400`. The response carries `page`, `limit`,
 `total` and `total_pages`.
 
 `steam_id` is serialized as a **string**: a SteamID64 does not fit in a
 JavaScript number. `dota_account_id` is a plain number — it is 32-bit.
-
-Planned, in roadmap order:
-
-```text
-GET    /api/billing              subscription + payments    phase 10
-POST   /api/billing/checkout
-POST   /api/billing/webhook
-```
 
 ### Errors
 
@@ -933,6 +955,89 @@ analysis would — and that is where a queue belongs when it arrives.
 | Model unreachable     | All reads; `POST` answers `502` without leaking the cause |
 | Benchmark provider    | Coaching, with fewer pieces of evidence             |
 | Hero meta provider    | Coaching, with fewer pieces of evidence             |
+| No payment provider   | Everything; checkout answers `503` and nobody is locked out |
+| Payment provider down | Every read and every measured feature; only checkout fails |
+
+---
+
+## Billing: trial, subscription and settlement
+
+Every account gets a **14-day trial** the moment it exists, and after that
+**$1/month** buys the part of the product that costs money to run. The price,
+the trial length and the period are configuration (`BILLING_PRICE_CENTS`,
+`BILLING_TRIAL_DAYS`, `BILLING_PERIOD_DAYS`); they appear once, in
+`BillingConfig`, and nowhere else in the system.
+
+### What the subscription actually gates
+
+Only the two endpoints that spend a model call: `POST /api/coach/analyze` and
+`POST /api/matches/:id/analyze`. Stats, benchmarks, hero intelligence, the
+player model, patterns, the training focus and every stored analysis keep
+answering after the trial ends. An expired trial is a smaller product, not a
+locked door — and the paywall is expressed once, by the `EntitledUser`
+extractor, so a handler cannot forget it or implement it slightly differently.
+
+### Entitlement is a function of timestamps
+
+`Subscription::entitlement(now)` reads two windows and no status label: a paid
+period that has not elapsed is `Pro`, a running trial is `Trial`, anything else
+is `Free`. That is why `cancelled` and `past_due` behave correctly without
+special cases — cancelling asks us not to renew, not to confiscate days already
+bought — and why a row whose label is stale still grants exactly the right
+thing. The label is corrected on the next read, and entitlement never waited
+for it.
+
+The trial itself is anchored to `users.created_at`, not to when the
+subscription row happened to be materialised, so an account created before this
+phase existed does not receive a fresh fortnight on its first visit to the
+billing page.
+
+### Settlement is signed, validated and idempotent
+
+```text
+POST /api/billing/checkout      reserve a payment row, then open the invoice
+        ↓
+provider hosted page            no card or wallet detail passes through us
+        ↓
+POST /api/billing/webhook       HMAC-SHA512 over the sorted JSON body
+        ↓
+record the event, then apply it in the same transaction
+        ↓
+subscription active until now + BILLING_PERIOD_DAYS
+```
+
+Four rules make that safe:
+
+1. **The row exists before the provider is called.** The `order_id` we hand out
+   is a payment row that already exists, so a notification can never arrive
+   about a charge we have no record of.
+2. **Nothing is believed before the signature.** The body is read as raw bytes
+   and verified with a constant-time HMAC comparison; an unsigned or forged
+   notification is never parsed for anything but the log line, and answers a
+   `400` that explains nothing.
+3. **Amount and currency are re-checked.** A signature proves who sent the
+   message, not that it describes what we asked for. A charge settled for a
+   different figure is refused outright — a cent does not buy a month.
+4. **Every accepted event is recorded under a unique key in the transaction
+   that applies it.** Providers retry; the unique index decides, so a
+   redelivery is acknowledged with `"outcome": "duplicate"` and the paid window
+   does not move.
+
+Renewal extends from the current period end rather than from now, so paying
+early never costs the days already bought. `POST /api/billing/checkout` reuses
+an open charge instead of opening a second invoice, and refreshes it from the
+provider first — which doubles as the recovery path for a notification that
+never arrived, since the provider's own answer goes through exactly the same
+application logic a webhook does.
+
+### The provider boundary
+
+`PaymentProvider` carries three verbs — open a charge, ask about a charge,
+verify a notification — and no vendor vocabulary. NOWPayments' invoice API,
+its status vocabulary and its `x-nowpayments-sig` header live behind it;
+`partially_paid` maps to `confirming`, never to paid, and a status this build
+has never heard of is an error rather than a guess. Swapping providers is a
+`main.rs` change.
 
 ---
 
@@ -992,8 +1097,10 @@ Nothing in the suite touches OpenDota or Valve:
   participation, series indexing, item timings), role estimation, the sync
   planner, percentile interpolation and direction, sample-size gating, provider
   payload parsing (from a recorded `/benchmarks` response), session token
-  hashing, cookie flags, OpenID claimed-id parsing, pagination validation and
-  error mapping. No database, no network.
+  hashing, cookie flags, OpenID claimed-id parsing, pagination validation,
+  entitlement windows and period arithmetic, IPN signature verification
+  (including a reordered body and a tampered amount) and error mapping. No
+  database, no network.
 - **Integration tests** (`backend/tests/api.rs`) drive the *real* router with a
   mock `DotaDataProvider` and a stub `SteamVerifier`, against a real Postgres.
   They cover the login round trip, rejection of anonymous, forged and expired
@@ -1001,7 +1108,13 @@ Nothing in the suite touches OpenDota or Valve:
   provider outages/rate limits/bad responses, pagination, metric computation
   and invalidation, benchmark ranking and its refusal to rank a thin sample,
   and that one user can read neither another's matches nor another's
-  statistics.
+  statistics. Billing is covered end to end: the trial a new account gets
+  without asking, the fact that materialising it late hands out no extra days,
+  the paywall closing generation while every measured endpoint keeps answering,
+  checkout reusing an open charge instead of opening a second invoice, an
+  unsigned or forged notification buying nothing, a verified one activating the
+  subscription, a redelivery not buying a second month, a wrong amount granting
+  nothing, and a settled charge that a later notification cannot reopen.
 
 Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
 `SKIPPED <name>` rather than passing silently.
@@ -1026,6 +1139,13 @@ Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
   own player row; there is no parameter that could widen it.
 - **Internal errors are never serialized** — provider messages, SQL and stack
   detail are logged, and the client gets a fixed, safe message.
+- **Entitlement is never taken from the client.** Trial and subscription state
+  are derived from stored timestamps on every request, and a subscription is
+  activated only by a notification the provider signed — never because a
+  browser returned from a checkout page saying it went well.
+- **The payment webhook trusts only its HMAC.** It is unauthenticated by
+  necessity, verified in constant time over the exact bytes received, validated
+  against the charge it names, and idempotent by a unique index.
 
 ---
 
@@ -1071,6 +1191,17 @@ Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
   `peer_sample_size` is always `null` rather than a guess.
 - **`SYNC_MATCH_LIMIT` caps history at 100.** There is no backfill of a full
   career.
+- **Subscriptions do not auto-renew.** A period is bought by one settled
+  charge; when it lapses the account returns to the measured product and has to
+  check out again. Recurring crypto billing is a provider feature this does not
+  use.
+- **An expired window is corrected lazily.** There is no sweep job: a stale
+  `trialing` or `active` label is rewritten the next time that account is read.
+  Entitlement is computed from the timestamps either way, so the label is
+  bookkeeping.
+- **A lost notification needs a visit.** If the provider's callback never
+  arrives, the charge is reconciled the next time checkout is opened, not by a
+  background poller.
 - **Integration tests share one database** and clean up after themselves, so a
   test that fails mid-way can leave rows behind.
 - **`npm run lint` is broken** by an ESLint 9 / `eslint-config-next` flat-config
@@ -1090,12 +1221,12 @@ Phases follow `PRODUCT_SPEC.md`.
 | 3     | DotaProvider, player resolution, match sync and persistence    | ✅ done |
 | 4     | Deterministic metrics, player/hero/role statistics             | ✅ done |
 | 5     | Benchmark engine: percentiles, top 20%, sample validation      | ✅ done |
-| 6     | Hero intelligence: meta providers, hero pool, fit score        | next    |
-| 7     | AI coach: LLM provider, evidence-based insights                |         |
-| 8     | Player model and recurring pattern detection                   |         |
-| 9     | Training focus and progress tracking                           |         |
-| 10    | Trial, entitlements, crypto billing, webhooks                  |         |
-| 11    | PWA, landing page, production configuration, observability     |         |
+| 6     | Hero intelligence: meta providers, hero pool, fit score        | ✅ done |
+| 7     | AI coach: LLM provider, evidence-based insights                | ✅ done |
+| 8     | Player model and recurring pattern detection                   | ✅ done |
+| 9     | Training focus and progress tracking                           | ✅ done |
+| 10    | Trial, entitlements, crypto billing, webhooks                  | ✅ done |
+| 11    | PWA, landing page, production configuration, observability     | next    |
 
 Deliberately **out of scope** until the core loop is excellent: microservices,
 live overlay, voice coaching, replay parsing, native apps, social features,

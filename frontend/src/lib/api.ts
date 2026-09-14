@@ -1,6 +1,8 @@
 import type {
   ApiErrorBody,
   BenchmarkResponse,
+  BillingResponse,
+  CheckoutResponse,
   CoachResponse,
   HealthResponse,
   HeroIntelligenceResponse,
@@ -31,6 +33,14 @@ export class ApiError extends Error {
   /** The caller has no session; the UI should show the signed-out state. */
   get isUnauthenticated(): boolean {
     return this.code === "UNAUTHENTICATED";
+  }
+
+  /**
+   * The trial has ended and nothing is paid for. A state, not a failure: the
+   * UI should offer the subscription rather than report an error.
+   */
+  get isPaymentRequired(): boolean {
+    return this.code === "PAYMENT_REQUIRED";
   }
 }
 
@@ -174,4 +184,20 @@ export function getMatch(id: string): Promise<MatchResponse> {
 
 export function logout(): Promise<unknown> {
   return apiFetch("/api/auth/logout", { method: "POST" });
+}
+
+/** Trial, subscription, price and charge history in one payload. */
+export function getBilling(): Promise<BillingResponse> {
+  return apiFetch<BillingResponse>("/api/billing");
+}
+
+/**
+ * Open a charge, or get back the one that is still open.
+ *
+ * The backend decides the amount; nothing about the price travels from here.
+ */
+export function startCheckout(): Promise<CheckoutResponse> {
+  return apiFetch<CheckoutResponse>("/api/billing/checkout", {
+    method: "POST",
+  });
 }

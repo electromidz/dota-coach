@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import { ProfileCard } from "@/components/dashboard/ProfileCard";
 import { SignedOut } from "@/components/shell/SignedOut";
 import { Alert } from "@/components/ui/Alert";
@@ -51,6 +53,19 @@ export function Profile() {
             {me.matches_stored}
           </span>
         </Card>
+
+        {/* Billing lives in the account area rather than the primary nav: it
+            is something you visit twice, not every session. */}
+        <Link
+          href="/billing"
+          className="glass flex items-center justify-between gap-3 rounded-card p-5 focus-neon sm:p-6"
+        >
+          <div>
+            <p className="text-sm text-ink">Subscription</p>
+            <p className="text-xs text-ink-faint">Trial, plan and payments</p>
+          </div>
+          <Icon name="coins" className="size-5 text-ink-faint" />
+        </Link>
 
         <Button variant="ghost" onClick={handleLogout} className="w-full">
           <Icon name="logout" className="size-5" />

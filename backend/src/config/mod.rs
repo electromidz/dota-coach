@@ -24,6 +24,7 @@ pub struct Config {
     pub coach: CoachConfig,
     pub training: TrainingConfig,
     pub llm: LlmConfig,
+    pub billing: BillingConfig,
 }
 
 #[allow(dead_code)]
@@ -248,6 +249,95 @@ impl LlmConfig {
     }
 }
 
+/// Trial, price and payment provider.
+///
+/// The price is configuration in the strongest sense: `$1/month` is a launch
+/// decision, not an invariant, and it appears exactly once in the system — in
+/// `BILLING_PRICE_CENTS`. Minor units, because a float price is a rounding bug
+/// waiting for a currency with different conventions.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct BillingConfig {
+    pub plan: String,
+    pub price_cents: i64,
+    /// ISO-4217, lowercase. What the *price* is denominated in; the coin the
+    /// user pays with is a separate, provider-side choice.
+    pub currency: String,
+    pub trial_days: i64,
+    /// Length of one paid period.
+    pub period_days: i64,
+    /// How many charges the payments endpoint returns.
+    pub history_limit: i64,
+
+    pub base_url: String,
+    pub api_key: Option<String>,
+    /// Verifies notifications. Never used to sign an outgoing call.
+    pub ipn_secret: Option<String>,
+    /// Restrict checkout to one coin. `None` lets the user choose.
+    pub pay_currency: Option<String>,
+    pub request_timeout_seconds: u64,
+
+    /// Whether an expired account actually loses premium features.
+    ///
+    /// Defaults to *off* when no payment provider is configured: a deployment
+    /// that cannot take money has no business telling anyone to pay, and
+    /// locking users out with no checkout to reach is worse than giving the
+    /// feature away. Set `BILLING_ENFORCE=true` to enforce anyway.
+    pub enforce: bool,
+}
+
+impl BillingConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let api_key = env::var("NOWPAYMENTS_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let ipn_secret = env::var("NOWPAYMENTS_IPN_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let configured = api_key.is_some() && ipn_secret.is_some();
+
+        let price_cents = checked_price(parsed("BILLING_PRICE_CENTS", 100)?)?;
+
+        Ok(Self {
+            plan: optional("BILLING_PLAN", "pro"),
+            price_cents,
+            currency: optional("BILLING_CURRENCY", "usd").to_lowercase(),
+            trial_days: parsed::<i64>("BILLING_TRIAL_DAYS", 14)?.clamp(0, 365),
+            period_days: parsed::<i64>("BILLING_PERIOD_DAYS", 30)?.clamp(1, 366),
+            history_limit: parsed::<i64>("BILLING_HISTORY_LIMIT", 20)?.clamp(1, 100),
+            base_url: optional("NOWPAYMENTS_BASE_URL", "https://api.nowpayments.io/v1"),
+            api_key,
+            ipn_secret,
+            pay_currency: env::var("NOWPAYMENTS_PAY_CURRENCY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_lowercase()),
+            request_timeout_seconds: parsed::<u64>("BILLING_TIMEOUT_SECONDS", 15)?.clamp(1, 120),
+            enforce: parsed("BILLING_ENFORCE", configured)?,
+        })
+    }
+
+    /// Whether checkout can be offered at all on this deployment.
+    pub fn is_configured(&self) -> bool {
+        self.api_key.as_ref().is_some_and(|k| !k.is_empty())
+            && self.ipn_secret.as_ref().is_some_and(|s| !s.is_empty())
+    }
+}
+
+/// A subscription that costs nothing is a configuration mistake, not a
+/// generous offer: the trial is how the product is given away, and a zero or
+/// negative price would open charges no provider will accept.
+fn checked_price(cents: i64) -> Result<i64, ConfigError> {
+    if cents <= 0 {
+        return Err(ConfigError::Invalid(
+            "BILLING_PRICE_CENTS",
+            "must be greater than zero".into(),
+        ));
+    }
+
+    Ok(cents)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("missing required environment variable: {0}")]
@@ -301,6 +391,7 @@ impl Config {
                 api_key: env::var("LLM_API_KEY").ok().filter(|s| !s.is_empty()),
                 model: optional("LLM_MODEL", "gpt-4o-mini"),
             },
+            billing: BillingConfig::from_env()?,
         })
     }
 
@@ -389,8 +480,42 @@ mod tests {
             coach: CoachConfig::from_env().unwrap(),
             training: TrainingConfig::from_env().unwrap(),
             llm: llm(None),
+            billing: BillingConfig::from_env().unwrap(),
         };
         assert_eq!(config.bind_address(), "127.0.0.1:9000");
+    }
+
+    #[test]
+    fn billing_defaults_to_the_launch_offer() {
+        let billing = BillingConfig::from_env().unwrap();
+
+        assert_eq!(billing.price_cents, 100, "$1");
+        assert_eq!(billing.currency, "usd");
+        assert_eq!(billing.trial_days, 14);
+        assert_eq!(billing.period_days, 30);
+    }
+
+    #[test]
+    fn a_free_price_is_a_configuration_mistake_worth_failing_the_boot_for() {
+        assert_eq!(checked_price(100).unwrap(), 100);
+        assert!(matches!(
+            checked_price(0),
+            Err(ConfigError::Invalid("BILLING_PRICE_CENTS", _))
+        ));
+        assert!(matches!(
+            checked_price(-1),
+            Err(ConfigError::Invalid("BILLING_PRICE_CENTS", _))
+        ));
+    }
+
+    #[test]
+    fn a_deployment_that_cannot_take_money_does_not_lock_anyone_out() {
+        // No provider credentials in the test environment, so enforcement is
+        // off by default and checkout reports itself unavailable.
+        let billing = BillingConfig::from_env().unwrap();
+
+        assert!(!billing.is_configured());
+        assert!(!billing.enforce);
     }
 
     #[test]

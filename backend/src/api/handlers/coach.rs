@@ -16,7 +16,7 @@ use chrono::{Duration, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::api::extract::{AppPath, CurrentUser};
+use crate::api::extract::{AppPath, CurrentUser, EntitledUser};
 use crate::api::handlers::{benchmark, heroes};
 use crate::domain::coaching::{AnalysisScope, CoachingAnalysis, Evidence};
 use crate::domain::player::DotaPlayer;
@@ -270,9 +270,14 @@ pub async fn training_focus(
 }
 
 /// `POST /api/coach/analyze`
+///
+/// Premium: generating is the one thing in this API that costs money per call,
+/// so it is the one thing the trial gates. Everything measured — stats,
+/// benchmarks, patterns, the stored analysis — keeps answering after the trial
+/// ends.
 pub async fn analyze(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
 ) -> AppResult<Json<CoachResponse>> {
     let player = load_linked_player(&state, &user).await?;
     let (evidence, patterns) = player_evidence(&state, &user, &player).await?;
@@ -289,9 +294,11 @@ pub async fn analyze(
 }
 
 /// `POST /api/matches/:id/analyze`
+///
+/// Premium, for the same reason as `analyze`: it spends a model call.
 pub async fn analyze_match(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
     AppPath(id): AppPath<Uuid>,
 ) -> AppResult<Json<CoachResponse>> {
     let player = load_linked_player(&state, &user).await?;
