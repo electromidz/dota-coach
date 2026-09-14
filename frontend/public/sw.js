@@ -81,7 +81,11 @@ self.addEventListener("fetch", (event) => {
 
   // Content-hashed build output: the URL changes when the bytes change, so a
   // cache hit is always correct and always current.
-  if (url.pathname.startsWith("/_next/static/") || url.pathname.startsWith("/icons/")) {
+  if (
+    url.pathname.startsWith("/_next/static/") ||
+    url.pathname.startsWith("/icons/") ||
+    url.pathname.startsWith("/backgrounds/")
+  ) {
     event.respondWith(
       caches.match(request).then((cached) => {
         if (cached) return cached;

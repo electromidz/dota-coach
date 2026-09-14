@@ -1,4 +1,5 @@
 import { Brand } from "@/components/shell/Brand";
+import { LandingBackdrop } from "@/components/shell/LandingBackdrop";
 import { TrialOffer } from "@/components/shell/TrialOffer";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
@@ -45,6 +46,7 @@ export function SignedOut({ loginError }: { loginError?: string }) {
 
   return (
     <div className="flex flex-col gap-8 py-6 lg:grid lg:grid-cols-2 lg:items-center lg:gap-16 lg:py-16">
+      <LandingBackdrop />
       <div className="flex flex-col gap-4">
         <Brand className="mb-2 lg:mb-4" />
 

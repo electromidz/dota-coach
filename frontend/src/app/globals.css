@@ -147,6 +147,92 @@ body::before {
     );
 }
 
+/* Signed-out backdrop: map art behind the whole viewport.
+   ------------------------------------------------------------------------
+   Only the pre-login screen wears it. Inside the app the ambient field stays
+   plain, because every screen behind it is dense with numbers and a photograph
+   under a table is noise.
+
+   Two layers, and the order matters:
+
+     1. the art, fixed and cover-cropped, anchored at 50% 45% so the lit centre
+        of the map sits behind the headline rather than under the fold;
+     2. a scrim of the page's own base colour, heaviest at the top and bottom
+        edges. The art is already dark, but "already dark" is not a contrast
+        measurement: the scrim is what guarantees `--color-ink-muted` clears
+        4.5:1 over the brightest part of the image.
+
+   The phone asset is a separate, smaller file rather than the desktop one
+   scaled down — the whole image is 15 kB at 1920, and there is no reason to
+   send that much to a 390px screen. */
+.landing-backdrop {
+  background-image: url("/backgrounds/landing-1024.webp");
+  background-position: 50% 45%;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+
+@media (min-width: 40rem) {
+  .landing-backdrop {
+    background-image: url("/backgrounds/landing-1920.webp");
+  }
+}
+
+/* The scrim. Separate element rather than a second background layer so the
+   art can be swapped per breakpoint without restating the gradient.
+
+   On a phone the copy runs the full width, so there is nowhere for the art to
+   be bright: the vertical scrim carries the whole contrast budget. The
+   brightest pixel in the art is 98/255; at 0.55 the composite behind body text
+   is 58/255, where `--color-ink-muted` measures 4.6:1 even with the brightest
+   ambient wash stacked on top. */
+.landing-scrim {
+  background:
+    linear-gradient(
+      180deg,
+      oklch(from #1a1b26 l c h / 0.85) 0%,
+      oklch(from #1a1b26 l c h / 0.55) 42%,
+      oklch(from #1a1b26 l c h / 0.6) 70%,
+      oklch(from #1a1b26 l c h / 0.92) 100%
+    ),
+    /* Pulls the green back towards the app's own palette so the landing screen
+       and the dashboard behind it read as one product. */
+      radial-gradient(
+        120% 90% at 50% 40%,
+        oklch(from #7aa2f7 l c h / 0.10),
+        transparent 70%
+      );
+}
+
+/* From `lg` the layout splits: copy on the left, sign-in panel on the right.
+   That lets the art come forward — the budget is spent where it is needed
+   instead of everywhere. A horizontal wash darkens the column the text
+   actually occupies, and the right half stays bright behind a panel that
+   blurs whatever is under it anyway. */
+@media (min-width: 64rem) {
+  .landing-scrim {
+    background:
+      linear-gradient(
+        90deg,
+        oklch(from #1a1b26 l c h / 0.72) 0%,
+        oklch(from #1a1b26 l c h / 0.5) 42%,
+        transparent 78%
+      ),
+      linear-gradient(
+        180deg,
+        oklch(from #1a1b26 l c h / 0.8) 0%,
+        oklch(from #1a1b26 l c h / 0.22) 45%,
+        oklch(from #1a1b26 l c h / 0.34) 72%,
+        oklch(from #1a1b26 l c h / 0.9) 100%
+      ),
+      radial-gradient(
+        120% 90% at 50% 40%,
+        oklch(from #7aa2f7 l c h / 0.10),
+        transparent 70%
+      );
+  }
+}
+
 /* One definition of a pane of glass, used by every card, the header, the tab
    bar and the ghost button, so they are all lit by the same imaginary source.
 
