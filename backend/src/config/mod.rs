@@ -65,6 +65,16 @@ pub struct DotaConfig {
     /// How long a cached peer distribution stays fresh. These move slowly —
     /// a day-old distribution is still a fair comparison.
     pub benchmark_ttl_hours: i64,
+    /// Restrict syncing to "significant" matches — OpenDota's term for the
+    /// standard competitive modes, which excludes Turbo, Ability Draft and
+    /// every event mode.
+    ///
+    /// Off by default. The provider applies this filter unless told otherwise,
+    /// and for a player whose games are mostly Turbo that silently hides almost
+    /// their entire history: the sync succeeds, reports nothing new, and gives
+    /// no indication that anything was dropped. A coach that cannot see what
+    /// you actually play is worse than one whose benchmarks need a caveat.
+    pub significant_only: bool,
 }
 
 /// Hero Intelligence tuning.
@@ -404,6 +414,7 @@ impl Config {
                 sync_cooldown_seconds: parsed("SYNC_COOLDOWN_SECONDS", 30)?,
                 request_timeout_seconds: parsed("DOTA_API_TIMEOUT_SECONDS", 10)?,
                 benchmark_ttl_hours: parsed("BENCHMARK_TTL_HOURS", 24)?,
+                significant_only: parsed("DOTA_SIGNIFICANT_ONLY", false)?,
             },
             heroes: HeroConfig::from_env()?,
             coach: CoachConfig::from_env()?,
@@ -581,6 +592,7 @@ mod tests {
                 sync_cooldown_seconds: 30,
                 request_timeout_seconds: 10,
                 benchmark_ttl_hours: 24,
+                significant_only: false,
             },
             heroes: HeroConfig::from_env().unwrap(),
             coach: CoachConfig::from_env().unwrap(),

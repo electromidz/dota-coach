@@ -204,6 +204,62 @@ body::before {
       );
 }
 
+/* In-app backdrop: the same map art behind every signed-in screen.
+   ------------------------------------------------------------------------
+   The landing screen can afford a bright image because it has almost no text
+   on it. These screens are the opposite — dense with numbers — so the art is
+   carried at a fraction of the strength, present as texture rather than as a
+   picture. The whole budget goes into the scrim.
+
+   The measurements, taken from the asset rather than assumed. The brightest
+   pixel in `landing-1920.webp` is rgb(35, 80, 65) — the art is dim enough that
+   a heavy scrim erases it entirely rather than softening it, so the stops
+   below are the lightest that still hold the text. With the brightest corner
+   of the ambient wash stacked on top, the worst-case background behind body
+   text is rgb(55, 59, 79):
+
+     --color-ink        6.8:1   (7.7:1 on the flat base)
+     --color-ink-muted  5.2:1   (5.9:1)
+     --color-ink-faint  3.9:1   (4.4:1)
+
+   `--color-ink-faint` does not reach 4.5:1 here. It does not reach it on the
+   flat background either, so this is a pre-existing shortfall the art makes
+   slightly worse rather than one it introduces; the fix is the token, not the
+   scrim. Everything above faint keeps a wide margin.
+
+   The gradient is heaviest where the content is densest. The top of each page
+   is a title and at most one headline figure, so the art is allowed forward
+   there; by the time the grids and tables start it has flattened out. */
+.app-backdrop {
+  background-image: url("/backgrounds/landing-1024.webp");
+  background-position: 50% 30%;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+
+@media (min-width: 40rem) {
+  .app-backdrop {
+    background-image: url("/backgrounds/landing-1920.webp");
+  }
+}
+
+.app-scrim {
+  background:
+    linear-gradient(
+      180deg,
+      oklch(from #1a1b26 l c h / 0.74) 0%,
+      oklch(from #1a1b26 l c h / 0.78) 38%,
+      oklch(from #1a1b26 l c h / 0.88) 100%
+    ),
+    /* Same palette correction the landing uses, so the art reads as this
+       product's own rather than as a screenshot of Dota. */
+      radial-gradient(
+        120% 90% at 50% 25%,
+        oklch(from #7aa2f7 l c h / 0.08),
+        transparent 70%
+      );
+}
+
 /* From `lg` the layout splits: copy on the left, sign-in panel on the right.
    That lets the art come forward — the budget is spent where it is needed
    instead of everywhere. A horizontal wash darkens the column the text

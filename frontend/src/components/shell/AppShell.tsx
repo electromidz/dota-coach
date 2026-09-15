@@ -1,3 +1,4 @@
+import { AppBackdrop } from "@/components/shell/AppBackdrop";
 import { AppChrome } from "@/components/shell/AppChrome";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { SessionProvider } from "@/lib/session-context";
@@ -33,6 +34,7 @@ export function AppShell({
   return (
     <SessionProvider>
       <div className="min-h-dvh">
+        <AppBackdrop />
         <AppChrome title={title} action={action} showTabs={showTabs} />
 
         <main

@@ -36,6 +36,9 @@ services:
       DOTA_API_KEY: ${DOTA_API_KEY:-}
       DOTA_API_TIMEOUT_SECONDS: ${DOTA_API_TIMEOUT_SECONDS:-10}
       SYNC_MATCH_LIMIT: ${SYNC_MATCH_LIMIT:-20}
+      # Off by default: OpenDota's own filter hides Turbo and every event mode,
+      # invisibly, which makes a Turbo player's sync find nothing forever.
+      DOTA_SIGNIFICANT_ONLY: ${DOTA_SIGNIFICANT_ONLY:-false}
       SYNC_COOLDOWN_SECONDS: ${SYNC_COOLDOWN_SECONDS:-30}
       # Cache lifetimes for the two provider-backed layers.
       BENCHMARK_TTL_HOURS: ${BENCHMARK_TTL_HOURS:-24}

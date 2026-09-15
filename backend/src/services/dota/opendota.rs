@@ -24,11 +24,22 @@ const DIRE_SLOT_THRESHOLD: i32 = 128;
 
 /// Fields to request from `players/{id}/matches`.
 ///
-/// `match_id`, `player_slot`, `radiant_win`, `duration`, `game_mode` and
-/// `lobby_type` always come back; everything else must be asked for.
+/// `match_id`, `player_slot`, `radiant_win` and `start_time` always come back.
+/// `duration`, `game_mode` and `lobby_type` come back by default *only* while
+/// OpenDota is applying its own significance filter — asking for every game
+/// mode drops them unless they are projected, so they are listed below.
 const SUMMARY_PROJECTION: &[&str] = &[
     "hero_id",
     "start_time",
+    // `duration`, `game_mode` and `lobby_type` arrive by default only while
+    // OpenDota is applying its own significance filter. Asking for every game
+    // mode switches the endpoint to a projection that returns the listed
+    // fields and nothing else, so these three have to be named or they come
+    // back null — a match with no duration and no mode, stored as if that were
+    // the truth.
+    "duration",
+    "game_mode",
+    "lobby_type",
     "kills",
     "deaths",
     "assists",
@@ -47,6 +58,7 @@ pub struct OpenDotaProvider {
     http: Client,
     base_url: String,
     api_key: Option<String>,
+    significant_only: bool,
     /// The hero catalogue changes a few times a year; fetch once per process.
     heroes: RwLock<Option<Arc<HashMap<i32, String>>>>,
 }
@@ -62,6 +74,7 @@ impl OpenDotaProvider {
             http,
             base_url: config.base_url.trim_end_matches('/').to_string(),
             api_key: config.api_key.clone(),
+            significant_only: config.significant_only,
             heroes: RwLock::new(None),
         })
     }
@@ -117,15 +130,7 @@ impl DotaDataProvider for OpenDotaProvider {
         account_id: i64,
         limit: u32,
     ) -> Result<Vec<NormalizedMatch>, ProviderError> {
-        // `recentMatches` is capped at 20; `matches?limit=` is the parameterized
-        // equivalent, but `project` *replaces* its default field set rather than
-        // extending it — so every field we read has to be listed.
-        let mut query = vec![("limit", limit.to_string())];
-        query.extend(
-            SUMMARY_PROJECTION
-                .iter()
-                .map(|field| ("project", (*field).to_string())),
-        );
+        let query = match_list_query(limit, self.significant_only);
 
         let raw: Vec<RawRecentMatch> = self
             .get(&format!("players/{account_id}/matches"), &query)
@@ -455,6 +460,36 @@ fn is_radiant(player_slot: i32) -> bool {
     player_slot < DIRE_SLOT_THRESHOLD
 }
 
+/// Build the query for the player match list.
+///
+/// Split out from the call so the one parameter that silently changes which
+/// matches exist can be asserted on without a network.
+///
+/// `recentMatches` is capped at 20; `matches?limit=` is the parameterized
+/// equivalent, but `project` *replaces* its default field set rather than
+/// extending it — so every field we read has to be listed.
+fn match_list_query(limit: u32, significant_only: bool) -> Vec<(&'static str, String)> {
+    let mut query = vec![("limit", limit.to_string())];
+
+    // `significant` defaults to 1 on this endpoint, which drops every mode
+    // OpenDota does not consider competitively meaningful — Turbo above all.
+    // The default is invisible: the response is a valid, shorter list with no
+    // indication that anything was filtered, so for a player who mostly plays
+    // Turbo every sync succeeds and finds nothing. Sending the parameter
+    // explicitly makes the choice ours rather than the provider's.
+    if !significant_only {
+        query.push(("significant", "0".to_string()));
+    }
+
+    query.extend(
+        SUMMARY_PROJECTION
+            .iter()
+            .map(|field| ("project", (*field).to_string())),
+    );
+
+    query
+}
+
 fn timestamp(seconds: i64) -> Option<DateTime<Utc>> {
     Utc.timestamp_opt(seconds, 0).single()
 }
@@ -475,6 +510,70 @@ mod tests {
     fn recent() -> Vec<NormalizedMatch> {
         let raw: Vec<RawRecentMatch> = serde_json::from_str(RECENT_MATCHES).unwrap();
         raw.into_iter().filter_map(normalize_recent_match).collect()
+    }
+
+    /// The parameter that decides whether a Turbo player's history exists at
+    /// all. OpenDota applies `significant=1` unless told otherwise, and the
+    /// filtering is invisible in the response.
+    #[test]
+    fn the_match_list_asks_for_every_game_mode_by_default() {
+        let query = match_list_query(20, false);
+
+        assert!(
+            query.contains(&("significant", "0".to_string())),
+            "without this, Turbo, Ability Draft and every event mode are dropped \
+             by the provider and the sync reports nothing new"
+        );
+        assert!(query.contains(&("limit", "20".to_string())));
+    }
+
+    /// The opt-out still has to work: a deployment that wants ranked-only
+    /// analysis leaves the provider's own filter in place.
+    #[test]
+    fn the_significance_filter_is_left_to_the_provider_when_requested() {
+        let query = match_list_query(20, true);
+
+        assert!(
+            !query.iter().any(|(k, _)| *k == "significant"),
+            "opting in means not sending the parameter at all"
+        );
+    }
+
+    /// `project` replaces OpenDota's default field set, so anything the
+    /// normalizer reads and the projection omits silently arrives as `None`.
+    #[test]
+    fn the_projection_lists_every_field_the_normalizer_reads() {
+        let query = match_list_query(20, false);
+        let projected: Vec<&str> = query
+            .iter()
+            .filter(|(k, _)| *k == "project")
+            .map(|(_, v)| v.as_str())
+            .collect();
+
+        // Every field `normalize_recent_match` reads. An omission here is
+        // invisible in testing and silent in production: the field simply
+        // arrives as `None` and a zero is stored in its place.
+        for field in [
+            "hero_id",
+            "start_time",
+            "duration",
+            "game_mode",
+            "lobby_type",
+            "kills",
+            "deaths",
+            "assists",
+            "gold_per_min",
+            "xp_per_min",
+            "last_hits",
+            "hero_damage",
+            "tower_damage",
+            "hero_healing",
+            "lane_role",
+            "is_roaming",
+            "party_size",
+        ] {
+            assert!(projected.contains(&field), "`{field}` is read but not projected");
+        }
     }
 
     #[test]

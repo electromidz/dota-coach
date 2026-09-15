@@ -185,11 +185,25 @@ pub async fn find_many(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Match>, sqlx::
     .await
 }
 
-/// Stored matches that predate a fact the metrics engine now needs.
+/// Stored matches that predate a fact the metrics engine now needs, or that
+/// were stored with one missing.
 ///
 /// Deduplication means an existing match is never re-fetched by the normal
 /// sync path, so without this a schema addition would only ever apply to
-/// matches synced after it landed.
+/// matches synced after it landed — and a row written from an incomplete
+/// provider response would stay wrong forever.
+///
+/// The three conditions are different kinds of incomplete:
+///
+///   - `team_kills` is the fact the metrics engine gained after the first
+///     matches were already stored;
+///   - a zero duration is never a real match, only a field that never arrived;
+///   - a null `game_mode` means the mode was never recorded, which the metrics
+///     layer needs in order to tell a Turbo game from a ranked one.
+///
+/// A row the detail endpoint genuinely cannot complete is re-fetched on each
+/// sync. That is bounded by `limit` and by the sync cooldown, and is the right
+/// trade: the alternative is storing a zero as though it were measured.
 pub async fn missing_facts(
     pool: &PgPool,
     dota_player_id: Uuid,
@@ -199,7 +213,9 @@ pub async fn missing_facts(
         "SELECT match_id
            FROM matches
           WHERE dota_player_id = $1
-            AND team_kills IS NULL
+            AND (team_kills IS NULL
+                 OR duration_seconds = 0
+                 OR game_mode IS NULL)
           ORDER BY started_at DESC
           LIMIT $2",
     )
@@ -235,6 +251,15 @@ pub async fn update_facts(
              blink_seconds = COALESCE($18, blink_seconds),
              midas_seconds = COALESCE($19, midas_seconds),
              teamfight_participation = COALESCE($20, teamfight_participation),
+             -- Facts the summary endpoint drops when every game mode is
+             -- requested. A stored zero duration is never real, so the detail
+             -- value replaces it; a real duration is never overwritten.
+             duration_seconds = CASE
+                 WHEN duration_seconds = 0 THEN $21
+                 ELSE duration_seconds
+             END,
+             game_mode = COALESCE($22, game_mode),
+             lobby_type = COALESCE($23, lobby_type),
              detail_synced = TRUE
            WHERE dota_player_id = $1 AND match_id = $2",
     )
@@ -258,6 +283,9 @@ pub async fn update_facts(
     .bind(d.blink_seconds)
     .bind(d.midas_seconds)
     .bind(d.teamfight_participation)
+    .bind(d.duration_seconds)
+    .bind(d.game_mode)
+    .bind(d.lobby_type)
     .execute(pool)
     .await?;
 

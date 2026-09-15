@@ -567,6 +567,7 @@ pub fn test_config() -> Config {
             sync_cooldown_seconds: 0,
             request_timeout_seconds: 5,
             benchmark_ttl_hours: 24,
+            significant_only: false,
         },
         coach: CoachConfig {
             // Disabled by default so a test can analyse twice in a row; the
