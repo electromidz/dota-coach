@@ -2935,3 +2935,55 @@ async fn a_caller_supplied_request_id_is_echoed_but_only_when_it_is_safe_to_log(
     assert_ne!(echoed, "abcdefgh ERROR payment settled");
     assert!(!echoed.contains(' '));
 }
+
+// ---------------------------------------------------------------------------
+// API documentation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_documentation_is_served_when_it_is_enabled() {
+    let Some(db) = support::pool().await else {
+        return skip("the_documentation_is_served_when_it_is_enabled");
+    };
+
+    let mut config = test_config();
+    config.docs_enabled = true;
+
+    let app = app_with_config(
+        db,
+        MockDota::default().into(),
+        StubVerifier::rejecting(),
+        config,
+    );
+
+    let spec = app.get("/api-docs/openapi.json", None).await;
+    assert_eq!(spec.status, 200, "the document is readable without a session");
+    assert_eq!(spec.json()["info"]["title"], "Dota Coach API");
+}
+
+/// The gate has to remove the routes, not merely hide the link: a deployment
+/// with docs off must not serve the document to anyone who guesses the path.
+#[tokio::test]
+async fn the_documentation_is_absent_when_it_is_disabled() {
+    let Some(db) = support::pool().await else {
+        return skip("the_documentation_is_absent_when_it_is_disabled");
+    };
+
+    let mut config = test_config();
+    config.docs_enabled = false;
+
+    let app = app_with_config(
+        db,
+        MockDota::default().into(),
+        StubVerifier::rejecting(),
+        config,
+    );
+
+    for path in ["/docs", "/docs/", "/api-docs/openapi.json"] {
+        let response = app.get(path, None).await;
+        assert_eq!(response.status, 404, "{path} is served with docs disabled");
+    }
+
+    // The rest of the API is unaffected by the gate.
+    assert_eq!(app.get("/health", None).await.status, 200);
+}

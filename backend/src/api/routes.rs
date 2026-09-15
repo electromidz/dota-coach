@@ -11,7 +11,7 @@ use tower_http::trace::TraceLayer;
 use crate::api::handlers::{
     auth, benchmark, billing, coach, health, heroes, matches, players, stats,
 };
-use crate::api::observability;
+use crate::api::{docs, observability};
 use crate::config::Config;
 use crate::error::AppError;
 use crate::state::AppState;
@@ -44,10 +44,10 @@ pub fn build(state: AppState, config: &Config) -> Router {
         .route("/heroes", get(heroes::pool))
         .route("/heroes/recommendations", get(heroes::recommendations))
         .route("/hero-intelligence", get(heroes::intelligence))
-        // Coaching. Reading is free and always answers; generating is the
-        // only rate-limited verb in the API.
+        // Coaching. Reading is free and always answers; generating is the only
+        // rate-limited verb in the API and is mounted separately below, with a
+        // timeout that fits a model rather than a database.
         .route("/coach", get(coach::get))
-        .route("/coach/analyze", post(coach::analyze))
         .route("/coach/player-model", get(coach::player_model))
         .route("/coach/training-focus", get(coach::training_focus))
         // Billing. Reading is always allowed — an expired account still needs
@@ -64,25 +64,56 @@ pub fn build(state: AppState, config: &Config) -> Router {
         .route("/billing/webhook", post(billing::webhook))
         .route("/matches", get(matches::list))
         .route("/matches/{id}", get(matches::get))
-        .route("/matches/{id}/analysis", get(coach::match_analysis))
+        .route("/matches/{id}/analysis", get(coach::match_analysis));
+
+    // The two routes that call a model, and the only ones that can honestly
+    // take minutes: a reasoning model spends most of a coaching call thinking
+    // before it emits a character. They are separated so the rest of the API
+    // keeps a short ceiling — one slow provider should not earn every endpoint
+    // the right to hold a connection open for three minutes.
+    let generation = Router::new()
+        .route("/coach/analyze", post(coach::analyze))
         .route("/matches/{id}/analyze", post(coach::analyze_match));
 
-    Router::new()
+    // Above the LLM client's own timeout, never below it: the inner deadline
+    // should be what fires, so a slow model is reported as a model problem
+    // rather than as a gateway timeout. The margin covers the database work on
+    // either side of the call.
+    let generation_timeout = Duration::from_secs(config.coach.request_timeout_seconds + 30);
+
+    let mut standard = Router::new()
         .route("/health", get(health::health))
         .route("/health/live", get(health::liveness))
-        .nest("/api", api)
+        .nest("/api", api);
+
+    // Swagger UI and the document it renders, when this deployment serves them
+    // at all. Unauthenticated by necessity — a reader has to reach the page
+    // before they can sign in — which is exactly why the gate exists rather
+    // than mounting them everywhere.
+    if config.docs_enabled {
+        standard = standard.merge(docs::router::<AppState>());
+    }
+
+    let standard = standard
         // Unknown paths answer with the same envelope as everything else.
         .fallback(not_found)
-        // Outermost, so the request id is on every log line the request
-        // produces — including the timeout layer's and the handler's.
-        .layer(middleware::from_fn(observability::request_id))
-        .layer(TraceLayer::new_for_http())
-        // Upstream Dota/LLM calls must not hold a request open indefinitely;
-        // 504 is the honest answer.
+        // Upstream Dota calls must not hold a request open indefinitely; 504
+        // is the honest answer.
         .layer(TimeoutLayer::with_status_code(
             StatusCode::GATEWAY_TIMEOUT,
             Duration::from_secs(30),
-        ))
+        ));
+
+    let slow = Router::new().nest("/api", generation).layer(
+        TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, generation_timeout),
+    );
+
+    standard
+        .merge(slow)
+        // Innermost of the three below, so the request id is in scope for the
+        // handler and for anything the timeout layer logs.
+        .layer(middleware::from_fn(observability::request_id))
+        .layer(TraceLayer::new_for_http())
         .layer(cors_layer(config))
         .with_state(state)
 }

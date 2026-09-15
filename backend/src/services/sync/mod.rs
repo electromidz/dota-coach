@@ -16,13 +16,14 @@ use crate::domain::user::SteamProfileUpdate;
 use crate::repositories;
 use crate::services::dota::{fallback_hero_name, DotaDataProvider, ProviderError};
 use crate::services::metrics;
+use utoipa::ToSchema;
 
 /// Concurrent match-detail requests. OpenDota's anonymous tier allows 60
 /// calls/minute; four in flight stays well inside that while keeping a
 /// twenty-match sync to a few seconds.
 const DETAIL_CONCURRENCY: usize = 4;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ToSchema)]
 pub struct SyncReport {
     /// Matches the provider returned.
     pub matches_seen: usize,

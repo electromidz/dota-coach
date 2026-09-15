@@ -7,6 +7,7 @@ use crate::services::billing::BillingError;
 use crate::services::dota::ProviderError;
 use crate::services::payments::PaymentError;
 use crate::services::sync::SyncError;
+use utoipa::ToSchema;
 
 /// Every error the API can return. Variants carry only what is safe to show a
 /// user; the underlying cause is logged, never serialized.
@@ -98,15 +99,20 @@ impl AppError {
     }
 }
 
-#[derive(Serialize)]
-struct ErrorBody {
-    error: ErrorDetail,
+/// The envelope every failure uses, without exception — including the 404 for
+/// an unknown path. Documented so a client can parse one shape for all errors.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct ErrorBody {
+    pub(crate) error: ErrorDetail,
 }
 
-#[derive(Serialize)]
-struct ErrorDetail {
-    code: &'static str,
-    message: String,
+#[derive(Serialize, ToSchema)]
+pub(crate) struct ErrorDetail {
+    /// Stable machine-readable code, e.g. `UNAUTHENTICATED`, `RATE_LIMITED`.
+    #[schema(example = "UNAUTHENTICATED")]
+    pub(crate) code: &'static str,
+    /// Safe to show a user. Never carries the underlying cause.
+    pub(crate) message: String,
 }
 
 impl IntoResponse for AppError {

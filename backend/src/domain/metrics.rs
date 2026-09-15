@@ -1,12 +1,13 @@
 use serde::Serialize;
 use uuid::Uuid;
+use utoipa::ToSchema;
 
 /// Derived metrics for one match.
 ///
 /// Every field is computed by `services::metrics` from stored facts. `None`
 /// means the input was unavailable — an unparsed replay, or a match detail
 /// that never arrived — never that the value was zero.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
 pub struct MatchMetrics {
     pub match_id: Uuid,
     /// Which formula set produced these numbers.
@@ -31,7 +32,7 @@ pub struct MatchMetrics {
 /// Counts are reported alongside every average so a caller can tell a solid
 /// number from one built on two games — the spec forbids presenting thin data
 /// as though it were reliable.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct PlayerStats {
     pub matches: i64,
     pub wins: i64,
@@ -57,7 +58,7 @@ pub struct PlayerStats {
 }
 
 /// Per-hero rollup.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
 pub struct HeroStats {
     pub hero_id: i32,
     pub hero_name: String,
@@ -70,7 +71,7 @@ pub struct HeroStats {
 }
 
 /// Per-role rollup.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
 pub struct RoleStats {
     pub role: String,
     pub matches: i64,

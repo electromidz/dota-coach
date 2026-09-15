@@ -417,7 +417,7 @@ pub fn rank(mut fits: Vec<HeroFit>) -> Vec<HeroFit> {
 }
 
 /// A one-line summary of the pool, for the dashboard.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct PoolSummary {
     pub heroes: i64,
     pub signature: i64,

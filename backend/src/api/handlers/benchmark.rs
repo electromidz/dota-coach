@@ -21,13 +21,14 @@ use crate::repositories;
 use crate::repositories::metrics::HeroAverages;
 use crate::services::benchmarks::{self, BenchmarkError, PlayerValues};
 use crate::state::AppState;
+use utoipa::ToSchema;
 
 #[derive(Deserialize)]
 pub struct BenchmarkQuery {
     pub hero_id: Option<i32>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct BenchmarkResponse {
     pub hero_id: i32,
     pub hero_name: String,
@@ -42,6 +43,24 @@ pub struct BenchmarkResponse {
 }
 
 /// `GET /api/benchmark`
+#[utoipa::path(
+    get, path = "/api/benchmark", tag = "benchmark",
+    summary = "Every metric against peers",
+    description = "Percentiles are omitted, not estimated, when the sample is too small — read `confidence` before quoting any of these numbers.",
+    security(("session" = [])),
+    params(
+        ("hero_id" = Option<i32>, Query,
+            description = "Dota hero id. Omit to benchmark the player's most-played hero.",
+            example = 26, minimum = 1),
+    ),
+    responses(
+        (status = 200, description = "Player values beside peer medians", body = BenchmarkResponse),
+        (status = 502, description = "The benchmark provider is unavailable", body = crate::error::ErrorBody),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn overview(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -52,6 +71,28 @@ pub async fn overview(
 }
 
 /// `GET /api/benchmark/:metric` — the same comparison, narrowed to one metric.
+#[utoipa::path(
+    get, path = "/api/benchmark/{metric}", tag = "benchmark",
+    summary = "One metric against peers",
+    security(("session" = [])),
+    params(
+        ("metric" = String, Path,
+            description = "Metric slug. One of `gold_per_min`, `xp_per_min`, `last_hits_per_min`, \
+`kills_per_min`, `deaths_per_min`, `assists_per_min`, `hero_damage_per_min`, `tower_damage`.",
+            example = "gold_per_min"),
+        ("hero_id" = Option<i32>, Query,
+            description = "Dota hero id. Omit to benchmark the player's most-played hero.",
+            example = 26, minimum = 1),
+    ),
+    responses(
+        (status = 200, description = "That metric only", body = BenchmarkResponse),
+        (status = 404, description = "No such metric slug", body = crate::error::ErrorBody),
+        (status = 502, description = "The benchmark provider is unavailable", body = crate::error::ErrorBody),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn metric(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,

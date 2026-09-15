@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::benchmark::Confidence;
+use utoipa::ToSchema;
 
 /// A match with its derived metrics, flattened for pattern detection.
 ///
@@ -60,7 +61,7 @@ impl AnalyzedMatch {
 }
 
 /// Where a pattern stands now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PatternStatus {
     /// Still happening at the rate that first flagged it.
@@ -100,7 +101,7 @@ impl PatternStatus {
 }
 
 /// Something the player does repeatedly, with the arithmetic behind it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RecurringPattern {
     /// Stable slug — `high_death_rate`. Stored, so it must not change casually.
     pub id: String,
@@ -138,7 +139,7 @@ pub struct RecurringPattern {
 }
 
 /// Whether a trait is something the player does well or badly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TraitKind {
     Strength,
@@ -163,7 +164,7 @@ impl TraitKind {
 }
 
 /// What the trait was read from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TraitSource {
     /// A percentile from the benchmark engine.
@@ -194,7 +195,7 @@ impl TraitSource {
 }
 
 /// One thing the model believes about the player.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PlayerTrait {
     pub kind: TraitKind,
     pub source: TraitSource,
@@ -207,7 +208,7 @@ pub struct PlayerTrait {
 }
 
 /// How much the player leans on a role.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RoleAffinity {
     pub role: String,
     pub matches: i64,
@@ -217,7 +218,7 @@ pub struct RoleAffinity {
 }
 
 /// The recent window, as its own reading.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RecentForm {
     pub matches: i64,
     pub wins: i64,
@@ -231,7 +232,7 @@ pub struct RecentForm {
 /// The spec's own framing: a new user gets generic analysis, and a player with
 /// a hundred matches gets something personal. This is the dial that says which
 /// one is currently honest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelConfidence {
     /// Too little history for anything but generic advice.
@@ -295,7 +296,7 @@ impl ModelConfidence {
 }
 
 /// Everything the backend believes about one player.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct PlayerModel {
     /// Bumped when a detector or a trait rule changes, so stored rows are
     /// identifiable as having come from an older definition.

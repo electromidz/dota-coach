@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Serializer};
 use uuid::Uuid;
+use utoipa::ToSchema;
 
 /// SteamID64 = 32-bit Dota account id + this constant.
 pub const STEAM_ID64_BASE: i64 = 76_561_197_960_265_728;
@@ -11,7 +12,7 @@ const MAX_ACCOUNT_ID: i64 = u32::MAX as i64;
 /// The Dota identity linked to an application account. One row per account.
 ///
 /// Derived from the account's proven SteamID64, never from client input.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
 pub struct DotaPlayer {
     pub id: Uuid,
     pub user_id: Uuid,

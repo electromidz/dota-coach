@@ -13,13 +13,14 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::benchmark::Confidence;
+use utoipa::ToSchema;
 
 /// A Dota rank bracket.
 ///
 /// OpenDota encodes `rank_tier` as `medal * 10 + stars`, so the tens digit is
 /// the bracket and the ones digit is the star inside it. Only the bracket is
 /// meaningful for meta segmentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RankBracket {
     Herald,
@@ -80,7 +81,7 @@ impl RankBracket {
 /// Providers differ in what they can honour: OpenDota publishes one rolling
 /// public-match window and cannot be asked for another, so it reports what it
 /// actually used rather than echoing the request back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TimeWindow {
     /// The provider's own recent window, whatever length it publishes.
@@ -117,7 +118,7 @@ impl HeroMetaContext {
 /// matches, which is a different population from the pubs this product coaches
 /// — carrying it here would invite it into a pub meta score it has no business
 /// in.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct HeroMeta {
     pub hero_id: i32,
     pub hero_name: String,
@@ -147,7 +148,7 @@ pub struct HeroMeta {
 ///
 /// Based on played matches and results only. A hero is never labelled from a
 /// provider's opinion of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HeroTier {
     /// Deep experience and results above the player's own baseline.
@@ -172,7 +173,7 @@ impl HeroTier {
 }
 
 /// One hero in the player's pool.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct HeroPoolEntry {
     pub hero_id: i32,
     pub hero_name: String,
@@ -200,7 +201,7 @@ pub struct HeroPoolEntry {
 }
 
 /// A weighted input to the fit score.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FitComponent {
     PlayerPerformance,
@@ -224,7 +225,7 @@ impl FitComponent {
 
 /// One component's contribution, kept alongside the score so the number is
 /// always explainable — the spec forbids an opaque fit score.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct FitPart {
     pub component: FitComponent,
     pub label: &'static str,
@@ -237,7 +238,7 @@ pub struct FitPart {
 }
 
 /// How strongly a hero is being put forward.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RecommendationLevel {
     Recommended,
@@ -256,7 +257,7 @@ impl RecommendationLevel {
 }
 
 /// A hero, scored for this player.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct HeroFit {
     pub hero_id: i32,
     pub hero_name: String,

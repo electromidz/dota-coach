@@ -612,6 +612,9 @@ pub fn test_config() -> Config {
             // assertion vacuous.
             enforce: true,
         },
+        // Mounted in the harness so the routing itself is exercised; the tests
+        // that care about the gate build their own config either way.
+        docs_enabled: true,
     }
 }
 

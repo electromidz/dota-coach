@@ -17,9 +17,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::benchmark::Confidence;
+use utoipa::ToSchema;
 
 /// What a piece of evidence describes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceKind {
     /// Career aggregates across every stored match.
@@ -39,7 +40,7 @@ pub enum EvidenceKind {
 }
 
 /// One measured fact, with a stable id the model can cite.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Evidence {
     /// Stable and human-readable — `benchmark.gold_per_min`, `match.deaths`.
     /// Stability matters: it is what a stored insight refers to.
@@ -58,7 +59,7 @@ pub struct Evidence {
 ///
 /// Fixed set, parsed strictly: a model that invents a seventh kind has its
 /// insight dropped rather than passed through to the UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InsightKind {
     Strength,
@@ -108,7 +109,7 @@ impl InsightKind {
 }
 
 /// One interpreted observation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Insight {
     pub kind: InsightKind,
     pub kind_label: &'static str,
@@ -120,7 +121,7 @@ pub struct Insight {
 }
 
 /// What an analysis is about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AnalysisScope {
     /// The player's whole stored history.
@@ -131,7 +132,7 @@ pub enum AnalysisScope {
 
 /// A stored analysis: the evidence that went in, and the interpretation that
 /// came out.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct CoachingAnalysis {
     pub id: Uuid,
     pub scope: AnalysisScope,

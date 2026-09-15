@@ -32,8 +32,9 @@ use crate::services::llm::LlmError;
 use crate::services::player_model::{self, patterns, ModelInputs};
 use crate::services::training::{self, SelectionInputs};
 use crate::state::AppState;
+use utoipa::ToSchema;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CoachResponse {
     /// The last analysis for this scope, or `null` when none has been
     /// generated yet.
@@ -54,7 +55,7 @@ pub struct CoachResponse {
     pub note: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct TrainingFocusResponse {
     /// The one thing to work on, or `null` when nothing clears the bar.
     pub focus: Option<TrainingFocus>,
@@ -67,7 +68,7 @@ pub struct TrainingFocusResponse {
     pub note: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct PlayerModelResponse {
     pub model: PlayerModel,
     /// Detectors that could not report, with how many matches they could
@@ -78,7 +79,7 @@ pub struct PlayerModelResponse {
     pub thresholds: PatternThresholds,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct UnmeasuredDetector {
     pub id: &'static str,
     pub label: &'static str,
@@ -87,7 +88,7 @@ pub struct UnmeasuredDetector {
     pub required: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct PatternThresholds {
     pub min_measured: i64,
     pub min_occurrences: i64,
@@ -97,6 +98,18 @@ pub struct PatternThresholds {
 /// `GET /api/coach`
 ///
 /// Never calls the model, never fails on a provider outage.
+#[utoipa::path(
+    get, path = "/api/coach", tag = "coaching",
+    summary = "The stored analysis",
+    description = "Reads only. Always answers, including on a deployment with no model configured at all — the deterministic evidence is the part that matters and it is computed in Rust.",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "Last generated analysis, or evidence alone if none exists", body = CoachResponse),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn get(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -115,6 +128,18 @@ pub async fn get(
 /// The long-term model: what the backend believes about this player and how
 /// much that belief is worth. Deterministic throughout — no model call, and
 /// nothing here depends on one having ever been made.
+#[utoipa::path(
+    get, path = "/api/coach/player-model", tag = "coaching",
+    summary = "The long-term player model",
+    description = "Traits, role affinity and recurring patterns accumulated across matches. Deterministic throughout — reading it never calls a model.",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "Strengths, weaknesses and recurring patterns", body = PlayerModelResponse),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn player_model(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -209,6 +234,18 @@ fn hydrate_patterns(
 ///
 /// One focus, its progress, and the runners-up. Deterministic: no model call,
 /// and the selection is reproducible from the same history.
+#[utoipa::path(
+    get, path = "/api/coach/training-focus", tag = "coaching",
+    summary = "The current training focus",
+    description = "One focus at a time by design. Chosen from benchmark gap, historical pattern, impact and confidence — not simply the lowest statistic.",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "The active focus and progress against it", body = TrainingFocusResponse),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn training_focus(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -275,6 +312,21 @@ pub async fn training_focus(
 /// so it is the one thing the trial gates. Everything measured — stats,
 /// benchmarks, patterns, the stored analysis — keeps answering after the trial
 /// ends.
+#[utoipa::path(
+    post, path = "/api/coach/analyze", tag = "coaching",
+    summary = "Generate a new analysis",
+    description = "The only route that calls a model, and the only rate-limited verb in the API. Slow by nature: a reasoning model spends most of a call thinking, so this endpoint carries a longer timeout than the rest of the API. Every insight the model returns is verified against the evidence it was given and discarded if it cites anything that does not exist.",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "Freshly generated, validated analysis", body = CoachResponse),
+        (status = 429, description = "Inside the cooldown, or over the daily limit", body = crate::error::ErrorBody),
+        (status = 502, description = "The model failed, timed out, or returned an unusable answer", body = crate::error::ErrorBody),
+        (status = 503, description = "No coaching model is configured on this server", body = crate::error::ErrorBody),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn analyze(
     State(state): State<AppState>,
     EntitledUser(user): EntitledUser,
@@ -296,6 +348,27 @@ pub async fn analyze(
 /// `POST /api/matches/:id/analyze`
 ///
 /// Premium, for the same reason as `analyze`: it spends a model call.
+#[utoipa::path(
+    post, path = "/api/matches/{id}/analyze", tag = "coaching",
+    summary = "Generate an analysis for one match",
+    description = "Calls a model, and is rate limited and timed out on the same terms as `/api/coach/analyze`.",
+    security(("session" = [])),
+    params(
+        ("id" = Uuid, Path,
+            description = "Internal match id — the `id` from `/api/matches`, not the Dota match id.",
+            example = "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+    ),
+    responses(
+        (status = 200, description = "Freshly generated, validated analysis", body = CoachResponse),
+        (status = 404, description = "No such match, or it belongs to another player", body = crate::error::ErrorBody),
+        (status = 429, description = "Inside the cooldown, or over the daily limit", body = crate::error::ErrorBody),
+        (status = 502, description = "The model failed, timed out, or returned an unusable answer", body = crate::error::ErrorBody),
+        (status = 503, description = "No coaching model is configured on this server", body = crate::error::ErrorBody),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn analyze_match(
     State(state): State<AppState>,
     EntitledUser(user): EntitledUser,
@@ -320,6 +393,23 @@ pub async fn analyze_match(
 ///
 /// The stored analysis for one match, if there is one. Separate from the POST
 /// so opening a match page never spends a model call.
+#[utoipa::path(
+    get, path = "/api/matches/{id}/analysis", tag = "coaching",
+    summary = "Stored analysis for one match",
+    security(("session" = [])),
+    params(
+        ("id" = Uuid, Path,
+            description = "Internal match id — the `id` from `/api/matches`, not the Dota match id.",
+            example = "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+    ),
+    responses(
+        (status = 200, description = "Stored analysis, or evidence alone if none exists", body = CoachResponse),
+        (status = 404, description = "No such match, or it belongs to another player", body = crate::error::ErrorBody),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn match_analysis(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,

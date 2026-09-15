@@ -17,6 +17,7 @@
 use serde::Serialize;
 
 use crate::domain::coaching::{AnalysisScope, Evidence, InsightKind};
+use utoipa::ToSchema;
 
 /// Bumped whenever the instructions change in a way that should produce a
 /// different answer for identical evidence.
@@ -87,7 +88,7 @@ costing you games.\",
 }
 
 /// What the model is shown, as JSON.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct Payload<'a> {
     /// `player` or `match`, so the model knows whether it is reading a career
     /// or a single game.
@@ -96,7 +97,7 @@ struct Payload<'a> {
     evidence: Vec<Item<'a>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct Item<'a> {
     id: &'a str,
     label: &'a str,

@@ -15,11 +15,12 @@ use crate::error::{AppError, AppResult};
 use crate::repositories;
 use crate::services::metrics::METRICS_VERSION;
 use crate::state::AppState;
+use utoipa::ToSchema;
 
 /// Heroes returned by `/api/stats`. The full list lives on the heroes page.
 const TOP_HEROES: i64 = 8;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct StatsResponse {
     pub overall: PlayerStats,
     pub heroes: Vec<HeroStats>,
@@ -29,6 +30,18 @@ pub struct StatsResponse {
 }
 
 /// `GET /api/stats`
+#[utoipa::path(
+    get, path = "/api/stats", tag = "stats",
+    summary = "Aggregated performance",
+    description = "Computed in SQL over stored metrics. No model is involved and no arithmetic happens on the client.",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "Overall, per-hero and per-role aggregates", body = StatsResponse),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn get(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,

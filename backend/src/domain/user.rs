@@ -1,12 +1,13 @@
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Serializer};
 use uuid::Uuid;
+use utoipa::ToSchema;
 
 /// An application account.
 ///
 /// `steam_id` is written only from a verified OpenID assertion. Nothing in the
 /// request body can reach it.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
 pub struct User {
     pub id: Uuid,
     /// Serialized as a string: SteamID64 exceeds JavaScript's safe integer range.

@@ -25,6 +25,14 @@ pub struct Config {
     pub training: TrainingConfig,
     pub llm: LlmConfig,
     pub billing: BillingConfig,
+    /// Whether to mount Swagger UI and the OpenAPI document.
+    ///
+    /// Off by default anywhere that looks like production. The spec is not a
+    /// secret — every route it describes still enforces its own session — but
+    /// it is a complete map of the API's surface, and publishing one to the
+    /// internet should be a decision somebody made rather than a default they
+    /// inherited.
+    pub docs_enabled: bool,
 }
 
 #[allow(dead_code)]
@@ -134,9 +142,17 @@ impl CoachConfig {
             cooldown_seconds: parsed("COACH_COOLDOWN_SECONDS", 30)?,
             daily_limit: parsed::<i64>("COACH_DAILY_LIMIT", 20)?.max(0),
             max_insights: parsed::<usize>("COACH_MAX_INSIGHTS", 5)?.clamp(1, 20),
-            max_output_tokens: parsed::<u32>("COACH_MAX_OUTPUT_TOKENS", 900)?.clamp(200, 8_000),
+            // The ceiling has to cover a reasoning model, which spends the bulk
+            // of this budget thinking and emits nothing at all if it runs out
+            // mid-thought. Raising the ceiling costs nothing on a model that
+            // answers directly: the budget is a limit, not an allocation.
+            max_output_tokens: parsed::<u32>("COACH_MAX_OUTPUT_TOKENS", 900)?.clamp(200, 16_000),
             temperature: parsed::<f32>("COACH_TEMPERATURE", 0.2)?.clamp(0.0, 2.0),
-            request_timeout_seconds: parsed::<u64>("LLM_TIMEOUT_SECONDS", 30)?.clamp(1, 120),
+            // A reasoning model spends most of its budget thinking before it
+            // emits a character, so a single coaching call can legitimately run
+            // for over a minute. The ceiling is generous for that reason; the
+            // default stays short for providers that answer immediately.
+            request_timeout_seconds: parsed::<u64>("LLM_TIMEOUT_SECONDS", 30)?.clamp(1, 180),
             recent_matches: parsed::<i64>("COACH_RECENT_MATCHES", 10)?.clamp(1, 50),
         })
     }
@@ -348,7 +364,28 @@ pub enum ConfigError {
 
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
+        // Lifted out of the literal below because the docs default is derived
+        // from it: whether this deployment looks like production is a question
+        // only the auth settings can answer.
+        let auth = AuthConfig {
+            public_base_url: trim_trailing_slash(&optional(
+                "PUBLIC_BASE_URL",
+                "http://localhost:8080",
+            )),
+            frontend_base_url: trim_trailing_slash(&optional(
+                "FRONTEND_BASE_URL",
+                "http://localhost:3000",
+            )),
+            steam_openid_url: optional(
+                "STEAM_OPENID_URL",
+                "https://steamcommunity.com/openid/login",
+            ),
+            session_ttl_hours: parsed("SESSION_TTL_HOURS", 720)?,
+            cookie_secure: parsed("COOKIE_SECURE", false)?,
+        };
+
         Ok(Self {
+            docs_enabled: docs_enabled(&auth)?,
             database_url: required("DATABASE_URL")?,
             host: optional("HOST", "0.0.0.0"),
             port: optional("PORT", "8080")
@@ -359,22 +396,7 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
-            auth: AuthConfig {
-                public_base_url: trim_trailing_slash(&optional(
-                    "PUBLIC_BASE_URL",
-                    "http://localhost:8080",
-                )),
-                frontend_base_url: trim_trailing_slash(&optional(
-                    "FRONTEND_BASE_URL",
-                    "http://localhost:3000",
-                )),
-                steam_openid_url: optional(
-                    "STEAM_OPENID_URL",
-                    "https://steamcommunity.com/openid/login",
-                ),
-                session_ttl_hours: parsed("SESSION_TTL_HOURS", 720)?,
-                cookie_secure: parsed("COOKIE_SECURE", false)?,
-            },
+            auth,
             dota: DotaConfig {
                 base_url: optional("DOTA_API_BASE_URL", "https://api.opendota.com/api"),
                 api_key: env::var("DOTA_API_KEY").ok().filter(|s| !s.is_empty()),
@@ -398,6 +420,32 @@ impl Config {
     pub fn bind_address(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
+}
+
+/// Whether to serve the API documentation.
+///
+/// `DOCS_ENABLED` decides it outright when set. Unset, it follows the same
+/// signal the boot-time deployment warnings use: a deployment reachable at
+/// localhost is somebody's machine and gets the docs; anything else is treated
+/// as production and does not, until an operator says otherwise.
+///
+/// The failure modes are deliberately asymmetric. Docs missing in development
+/// is an inconvenience discovered in seconds. Docs published from production by
+/// accident is a full map of the API handed to anyone who guesses `/docs`, and
+/// nobody finds out at all.
+fn docs_enabled(auth: &AuthConfig) -> Result<bool, ConfigError> {
+    if let Ok(raw) = env::var("DOCS_ENABLED") {
+        if !raw.trim().is_empty() {
+            return raw.trim().parse::<bool>().map_err(|_| {
+                ConfigError::Invalid("DOCS_ENABLED", "expected `true` or `false`".into())
+            });
+        }
+    }
+
+    let local = auth.public_base_url.starts_with("http://localhost")
+        || auth.public_base_url.starts_with("http://127.");
+
+    Ok(local && !auth.cookie_secure)
 }
 
 fn required(key: &'static str) -> Result<String, ConfigError> {
@@ -454,9 +502,67 @@ mod tests {
         assert!(llm(Some("sk-test")).is_configured());
     }
 
+    fn auth_at(base_url: &str, cookie_secure: bool) -> AuthConfig {
+        AuthConfig {
+            public_base_url: base_url.into(),
+            frontend_base_url: "http://localhost:3000".into(),
+            steam_openid_url: "https://steamcommunity.com/openid/login".into(),
+            session_ttl_hours: 720,
+            cookie_secure,
+        }
+    }
+
+    /// One test rather than four, because `DOCS_ENABLED` is process-global and
+    /// parallel tests that set and clear it race each other. The cases are
+    /// ordered: explicit values first, then the fallback with the variable
+    /// unset.
+    #[test]
+    fn the_docs_flag_is_explicit_first_and_production_safe_by_default() {
+        let production = auth_at("https://api.dota-coach.example", true);
+        let development = auth_at("http://localhost:8080", false);
+
+        env::set_var("DOCS_ENABLED", "true");
+        assert!(
+            docs_enabled(&production).unwrap(),
+            "an explicit opt-in wins over the heuristic"
+        );
+
+        env::set_var("DOCS_ENABLED", "false");
+        assert!(
+            !docs_enabled(&development).unwrap(),
+            "an explicit opt-out wins too"
+        );
+
+        // A typo would otherwise resolve to "production", silently, and whoever
+        // wrote `DOCS_ENABLED=yes` would never learn why the docs vanished.
+        env::set_var("DOCS_ENABLED", "yes");
+        assert!(matches!(
+            docs_enabled(&development),
+            Err(ConfigError::Invalid("DOCS_ENABLED", _))
+        ));
+
+        // Unset: the default is the whole point of the flag. An operator who
+        // never sets it must not publish the API's map from production.
+        env::remove_var("DOCS_ENABLED");
+        assert!(
+            docs_enabled(&development).unwrap(),
+            "a localhost deployment is somebody's machine"
+        );
+        assert!(docs_enabled(&auth_at("http://127.0.0.1:8080", false)).unwrap());
+        assert!(
+            !docs_enabled(&production).unwrap(),
+            "a public origin is production until told otherwise"
+        );
+        assert!(
+            !docs_enabled(&auth_at("http://localhost:8080", true)).unwrap(),
+            "secure cookies on localhost still reads as a production config"
+        );
+    }
+
     #[test]
     fn bind_address_joins_host_and_port() {
         let config = Config {
+            docs_enabled: true,
             database_url: "postgres://localhost/test".into(),
             host: "127.0.0.1".into(),
             port: 9000,

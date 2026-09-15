@@ -18,12 +18,22 @@ use crate::services::auth::{
     login_state_cookie, session_cookie,
 };
 use crate::state::AppState;
+use utoipa::ToSchema;
 
 /// `GET /auth/steam/login` — start the OpenID flow.
 ///
 /// A random nonce is stored in a short-lived cookie and echoed through
 /// `return_to`, so an attacker cannot drive a victim's browser through a login
 /// the victim did not start.
+#[utoipa::path(
+    get, path = "/api/auth/steam", tag = "auth",
+    summary = "Begin Steam sign-in",
+    description = "A browser navigation, not a fetch target: it sets a short-lived nonce cookie and 302s to Steam. The SteamID is derived server-side from Steam's signed response and is never accepted from a client.",
+    responses(
+        (status = 303, description = "Redirect to Steam's OpenID endpoint"),
+        (status = 500, description = "Login URL could not be built", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn login(State(state): State<AppState>, jar: CookieJar) -> AppResult<Response> {
     let nonce = crate::domain::session::NewToken::generate().plaintext;
 
@@ -41,6 +51,12 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar) -> AppResult<R
 /// Every failure lands the browser back on the frontend with an `error` code
 /// rather than rendering an API error page: this endpoint is reached by
 /// top-level navigation, not by `fetch`.
+#[utoipa::path(
+    get, path = "/api/auth/steam/callback", tag = "auth",
+    summary = "Complete Steam sign-in",
+    description = "Steam redirects the browser here. The response signature and the nonce are both verified before a session exists. On success the session cookie is set HTTP-only and the browser is sent to the frontend; on failure it is sent to the frontend's error page rather than shown an API error.",
+    responses((status = 303, description = "Redirect to the frontend, signed in or not"))
+)]
 pub async fn callback(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -155,12 +171,22 @@ fn parse_query(raw: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct SessionResponse {
     pub user: User,
 }
 
 /// `GET /api/auth/me` — who am I?
+#[utoipa::path(
+    get, path = "/api/auth/me", tag = "auth",
+    summary = "The signed-in user",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "The session's user", body = SessionResponse),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn me(CurrentUser(user): CurrentUser) -> AppResult<Json<SessionResponse>> {
     Ok(Json(SessionResponse { user }))
 }
@@ -169,6 +195,12 @@ pub async fn me(CurrentUser(user): CurrentUser) -> AppResult<Json<SessionRespons
 ///
 /// Deliberately succeeds even without a valid session: logging out is not an
 /// operation that should ever fail for the caller.
+#[utoipa::path(
+    post, path = "/api/auth/logout", tag = "auth",
+    summary = "Destroy the session",
+    description = "Deletes the session server-side and clears the cookie. Succeeds without a valid session: logging out is not an operation a client should have to be authenticated to perform.",
+    responses((status = 200, description = "Session destroyed, cookie cleared"))
+)]
 pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> AppResult<Response> {
     if let Some(cookie) = jar.get(SESSION_COOKIE) {
         repositories::session::delete_by_token_hash(&state.db, &hash_token(cookie.value())).await?;

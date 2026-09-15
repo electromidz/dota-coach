@@ -16,8 +16,20 @@ use crate::error::AppResult;
 use crate::repositories;
 use crate::services::billing::{self, WebhookOutcome};
 use crate::state::AppState;
+use utoipa::ToSchema;
 
 /// `GET /api/billing` — everything the billing page needs in one request.
+#[utoipa::path(
+    get, path = "/api/billing", tag = "billing",
+    summary = "Entitlement and billing state",
+    description = "The server is the only source of truth for trial and subscription state. Reading is always allowed: an expired account still needs to see why it is expired and how to fix it.",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "Plan, entitlement and subscription together", body = BillingOverview),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn overview(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -33,7 +45,7 @@ pub async fn overview(
     ))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct PlanResponse {
     pub plan: Plan,
     /// Whether this deployment can actually sell the plan. The landing page
@@ -49,6 +61,12 @@ pub struct PlanResponse {
 /// hard-coding them in the markup where they would drift from
 /// `BILLING_PRICE_CENTS`. It exposes nothing that is not already on the pricing
 /// copy — no account, no provider identifiers, no credentials.
+#[utoipa::path(
+    get, path = "/api/billing/plan", tag = "billing",
+    summary = "The public offer",
+    description = "Unauthenticated, for the signed-out landing page. Carries nothing that is not public pricing copy.",
+    responses((status = 200, description = "Price, currency and trial length", body = PlanResponse))
+)]
 pub async fn plan(State(state): State<AppState>) -> Json<PlanResponse> {
     Json(PlanResponse {
         plan: billing::plan(&state.config.billing),
@@ -56,7 +74,7 @@ pub async fn plan(State(state): State<AppState>) -> Json<PlanResponse> {
     })
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct SubscriptionResponse {
     pub entitlement: Entitlement,
     pub subscription: Subscription,
@@ -65,6 +83,16 @@ pub struct SubscriptionResponse {
 }
 
 /// `GET /api/billing/subscription` — the entitlement on its own.
+#[utoipa::path(
+    get, path = "/api/billing/subscription", tag = "billing",
+    summary = "The current subscription",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "Subscription, or null when there has never been one", body = SubscriptionResponse),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn subscription(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -80,7 +108,7 @@ pub async fn subscription(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct PaymentsResponse {
     pub payments: Vec<Payment>,
 }
@@ -88,6 +116,16 @@ pub struct PaymentsResponse {
 /// `GET /api/billing/payments` — this account's charges, newest first.
 ///
 /// Scoped by the session's user id, never by one supplied by the caller.
+#[utoipa::path(
+    get, path = "/api/billing/payments", tag = "billing",
+    summary = "Payment history",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "Every payment recorded for this user", body = PaymentsResponse),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn payments(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -102,7 +140,7 @@ pub async fn payments(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CheckoutResponse {
     pub payment: Payment,
 }
@@ -111,6 +149,20 @@ pub struct CheckoutResponse {
 ///
 /// Answers `503 FEATURE_UNAVAILABLE` when the deployment has no payment
 /// provider, which is the honest answer to a button that cannot work.
+#[utoipa::path(
+    post, path = "/api/billing/checkout", tag = "billing",
+    summary = "Open a checkout invoice",
+    description = "Returns a hosted payment URL. Creating an invoice grants nothing: the subscription activates only when the provider's signed webhook confirms settlement.",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "Invoice created; send the user to `payment_url`", body = CheckoutResponse),
+        (status = 409, description = "The subscription is already active", body = crate::error::ErrorBody),
+        (status = 502, description = "The payment provider failed", body = crate::error::ErrorBody),
+        (status = 503, description = "No payment provider is configured on this server", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn checkout(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -128,7 +180,7 @@ pub async fn checkout(
     Ok(Json(CheckoutResponse { payment }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct WebhookResponse {
     pub received: bool,
     /// `applied`, `duplicate` or `ignored`. Useful in provider dashboards and
@@ -142,6 +194,23 @@ pub struct WebhookResponse {
 /// access. It is safe because it trusts nothing but a valid HMAC over the exact
 /// bytes received: the body is read as raw [`Bytes`] rather than deserialized
 /// first, since any re-serialization would change what was signed.
+#[utoipa::path(
+    post, path = "/api/billing/webhook", tag = "billing",
+    summary = "Payment provider callback",
+    description = "The only unauthenticated write in the API. Safe because it believes nothing that is not signed: the HMAC is verified against the IPN secret before the body is read, and processing is idempotent, so a replayed callback settles nothing twice. Never called by a browser.",
+    // Taken as raw bytes, never as parsed JSON: the signature covers the exact
+    // payload sent, and re-serializing it would change what was signed.
+    request_body(
+        content = String,
+        content_type = "application/json",
+        description = "The provider's IPN payload, verified byte-for-byte against the signature header",
+    ),
+    responses(
+        (status = 200, description = "Accepted, or ignored as a duplicate", body = WebhookResponse),
+        (status = 400, description = "Signature missing, malformed, or does not match", body = crate::error::ErrorBody),
+        (status = 500, description = "Database failure while recording the payment", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn webhook(
     State(state): State<AppState>,
     headers: HeaderMap,

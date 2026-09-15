@@ -15,8 +15,9 @@ use crate::error::{AppError, AppResult};
 use crate::repositories;
 use crate::services::sync::{sync_player, SyncReport};
 use crate::state::AppState;
+use utoipa::ToSchema;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MeResponse {
     /// Steam account: persona, avatar, profile URL.
     pub user: User,
@@ -29,6 +30,17 @@ pub struct MeResponse {
 ///
 /// A pure read. Profile refresh happens on sync, so this never blocks on the
 /// Dota provider and never fails because the provider is down.
+#[utoipa::path(
+    get, path = "/api/players/me", tag = "players",
+    summary = "The linked Dota player",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "Profile and how much history is stored", body = MeResponse),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn me(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -43,7 +55,7 @@ pub async fn me(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct SyncResponse {
     pub dota_player: DotaPlayer,
     pub sync: SyncReport,
@@ -53,6 +65,20 @@ pub struct SyncResponse {
 ///
 /// Rate limited per player: syncing hits a third-party API, and Dota match
 /// history does not change second to second.
+#[utoipa::path(
+    post, path = "/api/players/me/sync", tag = "players",
+    summary = "Pull new matches from the Dota provider",
+    description = "Rate limited per player by `SYNC_COOLDOWN_SECONDS`. Metrics are recomputed for whatever it fetches, so a successful sync changes every number the rest of the API reports.",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "What was fetched and stored", body = SyncResponse),
+        (status = 429, description = "Called again inside the cooldown", body = crate::error::ErrorBody),
+        (status = 502, description = "The Dota provider failed or rate limited us", body = crate::error::ErrorBody),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn sync(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,

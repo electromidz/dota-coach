@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
+use utoipa::ToSchema;
 
 /// Creep score per minute above which a laner is treated as a core.
 /// Deliberately blunt: the provider does not report roles, so this is an
@@ -209,7 +210,7 @@ impl NewMatch {
 }
 
 /// A stored match, as returned by the API.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
 pub struct Match {
     pub id: Uuid,
     pub dota_player_id: Uuid,

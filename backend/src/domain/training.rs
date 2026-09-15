@@ -14,12 +14,13 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::benchmark::Confidence;
+use utoipa::ToSchema;
 
 /// What a focus is measured by.
 ///
 /// Deliberately small: every variant has to be computable per match from
 /// stored data, because that is what makes a progress series possible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FocusMeasure {
     DeathsPer10,
@@ -97,7 +98,7 @@ impl FocusMeasure {
 }
 
 /// Where a focus came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FocusSource {
     /// A gap against the peer distribution.
@@ -124,7 +125,7 @@ impl FocusSource {
 }
 
 /// Where a focus stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FocusStatus {
     Active,
@@ -162,7 +163,7 @@ impl FocusStatus {
 }
 
 /// One thing to work on, with the arithmetic that makes it checkable.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct TrainingFocus {
     pub id: Option<Uuid>,
     /// Stable key — `pattern.high_death_rate`, `benchmark.gold_per_min`.
@@ -203,7 +204,7 @@ pub struct TrainingFocus {
 }
 
 /// One weighted input to the selection score.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct FocusScorePart {
     pub key: &'static str,
     pub label: &'static str,
@@ -214,7 +215,7 @@ pub struct FocusScorePart {
 }
 
 /// One bucket of the progress series.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ProgressPoint {
     /// Matches in this bucket that the measure could be read from.
     pub matches: i64,
@@ -224,7 +225,7 @@ pub struct ProgressPoint {
 }
 
 /// A measure over time, oldest first, so it reads left to right.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ProgressSeries {
     pub measure: FocusMeasure,
     pub label: &'static str,

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// A metric that can be benchmarked against other players.
 ///
@@ -6,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// matters more than it looks: sitting in the 90th percentile for deaths is a
 /// bad result, and a percentile that ignored direction would report it as a
 /// strength.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BenchmarkMetric {
     GoldPerMin,
@@ -79,7 +80,7 @@ impl BenchmarkMetric {
 /// The spec asks for hero/role/rank/patch segmentation, but a provider may not
 /// offer all four. Reporting what was *really* used stops the UI claiming a
 /// rank-aware comparison that the data behind it cannot support.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Segment {
     Hero,
@@ -101,7 +102,7 @@ pub struct BenchmarkContext {
 ///
 /// This is about the *player's* sample, not the peer group: an average over
 /// three games is noise however good the reference distribution is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
     /// Below the floor. No percentile is claimed.
@@ -112,7 +113,7 @@ pub enum Confidence {
 }
 
 /// One metric, compared.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct BenchmarkResult {
     pub metric: BenchmarkMetric,
     pub label: &'static str,

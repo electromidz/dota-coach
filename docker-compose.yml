@@ -23,6 +23,9 @@ services:
       HOST: 0.0.0.0
       PORT: "8080"
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      # Unset, the backend decides from PUBLIC_BASE_URL: docs on for localhost,
+      # off for anything that looks like production.
+      DOCS_ENABLED: ${DOCS_ENABLED:-}
       # Must match what the browser reaches: Steam signs the return_to URL.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
       FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:3000}

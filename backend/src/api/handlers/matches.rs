@@ -15,6 +15,7 @@ use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
 use crate::state::AppState;
+use utoipa::ToSchema;
 
 const DEFAULT_LIMIT: i64 = 20;
 const MAX_LIMIT: i64 = 100;
@@ -25,7 +26,7 @@ pub struct PageQuery {
     pub limit: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MatchListResponse {
     pub matches: Vec<Match>,
     pub page: i64,
@@ -35,6 +36,25 @@ pub struct MatchListResponse {
 }
 
 /// `GET /api/matches?page=1&limit=20`
+#[utoipa::path(
+    get, path = "/api/matches", tag = "matches",
+    summary = "Stored match history",
+    security(("session" = [])),
+    params(
+        ("page" = Option<i64>, Query,
+            description = "1-based page number. Defaults to 1.",
+            example = 1, minimum = 1),
+        ("limit" = Option<i64>, Query,
+            description = "Matches per page. Defaults to 20.",
+            example = 20, minimum = 1, maximum = 100),
+    ),
+    responses(
+        (status = 200, description = "One page of matches, newest first", body = MatchListResponse),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn list(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -61,6 +81,23 @@ pub async fn list(
 ///
 /// A match belonging to someone else answers 404, not 403: whether an id
 /// exists is not information another user is entitled to.
+#[utoipa::path(
+    get, path = "/api/matches/{id}", tag = "matches",
+    summary = "One match with its metrics",
+    security(("session" = [])),
+    params(
+        ("id" = Uuid, Path,
+            description = "Internal match id — the `id` from `/api/matches`, not the Dota match id.",
+            example = "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+    ),
+    responses(
+        (status = 200, description = "The match and its computed metrics", body = MatchResponse),
+        (status = 404, description = "No such match, or it belongs to another player", body = crate::error::ErrorBody),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn get(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -75,7 +112,7 @@ pub async fn get(
     Ok(Json(MatchResponse { match_ }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MatchResponse {
     #[serde(rename = "match")]
     pub match_: Match,

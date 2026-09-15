@@ -12,9 +12,10 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use uuid::Uuid;
+use utoipa::ToSchema;
 
 /// What an account may do right now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Entitlement {
     /// Trial spent, nothing paid for. The measured product still works; the
@@ -41,7 +42,7 @@ impl Entitlement {
 }
 
 /// Lifecycle of the subscription row itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SubscriptionStatus {
     Trialing,
@@ -88,7 +89,7 @@ impl SubscriptionStatus {
 ///
 /// Deliberately coarser than any provider's own vocabulary: the domain only
 /// needs to know whether money is still expected, has arrived, or never will.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PaymentStatus {
     /// Created, nothing received yet.
@@ -145,7 +146,7 @@ impl PaymentStatus {
 }
 
 /// An account's billing state.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Subscription {
     pub id: Uuid,
     pub status: SubscriptionStatus,
@@ -216,7 +217,7 @@ impl Subscription {
 }
 
 /// A charge, as the domain sees it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Payment {
     pub id: Uuid,
     pub provider: String,
@@ -237,7 +238,7 @@ pub struct Payment {
 
 /// The offer, as configured. Sent to the frontend so the price is displayed
 /// from one place rather than written into the markup.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Plan {
     pub name: String,
     pub amount_cents: i64,
@@ -247,7 +248,7 @@ pub struct Plan {
 }
 
 /// Everything `/api/billing` answers in one object.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct BillingOverview {
     pub entitlement: Entitlement,
     pub subscription: Subscription,

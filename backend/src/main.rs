@@ -114,6 +114,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("BILLING_ENFORCE is off - premium features are open to every account");
     }
 
+    if config.docs_enabled {
+        tracing::info!(
+            docs = api::docs::UI_PATH,
+            spec = api::docs::SPEC_PATH,
+            "api documentation mounted"
+        );
+    }
+
     let state = AppState::new(
         pool,
         config.clone(),
@@ -162,6 +170,17 @@ fn warn_about_deployment(config: &Config) {
         tracing::warn!(
             public_base_url = %config.auth.public_base_url,
             "COOKIE_SECURE is true but the public base URL is plain HTTP - the browser will discard the session cookie"
+        );
+    }
+
+    // Not an error — an operator may well want this — but it publishes a full
+    // map of the API to anyone who guesses the path, so it should never be a
+    // surprise found later.
+    if config.docs_enabled && !local(&config.auth.public_base_url) {
+        tracing::warn!(
+            docs = crate::api::docs::UI_PATH,
+            spec = crate::api::docs::SPEC_PATH,
+            "DOCS_ENABLED is true outside localhost - the API documentation is publicly reachable"
         );
     }
 

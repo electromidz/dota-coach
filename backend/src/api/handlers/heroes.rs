@@ -26,6 +26,7 @@ use crate::services::benchmarks::{self, percentile, PlayerValues};
 use crate::services::heroes::{self, FitInput, PlayerBaseline, PoolSummary, RECENT_WINDOW};
 use crate::services::training;
 use crate::state::AppState;
+use utoipa::ToSchema;
 
 #[derive(Deserialize)]
 pub struct HeroQuery {
@@ -33,7 +34,7 @@ pub struct HeroQuery {
     pub limit: Option<usize>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct HeroPoolResponse {
     pub pool: Vec<HeroPoolEntry>,
     pub summary: PoolSummary,
@@ -42,13 +43,13 @@ pub struct HeroPoolResponse {
     pub note: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RecommendationsResponse {
     pub recommendations: Vec<HeroFit>,
     pub meta: MetaContext,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct HeroIntelligenceResponse {
     pub pool: Vec<HeroPoolEntry>,
     pub summary: PoolSummary,
@@ -65,7 +66,7 @@ pub struct HeroIntelligenceResponse {
 ///
 /// Reported on every response so a client never has to assume a rank-aware
 /// comparison the data behind it cannot support.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MetaContext {
     pub available: bool,
     /// Provider name, for attribution. Never a key or a URL.
@@ -77,6 +78,18 @@ pub struct MetaContext {
 }
 
 /// `GET /api/heroes`
+#[utoipa::path(
+    get, path = "/api/heroes", tag = "heroes",
+    summary = "The player's hero pool",
+    description = "Built from stored matches alone, so it keeps answering while the hero meta provider is down.",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "Every hero played, classified", body = HeroPoolResponse),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn pool(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -94,6 +107,25 @@ pub async fn pool(
 }
 
 /// `GET /api/heroes/recommendations`
+#[utoipa::path(
+    get, path = "/api/heroes/recommendations", tag = "heroes",
+    summary = "Heroes worth playing now",
+    description = "Ranked by fit score, not by global win rate: a strong meta hero the player has never played can score below a weaker one they are good at. Each entry carries the components behind its score.",
+    security(("session" = [])),
+    params(
+        ("limit" = Option<usize>, Query,
+            description = "How many recommendations to return. Defaults to HERO_RECOMMENDATION_LIMIT (8), \
+and is clamped to 50 however high it is set.",
+            example = 8, minimum = 1, maximum = 50),
+    ),
+    responses(
+        (status = 200, description = "Scored recommendations, best first", body = RecommendationsResponse),
+        (status = 502, description = "The hero meta provider is unavailable", body = crate::error::ErrorBody),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn recommendations(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -108,6 +140,24 @@ pub async fn recommendations(
 }
 
 /// `GET /api/hero-intelligence`
+#[utoipa::path(
+    get, path = "/api/hero-intelligence", tag = "heroes",
+    summary = "Pool, meta and recommendations together",
+    description = "One call for the hero page. Degrades rather than fails: if the meta provider is down the pool half still answers.",
+    security(("session" = [])),
+    params(
+        ("limit" = Option<usize>, Query,
+            description = "How many recommendations to include. Defaults to HERO_RECOMMENDATION_LIMIT (8), \
+and is clamped to 50 however high it is set.",
+            example = 8, minimum = 1, maximum = 50),
+    ),
+    responses(
+        (status = 200, description = "Combined hero intelligence", body = HeroIntelligenceResponse),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
 pub async fn intelligence(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
