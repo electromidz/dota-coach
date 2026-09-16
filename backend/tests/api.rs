@@ -37,6 +37,8 @@ async fn an_anonymous_request_is_rejected_everywhere() {
         ("GET", "/api/heroes/recommendations"),
         ("GET", "/api/hero-intelligence"),
         ("GET", "/api/coach"),
+        ("GET", "/api/coach/roles"),
+        ("POST", "/api/coach/role"),
         ("GET", "/api/coach/player-model"),
         ("GET", "/api/coach/training-focus"),
         ("POST", "/api/coach/analyze"),
@@ -704,7 +706,20 @@ async fn stats_aggregate_wins_heroes_and_roles() {
     // Every sample match is the same hero and role, so both roll up to one row.
     assert_eq!(body["heroes"].as_array().unwrap().len(), 1);
     assert_eq!(body["heroes"][0]["matches"], 10);
-    assert_eq!(body["roles"].as_array().unwrap().len(), 1);
+
+    let roles = body["role_analysis"]["roles"].as_array().unwrap();
+    assert_eq!(roles.len(), 1);
+    assert_eq!(roles[0]["role"], "carry");
+    assert_eq!(roles[0]["matches"], 10);
+    assert_eq!(body["role_analysis"]["unclassified_matches"], 0);
+
+    // The population every number above was computed over, stated on the
+    // response rather than assumed by the client.
+    assert_eq!(body["scope"]["population"], "ranked_public_all_pick");
+    assert_eq!(body["scope"]["analyzed_matches"], 10);
+    assert_eq!(body["scope"]["confidence"], "limited");
+    assert_eq!(body["eligibility"]["total_matches"], 10);
+    assert_eq!(body["eligibility"]["eligible_matches"], 10);
 
     app.cleanup(&[steam_id]).await;
 }
@@ -1248,6 +1263,8 @@ async fn reading_the_coach_shows_measured_evidence_without_calling_the_model() {
     );
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     let body = app.get("/api/coach", Some(&session.token)).await.json();
 
@@ -1288,6 +1305,8 @@ async fn an_analysis_may_only_cite_evidence_that_exists() {
     );
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     let body = app
         .post("/api/coach/analyze", Some(&session.token))
@@ -1350,6 +1369,8 @@ async fn an_answer_citing_invented_evidence_is_rejected_rather_than_shown() {
     );
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     let response = app.post("/api/coach/analyze", Some(&session.token)).await;
 
@@ -1377,6 +1398,8 @@ async fn asking_the_same_question_twice_costs_one_model_call() {
     );
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     let first = app
         .post("/api/coach/analyze", Some(&session.token))
@@ -1413,6 +1436,8 @@ async fn a_deployment_without_a_model_still_serves_the_evidence() {
     );
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     let read = app.get("/api/coach", Some(&session.token)).await;
     assert_eq!(read.status, StatusCode::OK);
@@ -1443,6 +1468,8 @@ async fn a_model_outage_fails_the_generation_and_nothing_else() {
     );
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     let generate = app.post("/api/coach/analyze", Some(&session.token)).await;
     assert_eq!(generate.status, StatusCode::BAD_GATEWAY);
@@ -1585,6 +1612,8 @@ async fn the_cooldown_caps_how_often_a_player_can_spend_a_model_call() {
     );
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     assert_eq!(
         app.post("/api/coach/analyze", Some(&session.token))
@@ -1796,6 +1825,8 @@ async fn recurring_patterns_reach_the_coach_as_citable_evidence() {
     );
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     let body = app.get("/api/coach", Some(&session.token)).await.json();
 
@@ -1825,6 +1856,8 @@ async fn the_model_says_how_well_it_knows_the_player() {
 
     let session = app.login_as(new_player).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
     let sparse = app
         .get("/api/coach/player-model", Some(&session.token))
         .await
@@ -1902,6 +1935,8 @@ async fn the_player_gets_exactly_one_training_focus_with_a_checkable_goal() {
     );
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     let body = app
         .get("/api/coach/training-focus", Some(&session.token))
@@ -1985,6 +2020,8 @@ async fn progress_is_measured_against_where_the_player_started() {
     let app = app(db, dota.clone(), StubVerifier::rejecting());
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     let before = app
         .get("/api/coach/training-focus", Some(&session.token))
@@ -2032,6 +2069,8 @@ async fn a_finished_focus_is_replaced_and_kept_as_history() {
     let app = app(db, dota.clone(), StubVerifier::rejecting());
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     let first = app
         .get("/api/coach/training-focus", Some(&session.token))
@@ -2073,13 +2112,15 @@ async fn a_player_with_nothing_to_fix_is_told_so_rather_than_given_busywork() {
     let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
     let session = app.login_as(steam_id).await;
 
-    let body = app
+    // No matches at all: the answer is "sync", not "choose a role". A player
+    // with nothing stored cannot meaningfully pick one, and sending them to a
+    // selection screen with five empty options would be a dead end.
+    let response = app
         .get("/api/coach/training-focus", Some(&session.token))
-        .await
-        .json();
+        .await;
 
-    assert!(body["focus"].is_null());
-    assert!(body["note"].as_str().unwrap().contains("Sync"));
+    assert_eq!(response.status, StatusCode::CONFLICT);
+    assert!(response.body.contains("Sync"), "{}", response.body);
 
     app.cleanup(&[steam_id]).await;
 }
@@ -2097,6 +2138,8 @@ async fn the_current_focus_reaches_the_coach_as_evidence() {
     );
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     // Reading the coach before a focus exists must not create one.
     let before = app.get("/api/coach", Some(&session.token)).await.json();
@@ -2495,6 +2538,8 @@ async fn an_expired_trial_closes_generation_but_not_the_product() {
     );
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     // Materialise the trial, then age it out.
     app.get("/api/billing", Some(&session.token)).await;
@@ -2644,6 +2689,8 @@ async fn a_verified_payment_activates_the_subscription() {
     );
     let session = app.login_as(steam_id).await;
     app.post("/api/players/me/sync", Some(&session.token)).await;
+    // Coaching is role-scoped: these matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
 
     let (order_id, provider_payment_id) = checkout(&app, &session.token).await;
     app.expire_trial(steam_id).await;

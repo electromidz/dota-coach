@@ -47,16 +47,28 @@ pub struct Refreshed {
     pub patterns: Vec<RecurringPattern>,
 }
 
-/// Re-detect patterns and record them.
+/// Re-detect the player's persistent patterns and record them.
 ///
 /// Local only: it reads stored matches and metrics, so it never touches a
 /// provider and can safely run on every sync as well as on every read of the
 /// model. Detection over a few hundred rows is arithmetic.
+///
+/// Scoped to the competitive window across every role. Persistent patterns are
+/// claims about how this player plays the game they are being coached for, and
+/// a "high death rate" detected largely in Turbo would be a claim about a
+/// different game — while narrowing it to one role belongs to
+/// [`analyze_scope`], which does not persist anything.
 pub async fn refresh(
     pool: &sqlx::PgPool,
     dota_player_id: uuid::Uuid,
+    window: i64,
 ) -> Result<Refreshed, sqlx::Error> {
-    let history = crate::repositories::player_model::history(pool, dota_player_id).await?;
+    let history = crate::repositories::player_model::history(
+        pool,
+        dota_player_id,
+        &crate::domain::scope::MatchScope::competitive(window),
+    )
+    .await?;
     let patterns = patterns::detect(&history);
 
     crate::repositories::player_model::sync_patterns(pool, dota_player_id, &patterns).await?;
@@ -68,6 +80,28 @@ pub async fn refresh(
         ModelConfidence::for_matches(history.len() as i64),
     )
     .await?;
+
+    Ok(Refreshed { history, patterns })
+}
+
+/// Detect patterns inside one scope, without recording them.
+///
+/// The role-scoped counterpart to [`refresh`], and deliberately read-only.
+/// `player_patterns` is keyed by player and pattern id, so writing a Carry
+/// pattern and a Support pattern under the same id would have each overwrite
+/// the other — and `first_detected_at`, the field that makes "you have been
+/// doing this since March" possible, would end up meaning neither.
+///
+/// The cost is that a role-scoped pattern has no first-sighting date. That is
+/// the honest answer for a figure computed fresh from a moving window, and it
+/// is better than a date that silently belongs to a different role.
+pub async fn analyze_scope(
+    pool: &sqlx::PgPool,
+    dota_player_id: uuid::Uuid,
+    scope: &crate::domain::scope::MatchScope,
+) -> Result<Refreshed, sqlx::Error> {
+    let history = crate::repositories::player_model::history(pool, dota_player_id, scope).await?;
+    let patterns = patterns::detect(&history);
 
     Ok(Refreshed { history, patterns })
 }

@@ -8,12 +8,14 @@
 //! Pure by design: no database, no provider, no clock beyond what the caller
 //! passes in, so the exact text a model will be shown is testable.
 
-use crate::domain::benchmark::BenchmarkResult;
+use crate::domain::benchmark::{BenchmarkResult, Confidence};
 use crate::domain::coaching::{Evidence, EvidenceKind};
 use crate::domain::hero::{HeroFit, HeroPoolEntry};
 use crate::domain::metrics::{MatchMetrics, PlayerStats};
 use crate::domain::player_model::{PatternStatus, RecurringPattern};
 use crate::domain::r#match::Match;
+use crate::domain::role::CoachableRole;
+use crate::domain::scope::SampleConfidence;
 use crate::domain::training::TrainingFocus;
 use crate::services::benchmarks::percentile;
 
@@ -27,8 +29,29 @@ const MAX_PATTERN_EVIDENCE: usize = 4;
 /// Matches counted as "recent form" in the player-wide evidence.
 pub const FORM_WINDOW: usize = 10;
 
+/// What population the evidence describes.
+///
+/// This is not decoration. Every statement the builder composes is a claim
+/// about a specific set of matches, and the model is shown the claim without
+/// the set — so the set has to be *stated*, as the first piece of evidence,
+/// in the same voice as the rest. Without it "you die 4.1 times per 10
+/// minutes" is a sentence about nothing in particular.
+///
+/// The scoping itself is enforced upstream, by the queries that produced these
+/// figures. This only says what happened.
+#[derive(Debug, Clone, Copy)]
+pub struct EvidenceScope {
+    /// The role every figure below is about, when there is one.
+    pub role: Option<CoachableRole>,
+    /// Eligible matches the scope resolved to.
+    pub matches: i64,
+    pub confidence: SampleConfidence,
+}
+
 /// Everything the builder needs, already fetched and already computed.
 pub struct EvidenceInputs<'a> {
+    /// The population everything else describes.
+    pub scope: EvidenceScope,
     pub stats: &'a PlayerStats,
     /// Newest first.
     pub recent: &'a [Match],
@@ -64,6 +87,7 @@ pub fn build(inputs: &EvidenceInputs<'_>) -> Vec<Evidence> {
 
     let mut evidence = Vec::new();
 
+    scope(inputs.scope, &mut evidence);
     overall(inputs.stats, &mut evidence);
     form(inputs.recent, &mut evidence);
     benchmarks(inputs.benchmarks, inputs.benchmark_hero, &mut evidence);
@@ -76,6 +100,46 @@ pub fn build(inputs: &EvidenceInputs<'_>) -> Vec<Evidence> {
     }
 
     evidence
+}
+
+/// The population, stated first and in the same form as everything else.
+///
+/// It leads deliberately: the model reads the list in order, and every figure
+/// after this one is qualified by it.
+fn scope(scope: EvidenceScope, out: &mut Vec<Evidence>) {
+    let statement = match scope.role {
+        Some(role) => format!(
+            "Everything below is measured over your last {} eligible {} as {}. \
+             Only Ranked and public All Pick games count; Turbo, Ability Draft, \
+             custom and event games are excluded, and so is every match you \
+             played in another role.",
+            scope.matches,
+            plural(scope.matches, "match", "matches"),
+            role.label(),
+        ),
+        None => format!(
+            "Everything below is measured over your last {} eligible {}. Only \
+             Ranked and public All Pick games count; Turbo, Ability Draft, \
+             custom and event games are excluded.",
+            scope.matches,
+            plural(scope.matches, "match", "matches"),
+        ),
+    };
+
+    out.push(Evidence {
+        id: "scope.population".to_string(),
+        kind: EvidenceKind::Overall,
+        label: "What was analysed".to_string(),
+        statement,
+        sample: scope.matches,
+        // The sample-size reading for the window as a whole, which is a
+        // different question from whether a percentile may be claimed.
+        confidence: match scope.confidence {
+            SampleConfidence::Limited => Confidence::Insufficient,
+            SampleConfidence::Moderate => Confidence::Low,
+            SampleConfidence::Strong => Confidence::Adequate,
+        },
+    });
 }
 
 fn overall(stats: &PlayerStats, out: &mut Vec<Evidence>) {
@@ -725,6 +789,11 @@ mod tests {
         recommendations: &'a [HeroFit],
     ) -> EvidenceInputs<'a> {
         EvidenceInputs {
+            scope: EvidenceScope {
+                role: Some(CoachableRole::Carry),
+                matches: stats.matches,
+                confidence: SampleConfidence::for_matches(stats.matches),
+            },
             stats,
             recent,
             benchmarks,

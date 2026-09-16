@@ -48,6 +48,11 @@ pub fn build(state: AppState, config: &Config) -> Router {
         // rate-limited verb in the API and is mounted separately below, with a
         // timeout that fits a model rather than a database.
         .route("/coach", get(coach::get))
+        // Role selection. Deterministic and free: choosing what to work on is
+        // not a model call, and gating it would leave a trial-expired account
+        // unable to say what it wants coaching on.
+        .route("/coach/roles", get(coach::roles))
+        .route("/coach/role", post(coach::select_role))
         .route("/coach/player-model", get(coach::player_model))
         .route("/coach/training-focus", get(coach::training_focus))
         // Billing. Reading is always allowed — an expired account still needs

@@ -19,6 +19,7 @@ use crate::api::extract::{AppQuery, CurrentUser};
 use crate::domain::benchmark::{BenchmarkContext, Segment};
 use crate::domain::hero::{HeroFit, HeroMeta, HeroMetaContext, HeroPoolEntry, RankBracket};
 use crate::domain::player::DotaPlayer;
+use crate::domain::scope::MatchScope;
 use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
@@ -95,7 +96,7 @@ pub async fn pool(
     CurrentUser(user): CurrentUser,
 ) -> AppResult<Json<HeroPoolResponse>> {
     let player = load_linked_player(&state, &user).await?;
-    let (pool, _) = load_pool(&state, &player).await?;
+    let (pool, _) = load_pool(&state, &player, &MatchScope::career()).await?;
     let summary = heroes::summarize(&pool);
 
     Ok(Json(HeroPoolResponse {
@@ -131,7 +132,7 @@ pub async fn recommendations(
     CurrentUser(user): CurrentUser,
     AppQuery(query): AppQuery<HeroQuery>,
 ) -> AppResult<Json<RecommendationsResponse>> {
-    let built = build(&state, &user, query.limit).await?;
+    let built = build(&state, &user, query.limit, &MatchScope::career(), None).await?;
 
     Ok(Json(RecommendationsResponse {
         recommendations: built.recommendations,
@@ -163,7 +164,7 @@ pub async fn intelligence(
     CurrentUser(user): CurrentUser,
     AppQuery(query): AppQuery<HeroQuery>,
 ) -> AppResult<Json<HeroIntelligenceResponse>> {
-    let built = build(&state, &user, query.limit).await?;
+    let built = build(&state, &user, query.limit, &MatchScope::career(), None).await?;
 
     Ok(Json(HeroIntelligenceResponse {
         note: empty_pool_note(&built.pool),
@@ -188,12 +189,22 @@ pub(crate) struct Built {
 /// Also read by the coaching layer, which needs the same pool and the same
 /// scored candidates as evidence — recomputing them there would be a second
 /// place for the two answers to drift apart.
-pub(crate) async fn build(state: &AppState, user: &User, limit: Option<usize>) -> AppResult<Built> {
+/// `scope` decides which matches the pool and the baseline are read from. The
+/// hero pages pass the career scope — a player's repertoire is their whole
+/// repertoire — while the coaching layer passes its role scope, so a safe-lane
+/// Phantom Assassin record never turns up as evidence in support coaching.
+pub(crate) async fn build(
+    state: &AppState,
+    user: &User,
+    limit: Option<usize>,
+    scope: &MatchScope,
+    role: Option<crate::domain::role::CoachableRole>,
+) -> AppResult<Built> {
     let config = &state.config.heroes;
     let limit = limit.unwrap_or(config.recommendation_limit).clamp(1, 50);
 
     let player = load_linked_player(state, user).await?;
-    let (pool, baseline) = load_pool(state, &player).await?;
+    let (pool, baseline) = load_pool(state, &player, scope).await?;
 
     // A provider outage degrades the page rather than failing it: the player's
     // own history is local and still worth scoring on.
@@ -232,11 +243,12 @@ pub(crate) async fn build(state: &AppState, user: &User, limit: Option<usize>) -
         .map(|set| set.heroes.iter().map(|h| (h.hero_id, h)).collect())
         .unwrap_or_default();
 
-    let benchmarks = benchmark_percentiles(state, &player, &pool, config.benchmark_lookups).await;
+    let benchmarks =
+        benchmark_percentiles(state, &player, &pool, config.benchmark_lookups, scope).await;
 
     // Training-focus compatibility, as a modifier on the finished score. Read
     // only: the heroes page reflects whatever focus is set, it never sets one.
-    let (alignment, focus_title) = focus_alignment(state, &player).await;
+    let (alignment, focus_title) = focus_alignment(state, &player, scope, role).await;
 
     // Candidates: everything the player has played, plus the strongest heroes
     // they have not. Including the latter is what makes this "which strong
@@ -321,8 +333,10 @@ fn top_meta(set: &Option<crate::services::hero_meta::HeroMetaSet>, limit: usize)
 async fn focus_alignment(
     state: &AppState,
     player: &DotaPlayer,
+    scope: &MatchScope,
+    role: Option<crate::domain::role::CoachableRole>,
 ) -> (HashMap<i32, f32>, Option<String>) {
-    let focus = match repositories::training::active(&state.db, player.id).await {
+    let focus = match repositories::training::active(&state.db, player.id, role).await {
         Ok(Some(focus)) => focus,
         Ok(None) => return (HashMap::new(), None),
         Err(e) => {
@@ -331,7 +345,7 @@ async fn focus_alignment(
         }
     };
 
-    let history = match repositories::player_model::history(&state.db, player.id).await {
+    let history = match repositories::player_model::history(&state.db, player.id, scope).await {
         Ok(history) => history,
         Err(e) => {
             tracing::warn!(error = %e, "history lookup for focus alignment failed");
@@ -354,6 +368,7 @@ async fn benchmark_percentiles(
     player: &DotaPlayer,
     pool: &[HeroPoolEntry],
     lookups: usize,
+    scope: &MatchScope,
 ) -> HashMap<i32, f32> {
     let candidates: Vec<&HeroPoolEntry> = pool
         .iter()
@@ -363,7 +378,7 @@ async fn benchmark_percentiles(
 
     let fetches = candidates.iter().map(|entry| async move {
         let averages =
-            repositories::metrics::hero_averages(&state.db, player.id, entry.hero_id).await;
+            repositories::metrics::hero_averages(&state.db, player.id, entry.hero_id, scope).await;
         let averages = match averages {
             Ok(a) => a,
             Err(e) => {
@@ -413,9 +428,13 @@ async fn benchmark_percentiles(
 async fn load_pool(
     state: &AppState,
     player: &DotaPlayer,
+    scope: &MatchScope,
 ) -> AppResult<(Vec<HeroPoolEntry>, PlayerBaseline)> {
-    let rows = repositories::hero_pool::all(&state.db, player.id, RECENT_WINDOW).await?;
-    let stats = repositories::metrics::player_stats(&state.db, player.id).await?;
+    let rows = repositories::hero_pool::all(&state.db, player.id, RECENT_WINDOW, scope).await?;
+    // The baseline every hero is compared against comes from the same scope:
+    // measuring a hero against a career average the pool does not contain
+    // would make "above your own average" mean two different things at once.
+    let stats = repositories::metrics::player_stats_scoped(&state.db, player.id, scope).await?;
 
     let baseline = PlayerBaseline {
         win_rate: stats.win_rate,

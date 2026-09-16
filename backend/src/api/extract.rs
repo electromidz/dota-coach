@@ -5,8 +5,8 @@
 //! wrappers keep the same ergonomics and route every rejection through
 //! [`AppError`].
 
-use axum::extract::rejection::{PathRejection, QueryRejection};
-use axum::extract::{FromRef, FromRequestParts};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::extract::{FromRef, FromRequest, FromRequestParts, Request};
 use axum::http::request::Parts;
 use axum_extra::extract::CookieJar;
 
@@ -105,6 +105,32 @@ where
                 tracing::debug!(detail = %rejection, "path rejected");
                 Err(AppError::BadRequest(
                     "That identifier is not valid.".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+/// `Json<T>` with a JSON rejection.
+///
+/// Axum's own rejection quotes the serde error, which names internal field
+/// paths and types; this one says what the caller can act on and logs the rest.
+pub struct AppJson<T>(pub T);
+
+impl<S, T> FromRequest<S> for AppJson<T>
+where
+    S: Send + Sync,
+    axum::Json<T>: FromRequest<S, Rejection = JsonRejection>,
+{
+    type Rejection = AppError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match axum::Json::<T>::from_request(request, state).await {
+            Ok(axum::Json(value)) => Ok(Self(value)),
+            Err(rejection) => {
+                tracing::debug!(detail = %rejection, "body rejected");
+                Err(AppError::BadRequest(
+                    "The request body is not valid JSON for this endpoint.".to_string(),
                 ))
             }
         }

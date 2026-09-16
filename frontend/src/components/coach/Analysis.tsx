@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import { EvidenceList } from "@/components/coach/EvidenceList";
 import { InsightCard } from "@/components/coach/InsightCard";
+import { TrainingPlan } from "@/components/coach/TrainingPlan";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -78,7 +79,17 @@ export function Analysis({
       {analysis ? (
         <section className="flex flex-col gap-4">
           <Card className="flex flex-col gap-2" glow="keyword">
-            <p className="leading-relaxed text-ink">{analysis.summary}</p>
+            {/* The summary is dropped server-side when it states a figure the
+                evidence does not contain, so it can legitimately be empty —
+                the insights below are the part that was verified either way. */}
+            {analysis.summary ? (
+              <p className="leading-relaxed text-ink">{analysis.summary}</p>
+            ) : (
+              <p className="text-sm leading-relaxed text-ink-muted">
+                The coach&apos;s headline could not be verified against your
+                measured data, so it was discarded. The insights below were.
+              </p>
+            )}
             <p className="font-mono text-[0.625rem] text-ink-faint">
               {formatGeneratedAt(analysis.generated_at)} · {analysis.model}
             </p>
@@ -98,6 +109,11 @@ export function Analysis({
               evidence={analysis.evidence}
             />
           ))}
+
+          {/* Last, because a plan is what you do once you accept the reading
+              above it. Absent when nothing survived validation, which is an
+              answer rather than a gap to apologise for. */}
+          <TrainingPlan plan={analysis.plan} evidence={analysis.evidence} />
         </section>
       ) : (
         <Card className="flex flex-col gap-3">

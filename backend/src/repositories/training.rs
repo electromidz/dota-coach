@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::domain::role::CoachableRole;
 use crate::domain::training::{FocusMeasure, FocusSource, FocusStatus, TrainingFocus};
 use crate::services::training;
 
@@ -14,28 +15,38 @@ macro_rules! columns {
     };
 }
 
-/// The focus the player is currently working on.
+/// The focus the player is currently working on **in one role**.
+///
+/// Scoped because the focus is derived from role-scoped evidence: a Carry
+/// focus selected from Carry matches would be nonsense advice for a player
+/// working on Hard Support, and switching roles must not cost a player the
+/// goal they had in the role they will come back to.
 pub async fn active(
     pool: &PgPool,
     dota_player_id: Uuid,
+    role: Option<CoachableRole>,
 ) -> Result<Option<TrainingFocus>, sqlx::Error> {
     let row = sqlx::query_as::<_, Row>(concat!(
         "SELECT ",
         columns!(),
         " FROM training_focus
-          WHERE dota_player_id = $1 AND status = 'active'"
+          WHERE dota_player_id = $1
+            AND role IS NOT DISTINCT FROM $2
+            AND status = 'active'"
     ))
     .bind(dota_player_id)
+    .bind(role.map(CoachableRole::slug))
     .fetch_optional(pool)
     .await?;
 
     Ok(row.and_then(Row::into_domain))
 }
 
-/// Everything the player has worked on, newest first.
+/// Everything the player has worked on in this role, newest first.
 pub async fn history(
     pool: &PgPool,
     dota_player_id: Uuid,
+    role: Option<CoachableRole>,
     limit: i64,
 ) -> Result<Vec<TrainingFocus>, sqlx::Error> {
     let rows = sqlx::query_as::<_, Row>(concat!(
@@ -43,10 +54,12 @@ pub async fn history(
         columns!(),
         " FROM training_focus
           WHERE dota_player_id = $1
+            AND role IS NOT DISTINCT FROM $2
           ORDER BY started_at DESC
-          LIMIT $2"
+          LIMIT $3"
     ))
     .bind(dota_player_id)
+    .bind(role.map(CoachableRole::slug))
     .bind(limit)
     .fetch_all(pool)
     .await?;
@@ -64,29 +77,36 @@ pub async fn history(
 pub async fn start(
     pool: &PgPool,
     dota_player_id: Uuid,
+    role: Option<CoachableRole>,
     focus: &TrainingFocus,
 ) -> Result<(Uuid, DateTime<Utc>), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
+    // Only this role's active focus is retired. Another role's goal is not
+    // finished merely because the player is working on something else today.
     sqlx::query(
         "UPDATE training_focus
             SET status     = 'retired',
                 ended_at   = COALESCE(ended_at, now()),
                 updated_at = now()
-          WHERE dota_player_id = $1 AND status = 'active'",
+          WHERE dota_player_id = $1
+            AND role IS NOT DISTINCT FROM $2
+            AND status = 'active'",
     )
     .bind(dota_player_id)
+    .bind(role.map(CoachableRole::slug))
     .execute(&mut *tx)
     .await?;
 
     let (id, started_at): (Uuid, DateTime<Utc>) = sqlx::query_as(
         "INSERT INTO training_focus
-             (dota_player_id, focus_key, title, why, source, measure, pattern_id,
+             (dota_player_id, role, focus_key, title, why, source, measure, pattern_id,
               higher_is_better, baseline_value, target_value, score, status, started_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'active', now())
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'active', now())
          RETURNING id, started_at",
     )
     .bind(dota_player_id)
+    .bind(role.map(CoachableRole::slug))
     .bind(&focus.key)
     .bind(&focus.title)
     .bind(&focus.why)
@@ -108,16 +128,20 @@ pub async fn start(
 pub async fn close(
     pool: &PgPool,
     dota_player_id: Uuid,
+    role: Option<CoachableRole>,
     status: FocusStatus,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE training_focus
-            SET status     = $2,
+            SET status     = $3,
                 ended_at   = now(),
                 updated_at = now()
-          WHERE dota_player_id = $1 AND status = 'active'",
+          WHERE dota_player_id = $1
+            AND role IS NOT DISTINCT FROM $2
+            AND status = 'active'",
     )
     .bind(dota_player_id)
+    .bind(role.map(CoachableRole::slug))
     .bind(status.slug())
     .execute(pool)
     .await?;

@@ -13,6 +13,7 @@
 //! asking it to behave.
 
 pub mod evidence;
+pub mod numbers;
 pub mod prompt;
 
 use std::collections::HashSet;
@@ -21,7 +22,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::CoachConfig;
-use crate::domain::coaching::{AnalysisScope, Evidence, Insight, InsightKind};
+use crate::domain::coaching::{AnalysisScope, Evidence, Insight, InsightKind, PlanStep};
 use crate::services::llm::{LlmError, LlmProvider, LlmRequest};
 
 #[derive(Debug, thiserror::Error)]
@@ -54,6 +55,7 @@ impl CoachingError {
 pub struct Generated {
     pub summary: String,
     pub insights: Vec<Insight>,
+    pub plan: Vec<PlanStep>,
     pub model: String,
 }
 
@@ -69,7 +71,7 @@ pub async fn generate(
     }
 
     let request = LlmRequest {
-        system: prompt::system(config.max_insights),
+        system: prompt::system(config.max_insights, config.max_plan_steps),
         user: prompt::user(scope, evidence),
         max_output_tokens: config.max_output_tokens,
         temperature: config.temperature,
@@ -77,11 +79,17 @@ pub async fn generate(
     };
 
     let completion = llm.generate(&request).await?;
-    let draft = parse_analysis(&completion.text, evidence, config.max_insights)?;
+    let draft = parse_analysis(
+        &completion.text,
+        evidence,
+        config.max_insights,
+        config.max_plan_steps,
+    )?;
 
     Ok(Generated {
         summary: draft.summary,
         insights: draft.insights,
+        plan: draft.plan,
         model: completion.model,
     })
 }
@@ -90,6 +98,7 @@ pub async fn generate(
 pub struct Draft {
     pub summary: String,
     pub insights: Vec<Insight>,
+    pub plan: Vec<PlanStep>,
 }
 
 /// What the model is expected to send. Every field is optional or lenient,
@@ -101,6 +110,22 @@ struct RawAnalysis {
     summary: String,
     #[serde(default)]
     insights: Vec<RawInsight>,
+    /// Accepts the key the prompt asks for plus the shape models substitute
+    /// for it most often.
+    #[serde(default, alias = "training_plan")]
+    plan: Vec<RawPlanStep>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPlanStep {
+    #[serde(default)]
+    title: String,
+    /// `action` is what the prompt asks for; the other two are what models
+    /// write when they forget.
+    #[serde(default, alias = "explanation", alias = "detail")]
+    action: String,
+    #[serde(default, alias = "evidence_ids", alias = "evidence_id")]
+    evidence: EvidenceRefs,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +172,7 @@ pub fn parse_analysis(
     raw: &str,
     evidence: &[Evidence],
     max_insights: usize,
+    max_plan_steps: usize,
 ) -> Result<Draft, CoachingError> {
     let json = extract_json(raw)
         .ok_or_else(|| CoachingError::Unusable("the answer contained no JSON object".into()))?;
@@ -162,12 +188,7 @@ pub fn parse_analysis(
         .filter_map(|raw| {
             let kind = InsightKind::parse(&raw.kind)?;
 
-            let refs: Vec<String> = raw
-                .evidence
-                .into_vec()
-                .into_iter()
-                .filter(|id| known.contains(id.as_str()))
-                .collect();
+            let refs = cited(raw.evidence, &known);
 
             // The rule the whole phase rests on: no evidence, no insight.
             if refs.is_empty() {
@@ -178,6 +199,18 @@ pub fn parse_analysis(
             let title = clamp(raw.title.trim(), 80);
             let explanation = clamp(raw.explanation.trim(), 600);
             if title.is_empty() || explanation.is_empty() {
+                return None;
+            }
+
+            // A citation says where a claim came from; this says the claim is
+            // true to it. Both are needed — a real id attached to an invented
+            // figure reads exactly like a verified one.
+            if let Some(invented) = invented_figure(&[&title, &explanation], &refs, evidence) {
+                tracing::warn!(
+                    kind = kind.slug(),
+                    figure = invented,
+                    "insight dropped: stated a figure the evidence does not contain",
+                );
                 return None;
             }
 
@@ -198,10 +231,88 @@ pub fn parse_analysis(
         ));
     }
 
+    let plan: Vec<PlanStep> = parsed
+        .plan
+        .into_iter()
+        .filter_map(|raw| {
+            let refs = cited(raw.evidence, &known);
+            if refs.is_empty() {
+                tracing::debug!("plan step dropped: no valid evidence");
+                return None;
+            }
+
+            let title = clamp(raw.title.trim(), 80);
+            let action = clamp(raw.action.trim(), 400);
+            if title.is_empty() || action.is_empty() {
+                return None;
+            }
+
+            if let Some(invented) = invented_figure(&[&title, &action], &refs, evidence) {
+                tracing::warn!(
+                    figure = invented,
+                    "plan step dropped: stated a figure the evidence does not contain",
+                );
+                return None;
+            }
+
+            Some(PlanStep {
+                // Renumbered after the drops, so the plan a player reads is
+                // always 1..n with no holes where a rejected step used to be.
+                position: 0,
+                title,
+                action,
+                evidence: refs,
+            })
+        })
+        .take(max_plan_steps)
+        .enumerate()
+        .map(|(index, step)| PlanStep {
+            position: index as u32 + 1,
+            ..step
+        })
+        .collect();
+
+    // The summary is a synthesis of everything it was shown rather than a claim
+    // about one item, so it is checked against the whole evidence set.
+    let all: Vec<&str> = evidence.iter().map(|e| e.statement.as_str()).collect();
+    let summary = clamp(parsed.summary.trim(), 400);
+    let summary = match numbers::unverifiable(&summary, &all).first() {
+        Some(figure) => {
+            tracing::warn!(
+                figure,
+                "summary dropped: stated a figure the evidence does not contain"
+            );
+            String::new()
+        }
+        None => summary,
+    };
+
     Ok(Draft {
-        summary: clamp(parsed.summary.trim(), 400),
+        summary,
         insights,
+        plan,
     })
+}
+
+/// Keep only the citations that name evidence which actually exists.
+fn cited(refs: EvidenceRefs, known: &HashSet<&str>) -> Vec<String> {
+    refs.into_vec()
+        .into_iter()
+        .filter(|id| known.contains(id.as_str()))
+        .collect()
+}
+
+/// The first figure in `texts` that the cited evidence does not contain.
+fn invented_figure(texts: &[&str], refs: &[String], evidence: &[Evidence]) -> Option<f64> {
+    let sources: Vec<&str> = evidence
+        .iter()
+        .filter(|e| refs.iter().any(|id| id == &e.id))
+        .map(|e| e.statement.as_str())
+        .collect();
+
+    texts
+        .iter()
+        .find_map(|text| numbers::unverifiable(text, &sources).first().copied())
 }
 
 /// Find the JSON object in a model answer.
@@ -234,11 +345,20 @@ fn clamp(value: &str, max_chars: usize) -> String {
 /// Two requests with the same evidence, model configuration and prompt version
 /// have the same answer, so the hash is both a cache key and a guard against
 /// spending a user's daily budget on a question already answered.
-pub fn context_hash(evidence: &[Evidence], scope: AnalysisScope, model: &str) -> String {
+pub fn context_hash(
+    evidence: &[Evidence],
+    scope: AnalysisScope,
+    role: Option<crate::domain::role::CoachableRole>,
+    model: &str,
+) -> String {
     let mut hasher = Sha256::new();
 
     hasher.update(prompt::PROMPT_VERSION.to_le_bytes());
     hasher.update(format!("{scope:?}").as_bytes());
+    // Explicit rather than incidental. The role does appear inside the scope
+    // evidence statement today, but a cache key that depended on the wording of
+    // a sentence would break the moment somebody edited the sentence.
+    hasher.update(role.map(|r| r.slug()).unwrap_or("none").as_bytes());
     hasher.update(model.as_bytes());
     for item in evidence {
         hasher.update(item.id.as_bytes());
@@ -255,23 +375,40 @@ mod tests {
     use super::*;
     use crate::domain::benchmark::Confidence;
     use crate::domain::coaching::EvidenceKind;
+    use crate::domain::role::CoachableRole;
 
     fn evidence() -> Vec<Evidence> {
-        ["overall.record", "benchmark.gold_per_min"]
-            .into_iter()
-            .map(|id| Evidence {
-                id: id.to_string(),
-                kind: EvidenceKind::Overall,
-                label: "Label".into(),
-                statement: "A measured sentence.".into(),
-                sample: 20,
-                confidence: Confidence::Adequate,
-            })
-            .collect()
+        [
+            (
+                "overall.record",
+                "Across 20 stored matches, you have won 11 and lost 9 (55%).",
+            ),
+            (
+                "benchmark.gold_per_min",
+                "On Luna, your gold per minute averages 511.8; the peer median is 558.0.",
+            ),
+        ]
+        .into_iter()
+        .map(|(id, statement)| Evidence {
+            id: id.to_string(),
+            kind: EvidenceKind::Overall,
+            label: "Label".into(),
+            statement: statement.to_string(),
+            sample: 20,
+            confidence: Confidence::Adequate,
+        })
+        .collect()
     }
 
     fn answer(insights: &str) -> String {
         format!(r#"{{"summary": "You are farming well.", "insights": [{insights}]}}"#)
+    }
+
+    /// An answer with a plan attached, for the steps' own rules.
+    fn answer_with_plan(insights: &str, plan: &str) -> String {
+        format!(
+            r#"{{"summary": "You are farming well.", "insights": [{insights}], "plan": [{plan}]}}"#
+        )
     }
 
     const GOOD: &str = r#"{
@@ -283,7 +420,7 @@ mod tests {
 
     #[test]
     fn a_well_formed_answer_is_accepted() {
-        let draft = parse_analysis(&answer(GOOD), &evidence(), 5).unwrap();
+        let draft = parse_analysis(&answer(GOOD), &evidence(), 5, 4).unwrap();
 
         assert_eq!(draft.summary, "You are farming well.");
         assert_eq!(draft.insights.len(), 1);
@@ -302,7 +439,7 @@ mod tests {
         }"#;
 
         // The invented citation is the only one, so nothing survives.
-        let error = parse_analysis(&answer(invented), &evidence(), 5).unwrap_err();
+        let error = parse_analysis(&answer(invented), &evidence(), 5, 4).unwrap_err();
         assert!(matches!(error, CoachingError::Unusable(_)));
     }
 
@@ -315,7 +452,7 @@ mod tests {
             "evidence": ["benchmark.gold_per_min", "benchmark.wards_placed"]
         }"#;
 
-        let draft = parse_analysis(&answer(mixed), &evidence(), 5).unwrap();
+        let draft = parse_analysis(&answer(mixed), &evidence(), 5, 4).unwrap();
         assert_eq!(draft.insights[0].evidence, vec!["benchmark.gold_per_min"]);
     }
 
@@ -325,7 +462,7 @@ mod tests {
             r#"{{"kind": "observation", "title": "T", "explanation": "E", "evidence": ["overall.record"]}}, {GOOD}"#
         );
 
-        let draft = parse_analysis(&answer(&invented_kind), &evidence(), 5).unwrap();
+        let draft = parse_analysis(&answer(&invented_kind), &evidence(), 5, 4).unwrap();
         assert_eq!(draft.insights.len(), 1);
         assert_eq!(draft.insights[0].kind, InsightKind::Weakness);
     }
@@ -339,7 +476,7 @@ mod tests {
             "evidence": "overall.record"
         }"#;
 
-        let draft = parse_analysis(&answer(bare), &evidence(), 5).unwrap();
+        let draft = parse_analysis(&answer(bare), &evidence(), 5, 4).unwrap();
         assert_eq!(draft.insights[0].evidence, vec!["overall.record"]);
     }
 
@@ -349,26 +486,26 @@ mod tests {
             "Sure! Here is the analysis:\n```json\n{}\n```",
             answer(GOOD)
         );
-        let draft = parse_analysis(&fenced, &evidence(), 5).unwrap();
+        let draft = parse_analysis(&fenced, &evidence(), 5, 4).unwrap();
         assert_eq!(draft.insights.len(), 1);
     }
 
     #[test]
     fn an_answer_with_no_json_is_unusable() {
-        let error = parse_analysis("I cannot help with that.", &evidence(), 5).unwrap_err();
+        let error = parse_analysis("I cannot help with that.", &evidence(), 5, 4).unwrap_err();
         assert!(matches!(error, CoachingError::Unusable(_)));
     }
 
     #[test]
     fn malformed_json_is_unusable_rather_than_a_panic() {
-        let error = parse_analysis("{\"summary\": ", &evidence(), 5).unwrap_err();
+        let error = parse_analysis("{\"summary\": ", &evidence(), 5, 4).unwrap_err();
         assert!(matches!(error, CoachingError::Unusable(_)));
     }
 
     #[test]
     fn the_insight_cap_is_enforced_on_the_answer() {
         let many = std::iter::repeat_n(GOOD, 9).collect::<Vec<_>>().join(",");
-        let draft = parse_analysis(&answer(&many), &evidence(), 3).unwrap();
+        let draft = parse_analysis(&answer(&many), &evidence(), 3, 4).unwrap();
 
         assert_eq!(draft.insights.len(), 3);
     }
@@ -380,7 +517,7 @@ mod tests {
             r#"{{"summary": "{long}", "insights": [{{"kind": "strength", "title": "T", "explanation": "{long}", "evidence": ["overall.record"]}}]}}"#
         );
 
-        let draft = parse_analysis(&raw, &evidence(), 5).unwrap();
+        let draft = parse_analysis(&raw, &evidence(), 5, 4).unwrap();
         assert!(draft.summary.chars().count() <= 401);
         assert!(draft.insights[0].explanation.chars().count() <= 601);
     }
@@ -388,20 +525,177 @@ mod tests {
     #[test]
     fn an_insight_with_no_text_is_dropped() {
         let empty = r#"{"kind": "strength", "title": "", "explanation": "", "evidence": ["overall.record"]}"#;
-        assert!(parse_analysis(&answer(empty), &evidence(), 5).is_err());
+        assert!(parse_analysis(&answer(empty), &evidence(), 5, 4).is_err());
+    }
+
+    #[test]
+    fn a_training_plan_is_parsed_and_numbered_from_one() {
+        let plan = r#"{
+            "title": "Leave fights you have not set up",
+            "action": "Only commit when you know where the enemy support is.",
+            "evidence": ["overall.record"]
+        }, {
+            "title": "Check buyback before committing",
+            "action": "Look at your gold before every fight.",
+            "evidence": ["benchmark.gold_per_min"]
+        }"#;
+
+        let draft = parse_analysis(&answer_with_plan(GOOD, plan), &evidence(), 5, 4).unwrap();
+
+        assert_eq!(draft.plan.len(), 2);
+        assert_eq!(draft.plan[0].position, 1);
+        assert_eq!(draft.plan[1].position, 2);
+        assert_eq!(draft.plan[0].evidence, vec!["overall.record"]);
+    }
+
+    #[test]
+    fn a_plan_step_citing_nothing_real_is_dropped_and_the_rest_renumbered() {
+        let plan = r#"{
+            "title": "Invented",
+            "action": "Based on data nobody has.",
+            "evidence": ["benchmark.wards_placed"]
+        }, {
+            "title": "Real",
+            "action": "Based on something measured.",
+            "evidence": ["overall.record"]
+        }"#;
+
+        let draft = parse_analysis(&answer_with_plan(GOOD, plan), &evidence(), 5, 4).unwrap();
+
+        // The survivor is step one, not step two with a hole in front of it.
+        assert_eq!(draft.plan.len(), 1);
+        assert_eq!(draft.plan[0].title, "Real");
+        assert_eq!(draft.plan[0].position, 1);
+    }
+
+    #[test]
+    fn the_plan_cap_is_enforced() {
+        let step = r#"{"title": "T", "action": "A", "evidence": ["overall.record"]}"#;
+        let many = std::iter::repeat_n(step, 9).collect::<Vec<_>>().join(",");
+
+        let draft = parse_analysis(&answer_with_plan(GOOD, &many), &evidence(), 5, 3).unwrap();
+        assert_eq!(draft.plan.len(), 3);
+    }
+
+    #[test]
+    fn an_answer_with_no_plan_is_still_a_usable_analysis() {
+        // Not every analysis warrants a plan, and an empty one is an answer.
+        let draft = parse_analysis(&answer(GOOD), &evidence(), 5, 4).unwrap();
+        assert!(draft.plan.is_empty());
+        assert_eq!(draft.insights.len(), 1);
+    }
+
+    /// The rule citation validation cannot enforce on its own: a real id
+    /// attached to an invented figure reads exactly like a verified one.
+    #[test]
+    fn an_insight_stating_a_figure_the_evidence_does_not_contain_is_dropped() {
+        let invented_figure = r#"{
+            "kind": "weakness",
+            "title": "Your farm trails",
+            "explanation": "You average 412 gold per minute, well short of the mark.",
+            "evidence": ["benchmark.gold_per_min"]
+        }"#;
+
+        // The citation is real. The number is not in it, so nothing survives.
+        let error = parse_analysis(&answer(invented_figure), &evidence(), 5, 4).unwrap_err();
+        assert!(matches!(error, CoachingError::Unusable(_)));
+    }
+
+    #[test]
+    fn an_insight_repeating_a_measured_figure_is_kept() {
+        let faithful = r#"{
+            "kind": "weakness",
+            "title": "Twenty matches is a thin read",
+            "explanation": "Across 20 matches the trend is real but young.",
+            "evidence": ["overall.record"]
+        }"#;
+
+        let draft = parse_analysis(&answer(faithful), &evidence(), 5, 4).unwrap();
+        assert_eq!(draft.insights.len(), 1);
+    }
+
+    #[test]
+    fn a_plan_step_that_invents_a_timing_target_is_dropped() {
+        // The failure this rule exists for: advice that sounds authoritative
+        // and rests on a number nobody measured.
+        let plan = r#"{
+            "title": "Hit your item timing",
+            "action": "Finish your first big item before 18 minutes.",
+            "evidence": ["overall.record"]
+        }"#;
+
+        let draft = parse_analysis(&answer_with_plan(GOOD, plan), &evidence(), 5, 4).unwrap();
+        assert!(draft.plan.is_empty());
+        // And the insight beside it is untouched: one bad step is not a bad
+        // answer.
+        assert_eq!(draft.insights.len(), 1);
+    }
+
+    #[test]
+    fn a_summary_that_invents_a_figure_is_dropped_without_losing_the_insights() {
+        let raw = r#"{
+            "summary": "You are winning 73% of your games right now.",
+            "insights": [GOOD_INSIGHT]
+        }"#
+        .replace("GOOD_INSIGHT", GOOD);
+
+        let draft = parse_analysis(&raw, &evidence(), 5, 4).unwrap();
+
+        assert!(
+            draft.summary.is_empty(),
+            "an invented headline figure must not reach a user: {}",
+            draft.summary,
+        );
+        assert_eq!(draft.insights.len(), 1, "the verified work survives");
     }
 
     #[test]
     fn the_context_hash_changes_with_the_evidence_and_not_otherwise() {
-        let base = context_hash(&evidence(), AnalysisScope::Player, "m");
+        let base = context_hash(&evidence(), AnalysisScope::Player, None, "m");
 
-        assert_eq!(base, context_hash(&evidence(), AnalysisScope::Player, "m"));
-        assert_ne!(base, context_hash(&evidence(), AnalysisScope::Match, "m"));
-        assert_ne!(base, context_hash(&evidence(), AnalysisScope::Player, "m2"));
+        assert_eq!(
+            base,
+            context_hash(&evidence(), AnalysisScope::Player, None, "m")
+        );
+        assert_ne!(
+            base,
+            context_hash(&evidence(), AnalysisScope::Match, None, "m")
+        );
+        assert_ne!(
+            base,
+            context_hash(&evidence(), AnalysisScope::Player, None, "m2")
+        );
 
         let mut changed = evidence();
         changed[0].statement = "A different measured sentence.".into();
-        assert_ne!(base, context_hash(&changed, AnalysisScope::Player, "m"));
+        assert_ne!(
+            base,
+            context_hash(&changed, AnalysisScope::Player, None, "m")
+        );
+    }
+
+    /// The guard against the worst silent failure in role coaching: two roles
+    /// sharing a cache entry, so a player is handed an analysis of a role they
+    /// did not ask about with nothing to indicate it.
+    #[test]
+    fn the_context_hash_separates_two_roles_with_identical_evidence() {
+        let carry = context_hash(
+            &evidence(),
+            AnalysisScope::Role,
+            Some(CoachableRole::Carry),
+            "m",
+        );
+        let support = context_hash(
+            &evidence(),
+            AnalysisScope::Role,
+            Some(CoachableRole::SoftSupport),
+            "m",
+        );
+        let unscoped = context_hash(&evidence(), AnalysisScope::Role, None, "m");
+
+        assert_ne!(carry, support);
+        assert_ne!(carry, unscoped);
+        assert_ne!(support, unscoped);
     }
 
     #[test]
@@ -410,8 +704,8 @@ mod tests {
         reordered.reverse();
 
         assert_ne!(
-            context_hash(&evidence(), AnalysisScope::Player, "m"),
-            context_hash(&reordered, AnalysisScope::Player, "m")
+            context_hash(&evidence(), AnalysisScope::Player, None, "m"),
+            context_hash(&reordered, AnalysisScope::Player, None, "m")
         );
     }
 }

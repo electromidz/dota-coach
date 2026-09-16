@@ -359,15 +359,17 @@ answer with redirects, not JSON — OpenID cannot be completed from `fetch`.
 | ------ | ------------------------- | -------------------------------------------------- |
 | `GET`  | `/api/players/me`         | Steam profile + linked Dota identity + match count |
 | `POST` | `/api/players/me/sync`    | Fetch, dedupe, store, back-fill and compute        |
-| `GET`  | `/api/matches`            | Own history, newest first. `?page=1&limit=20`      |
+| `GET`  | `/api/matches`            | Own history, newest first. `?page=1&limit=20&scope=all\|competitive` |
 | `GET`  | `/api/matches/:id`        | One own match, with its derived KDA                |
-| `GET`  | `/api/stats`              | Aggregates: overall, per hero, per role            |
-| `GET`  | `/api/benchmark`          | Peer comparison. `?hero_id=` picks the hero        |
+| `GET`  | `/api/stats`              | Overall analysis over the competitive window: scope, eligibility, per hero, per role |
+| `GET`  | `/api/benchmark`          | Peer comparison. `?hero_id=` picks the hero, `?role=` the scope |
 | `GET`  | `/api/benchmark/:metric`  | The same, narrowed to one metric                   |
 | `GET`  | `/api/heroes`             | Your hero pool. No provider call — always answers  |
 | `GET`  | `/api/heroes/recommendations` | Scored candidates, best fit first. `?limit=`   |
 | `GET`  | `/api/hero-intelligence`  | Pool, meta and recommendations in one payload      |
 | `GET`  | `/api/coach`              | Measured evidence + the last analysis. No model call |
+| `GET`  | `/api/coach/roles`        | Role performance, the advisory pick, the current choice |
+| `POST` | `/api/coach/role`         | Choose the role to be coached on. Any of the five   |
 | `POST` | `/api/coach/analyze`      | Generates one. Rate limited; the only paid call    |
 | `GET`  | `/api/coach/player-model` | Traits, role affinity and recurring patterns       |
 | `GET`  | `/api/coach/training-focus` | The one focus, its progress, and the runners-up  |
@@ -1080,6 +1082,251 @@ derived in two tiers:
 
 With neither signal the role is `Unknown` rather than a guess. The UI presents
 all of these as estimates.
+
+### The competitive match population
+
+Everything the coach asserts — overall statistics, role performance, the role
+recommendation, the coaching dataset, the evidence a model is shown — is a
+statement about **standard All Pick matchmaking**. Turbo is a different game
+with a different economy curve, so mixing it in does not enlarge the sample, it
+corrupts it.
+
+One rule decides it, in `domain::eligibility`, and every caller reads it from
+there. A match is eligible when:
+
+```text
+game_mode  ∈ { 22 all_draft, 1 all_pick }
+lobby_type ∈ { 7 ranked, 0 normal }
+```
+
+Both dimensions are required. `lobby_type` alone would admit Turbo, which
+normally sits in a normal lobby; `game_mode` alone would admit All Pick played
+in a tournament, a practice lobby or Battle Cup. The ids are verified against
+OpenDota's own `/api/constants/game_mode` and `/api/constants/lobby_type`. A
+match whose mode the provider never reported is excluded rather than assumed —
+a guess there would quietly put Turbo back into the numbers.
+
+The rule exists in two renderings, Rust and SQL, both generated from one pair of
+constant lists with a test asserting they cannot drift apart.
+
+Two things follow that are easy to get wrong:
+
+- **Syncing still stores everything.** The filter is a read rule. A player's
+  match list shows the Turbo games they actually played; the coaching numbers
+  do not read them. Exclusions are counted and reported by reason, never
+  silently dropped.
+- **The window is taken after filtering, never before.** "The latest 100
+  matches, minus Turbo" gives a Turbo-heavy player a fifty-game analysis that
+  claims to be a hundred-game one. `domain::scope::MatchScope` renders
+  filter → order by recency → limit as one SQL window, so the ordering is
+  structural rather than a convention.
+
+Note that the sync limit counts *raw* matches, so filling a hundred-match
+competitive window can require pulling considerably more than a hundred —
+see `SYNC_MATCH_LIMIT`.
+
+### Role performance, and why it is scored this way
+
+The five coachable roles are Carry, Mid, Offlane, Soft Support and Hard
+Support. The estimator's other labels — `Core`, `Roamer`, `Jungle`, `Unknown` —
+map to none of them and are counted as **unclassified**. `Core` is the costly
+one: it means farm priority identified a core without identifying which lane,
+and folding it into Carry would put Mid and Offlane games into a Carry player's
+coaching dataset. A player with mostly unparsed replays will therefore see a
+large unclassified count and small per-role samples. The alternative is
+coaching someone's Carry on their Offlane games.
+
+Each role's 0-100 score combines four **role-neutral** measures:
+
+| Measure               | Default weight | 0 means        | 100 means       |
+|-----------------------|---------------:|----------------|-----------------|
+| Win rate              |           0.45 | never wins     | always wins     |
+| Kill participation    |           0.20 | never involved | every team kill |
+| KDA                   |           0.20 | 0.0            | 6.0 or better   |
+| Deaths per 10 minutes |           0.15 | 3.0 or worse   | none            |
+
+Gold per minute is deliberately absent. Comparing a hard support's economy with
+a carry's would recommend the safe lane to everyone, which is advice about Dota
+rather than about the player — so economy is reported beside the score and not
+inside it. A measure with no data (kill participation needs team totals the
+provider does not always supply) is dropped and the remaining weights
+renormalized, never counted as zero.
+
+The result is then pulled toward the midpoint by how thin the evidence is:
+
+```text
+performance = 50 + (raw - 50) × n / (n + 10)
+```
+
+and no role with fewer than ten eligible matches is recommended at all. Both
+are needed: shrinkage narrows the gap a hot streak opens, the floor is what
+actually stops five perfect games outranking forty consistent ones. A role under
+the floor is still shown with its real numbers — the recommendation is advice,
+and the player picks the role they want to improve.
+
+Sample confidence is reported alongside every analysis: `Limited` below 20
+eligible matches, `Moderate` below 60, `Strong` at or above it.
+
+### What the Top 20% comparison can and cannot say
+
+The spec asks to benchmark a player against the top 20% of **the same rank,
+role and hero**. One of those three is deliverable from the current provider,
+and the response says which.
+
+OpenDota's `/benchmarks` returns one percentile distribution per hero:
+`gold_per_min`, `xp_per_min`, `last_hits_per_min` and the rest, at p10 through
+p99 — so the 80th percentile is a real "top 20% starts here" line, and the gap
+to it is arithmetic. What it does not return is any segmentation beyond the
+hero. That is verified rather than assumed: passing `rank`, `rank_tier` or
+`lane_role` to the endpoint returns byte-identical buckets, and the API
+publishes no sample size, no patch and no statement of which game modes the
+distribution covers.
+
+So the two halves of the comparison are described separately on every response:
+
+- **Our half is genuinely narrow.** The player's own averages come from the
+  eligible Ranked and public All Pick matches in the selected role, on that
+  role's most-played hero. A safe-lane Phantom Assassin average never reaches a
+  support comparison.
+- **The peer half is wide and undocumented**, and `context.population.peers`
+  says so in those words.
+
+`context.requested` lists the four dimensions the product asks for,
+`context.segmented_by` the one that arrived, and `context.unavailable` names
+each missing dimension with the reason. `context.population.comparable` is
+`false` — an unknown population cannot be declared equal to a known one, and
+flipping it to `true` requires a source that publishes what it covers (STRATZ
+is the candidate).
+
+The caveats are built on every path, including the provider-outage path. A
+response whose honesty notes vanish exactly when the data gets thinner would
+have them backwards.
+
+### The coaching profile
+
+Overall analysis and role coaching are different questions, and the profile is
+the line between them. It stores one thing that cannot be derived — **which
+role the player chose to work on** — plus the circumstances of that choice:
+what was recommended at the time, and how many eligible matches the advice
+rested on. Neither can be reconstructed later, because the analysis moves as
+matches arrive.
+
+It deliberately does **not** store the match ids the coaching dataset resolves
+to. Those change on every sync, so persisting them would create a second answer
+to "which matches is this advice about", and the stale one would win whenever
+somebody read it. The dataset is resolved from the role on every read.
+
+### Where the scope is visible
+
+Two populations exist, so every screen says which one it is reading — in
+words, not by implication.
+
+- **Overview** leads with the analysed count, the sample confidence and an
+  expandable breakdown of what was excluded and why.
+- **Matches** defaults to the player's whole history, because their Turbo games
+  are theirs to look at, and labels every row with the mode it was played in
+  plus a "not coached" mark where the coach does not read it. A tab switches
+  the list to the competitive population, which is the same query the dashboard
+  uses. This is what reconciles "seventeen matches" in the list with "ten
+  matches analysed" on the dashboard; without it the two screens look like they
+  disagree.
+- **Coach** states the role, its games, its score and the window above
+  everything, keeps "Change role" one tap away, and says plainly when the
+  player chose against the advice.
+- **Benchmark** states both populations and every dimension it could not
+  segment on.
+
+The mode label and the eligibility flag are computed server-side and rendered
+verbatim. Shipping the mode tables to the browser would create a second copy of
+the rule, and the first thing a second copy does is drift.
+
+### Why a role was recommended
+
+The recommendation ships with its reasoning, because it is advisory and a
+player overriding it deserves to see what they are overriding: each measure,
+the value it was measured at, and the share of the score it carries — including
+the fact that weights are renormalised per role around any measure that role
+had no data for. Where the sample-size adjustment moved a score, both numbers
+are shown ("measured 85/100 across 5 games, reported as 62"), and a role below
+the recommendation floor says how many more games it needs rather than being
+silently absent from the advice. It stays selectable throughout: a thin sample
+is a reason not to recommend a role, never a reason to refuse it.
+
+### What the model may say
+
+The coaching layer treats the model as an interpreter that is not trusted on
+the way back, and it checks two different things.
+
+**Citations.** An insight or plan step must name at least one evidence id it
+was actually shown. Ids that do not exist are stripped; anything left with no
+citation is dropped.
+
+**Figures.** A citation says where a claim came from; it does not say the claim
+is true to it. A model can cite `overall.deaths` and then write "you die 7.4
+times per 10 minutes" when the evidence says 4.1 — a real id attached to an
+invented number, which reads exactly like a verified one. So every figure in an
+insight, plan step or summary is matched against the evidence behind it.
+Rounding down in precision is accepted (quoting 4.1 for 4.14, or 512 for
+511.8), because that is how anyone writes a measured number into a sentence.
+Inventing precision, or a number that is not there at all, is not: the insight
+or step is dropped, and the summary is discarded while the verified insights
+around it survive.
+
+That strictness is only fair because the prompt is explicit about it. The model
+is told that figures are checked after it answers, and that advice should be
+qualitative — "push your first item earlier" rather than "before 18 minutes",
+which is a timing nobody measured and which the checker will throw away.
+
+The cost is real and worth stating: a genuinely useful piece of advice phrased
+with a concrete target is lost along with the fabrications. The alternative is a
+coach that is occasionally, confidently wrong about a number the player will act
+on, which is the worse failure for a product whose entire claim is that the
+numbers are computed rather than generated.
+
+### How the role scope is enforced
+
+Once a role is chosen, every coaching read is built from one `MatchScope` —
+eligible matches, that role, newest first, capped at the window — and that
+scope is threaded through every query behind the answer: the aggregate
+statistics, the recent-match list, the hero pool and its baseline, the player's
+own benchmark averages, and the pattern detectors. A support match cannot reach
+a carry analysis because it was never fetched, not because a prompt asked a
+model to ignore it.
+
+Three consequences worth stating, because each was a bug waiting to happen:
+
+- **The role is part of the cache key.** Analyses are keyed by a hash of the
+  evidence, and two roles can produce byte-identical evidence. Without the role
+  in the hash — and in the `latest()` filter — a player who switched roles
+  would be served their previous role's analysis, silently, looking exactly
+  like a fresh one.
+- **The training focus is per role.** "One thing to work on" is one thing *per
+  role*; switching to carry for a week must not retire the support goal waiting
+  behind it.
+- **Patterns are detected inside the scope but not persisted there.**
+  `player_patterns` is keyed by player and pattern id, so a carry pattern and a
+  support pattern would overwrite each other and `first_detected_at` would mean
+  neither. Role-scoped patterns are therefore computed fresh on each read and
+  have no first-sighting date; the persisted ones are competitive-wide across
+  every role.
+
+Two things are deliberately **not** role-scoped. The long-term player model
+answers "which roles do you actually play", which narrowing would make
+circular; and the hero pages describe the player's whole repertoire. Both are
+labelled in the UI where they sit beside role-scoped panels.
+
+Coaching refuses to answer at all before a role is chosen — `409`, with a
+message that distinguishes "you have not chosen yet" from "you have nothing
+synced yet". Any default would either mix roles or quietly overrule the
+player's decision.
+
+The recommendation is recorded beside the selection precisely so the two can
+disagree. A player advised to work on Soft Support who picks Carry is coached
+on Carry; the profile remembers both, and the UI says so. Any of the five roles
+can be chosen, including one with no matches behind it — wanting to learn a
+position you do not play is a normal reason to open a coaching app, and the
+empty dataset is a fact for the coaching screen to report rather than a reason
+to refuse the choice.
 
 ---
 

@@ -1,23 +1,31 @@
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 use uuid::Uuid;
 
 use crate::domain::benchmark::Confidence;
 use crate::domain::player_model::{
     AnalyzedMatch, ModelConfidence, PatternStatus, RecurringPattern,
 };
+use crate::domain::scope::MatchScope;
 use crate::services::benchmarks::percentile;
 
-/// Every stored match with its derived metrics, flattened for detection.
+/// Every match in a scope with its derived metrics, flattened for detection.
 ///
-/// The whole history, not a page of it: a pattern is a statement about all of
-/// it, and paginating here would make the denominator depend on a page size.
+/// The whole scope, not a page of it: a pattern is a statement about all of it,
+/// and paginating here would make the denominator depend on a page size.
+///
+/// The scope is what makes a pattern role-specific. "You die too often" read
+/// across every role is a different, weaker claim than the same sentence read
+/// across the thirty Carry games the player asked to be coached on — and the
+/// support games that would otherwise dilute it are not evidence about carrying.
 pub async fn history(
     pool: &PgPool,
     dota_player_id: Uuid,
+    scope: &MatchScope,
 ) -> Result<Vec<AnalyzedMatch>, sqlx::Error> {
-    sqlx::query_as::<_, AnalyzedMatch>(
-        "SELECT
+    sqlx::query_as::<_, AnalyzedMatch>(AssertSqlSafe(format!(
+        "{cte}
+         SELECT
              m.id                 AS match_id,
              m.started_at,
              m.hero_id,
@@ -34,9 +42,12 @@ pub async fn history(
              m.bkb_seconds
            FROM matches m
            JOIN match_metrics mm ON mm.match_id = m.id
+           {join}
           WHERE m.dota_player_id = $1
           ORDER BY m.started_at DESC",
-    )
+        cte = scope.cte(),
+        join = scope.join(),
+    )))
     .bind(dota_player_id)
     .fetch_all(pool)
     .await

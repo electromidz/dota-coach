@@ -89,6 +89,89 @@ pub enum Segment {
     Patch,
 }
 
+impl Segment {
+    pub const ALL: [Segment; 4] = [
+        Segment::Hero,
+        Segment::Role,
+        Segment::RankBracket,
+        Segment::Patch,
+    ];
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            Segment::Hero => "hero",
+            Segment::Role => "role",
+            Segment::RankBracket => "rank_bracket",
+            Segment::Patch => "patch",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Segment::Hero => "Hero",
+            Segment::Role => "Role",
+            Segment::RankBracket => "Rank",
+            Segment::Patch => "Patch",
+        }
+    }
+}
+
+/// A dimension the product asked to compare on and could not.
+///
+/// The spec asks for hero/role/rank/patch segmentation. Today's provider
+/// offers hero and nothing else — verified, not assumed: passing `rank` or
+/// `lane_role` to OpenDota's `/benchmarks` returns byte-identical buckets.
+///
+/// Reporting the gap per dimension, with the reason, is the difference between
+/// a comparison a user can weigh and one that quietly implies a peer group it
+/// never had.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct UnavailableSegment {
+    pub segment: Segment,
+    pub label: &'static str,
+    /// Why it is missing, in words a user can act on.
+    pub reason: &'static str,
+}
+
+/// Which matches sit on each side of a comparison.
+///
+/// Both halves are stated because they are not the same population and cannot
+/// be made so. Ours is exact and narrow — this player's eligible matches, in
+/// one role, on one hero. The provider's is broad and, importantly,
+/// *undocumented*: OpenDota does not publish which game modes or ranks its
+/// distribution covers, so this says that rather than guessing.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PopulationScope {
+    /// What the player's own figures were averaged over.
+    pub player: String,
+    /// What the peer distribution covers, as far as the provider states it.
+    pub peers: &'static str,
+    /// True only when both sides are known to describe the same population.
+    /// False here today, and saying so is the point.
+    pub comparable: bool,
+    pub note: &'static str,
+}
+
+/// What a comparison was asked for, and what it could actually deliver.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct BenchmarkContextInfo {
+    pub hero_id: i32,
+    pub hero_name: String,
+    /// The role the player's own figures were restricted to, when there is one.
+    pub role: Option<crate::domain::role::CoachableRole>,
+    pub role_label: Option<&'static str>,
+    /// The player's medal, as the provider reports it. Carried so the response
+    /// can say the rank is known and simply unusable for segmentation.
+    pub rank_tier: Option<i32>,
+    /// Dimensions the product asks to compare on.
+    pub requested: Vec<Segment>,
+    /// Dimensions the peer distribution genuinely covers.
+    pub segmented_by: Vec<Segment>,
+    /// Requested minus delivered, each with its reason.
+    pub unavailable: Vec<UnavailableSegment>,
+    pub population: PopulationScope,
+}
+
 /// What the caller asked to be compared against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BenchmarkContext {

@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import Link from "next/link";
+
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
@@ -23,6 +25,8 @@ import { cn } from "@/lib/utils";
 export function TrainingFocusCard({ compact = false }: { compact?: boolean }) {
   const [data, setData] = useState<TrainingFocusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** The backend has no role to train for yet. A prompt, not a failure. */
+  const [needsRole, setNeedsRole] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,6 +38,13 @@ export function TrainingFocusCard({ compact = false }: { compact?: boolean }) {
       .catch((e) => {
         if (cancelled) return;
         if (e instanceof ApiError && e.isUnauthenticated) return;
+        // A focus belongs to a role, so there is nothing to show until one is
+        // chosen. The backend says which of the two reasons applies; either
+        // way the answer is an invitation rather than an error.
+        if (e instanceof ApiError && e.status === 409) {
+          setNeedsRole(e.message);
+          return;
+        }
         setError(
           e instanceof ApiError ? e.message : "Could not load your focus.",
         );
@@ -45,6 +56,24 @@ export function TrainingFocusCard({ compact = false }: { compact?: boolean }) {
   }, []);
 
   if (error) return <Alert>{error}</Alert>;
+
+  if (needsRole) {
+    return (
+      <Card className="flex flex-col gap-3">
+        <h2 className="font-display text-sm uppercase tracking-[0.2em] text-ink-faint">
+          Start coaching
+        </h2>
+        <p className="text-sm leading-relaxed text-ink-muted">{needsRole}</p>
+        <Link
+          href="/coach"
+          className="focus-neon w-fit cursor-pointer rounded text-sm text-function transition-colors duration-200 ease-out hover:text-ink"
+        >
+          Choose a role →
+        </Link>
+      </Card>
+    );
+  }
+
   if (!data) {
     return (
       <div

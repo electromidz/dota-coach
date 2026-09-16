@@ -11,5 +11,6 @@ pub mod llm;
 pub mod metrics;
 pub mod payments;
 pub mod player_model;
+pub mod roles;
 pub mod sync;
 pub mod training;

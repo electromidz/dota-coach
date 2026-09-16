@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, apiFetch } from "./api";
+import {
+  ApiError,
+  apiFetch,
+  getBenchmark,
+  getMatches,
+  selectCoachingRole,
+} from "./api";
 
 function mockFetch(impl: typeof fetch) {
   vi.stubGlobal("fetch", impl);
@@ -95,5 +101,82 @@ describe("apiFetch", () => {
     const error = (await apiFetch("/api/matches/x").catch((e: unknown) => e)) as ApiError;
 
     expect(error.isUnauthenticated).toBe(false);
+  });
+});
+
+describe("getMatches", () => {
+  /** Captures the URL the client actually requested. */
+  function captureUrl(): { current: string } {
+    const captured = { current: "" };
+    mockFetch(async (input: RequestInfo | URL) => {
+      captured.current = String(input);
+      return new Response(JSON.stringify({ matches: [], page: 1, limit: 20 }), {
+        status: 200,
+      });
+    });
+    return captured;
+  }
+
+  it("asks for the whole history by default", async () => {
+    const url = captureUrl();
+    await getMatches();
+
+    expect(url.current).toContain("/api/matches?page=1&limit=20");
+    expect(url.current).not.toContain("scope=");
+  });
+
+  it("asks for the competitive population when told to", async () => {
+    const url = captureUrl();
+    await getMatches(1, 20, "competitive");
+
+    // The dashboard's charts depend on this: without it they would plot Turbo
+    // games beside statistics that exclude them.
+    expect(url.current).toContain("scope=competitive");
+  });
+});
+
+describe("selectCoachingRole", () => {
+  it("posts the chosen role slug", async () => {
+    let seen: { url: string; init?: RequestInit } = { url: "" };
+    mockFetch(async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen = { url: String(input), init };
+      return new Response(JSON.stringify({ profile: null }), { status: 200 });
+    });
+
+    await selectCoachingRole("hard_support");
+
+    expect(seen.url).toContain("/api/coach/role");
+    expect(seen.init?.method).toBe("POST");
+    // The slug travels verbatim: the backend rejects anything that is not one
+    // of the five, so a label ("Hard Support") here would be a 400.
+    expect(seen.init?.body).toBe(JSON.stringify({ role: "hard_support" }));
+  });
+});
+
+describe("getBenchmark", () => {
+  function captureUrl(): { current: string } {
+    const captured = { current: "" };
+    mockFetch(async (input: RequestInfo | URL) => {
+      captured.current = String(input);
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    });
+    return captured;
+  }
+
+  it("sends no scope by default, so the backend follows the coaching role", async () => {
+    const url = captureUrl();
+    await getBenchmark();
+
+    expect(url.current).toContain("/api/benchmark");
+    expect(url.current).not.toContain("role=");
+    expect(url.current).not.toContain("hero_id=");
+  });
+
+  it("can name a hero and widen the scope to every role", async () => {
+    const url = captureUrl();
+    await getBenchmark(35, "all");
+
+    expect(url.current).toContain("hero_id=35");
+    expect(url.current).toContain("role=all");
   });
 });

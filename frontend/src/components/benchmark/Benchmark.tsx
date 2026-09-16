@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { ComparisonContext } from "@/components/benchmark/ComparisonContext";
 import { BulletRow } from "@/components/charts/BulletRow";
 import { SignedOut } from "@/components/shell/SignedOut";
 import { Alert } from "@/components/ui/Alert";
@@ -9,7 +10,7 @@ import { Card } from "@/components/ui/Card";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
 import { ApiError, getBenchmark, getStats } from "@/lib/api";
 import { useSession } from "@/lib/session-context";
-import type { BenchmarkResponse, HeroStats } from "@/lib/types";
+import type { BenchmarkResponse, CoachableRole, HeroStats } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** How a `Confidence` reads to someone who has not read the spec. */
@@ -27,20 +28,25 @@ export function Benchmark() {
   const [selected, setSelected] = useState<number | undefined>();
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  /** `undefined` follows the coaching role; `"all"` opts out of role scoping. */
+  const [roleScope, setRoleScope] = useState<CoachableRole | "all" | undefined>();
 
-  const load = useCallback(async (heroId?: number) => {
-    setLoading(true);
-    try {
-      setData(await getBenchmark(heroId));
-      setError(null);
-    } catch (e) {
-      setError(
-        e instanceof ApiError ? e.message : "Could not load your benchmarks.",
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const load = useCallback(
+    async (heroId?: number, role?: CoachableRole | "all") => {
+      setLoading(true);
+      try {
+        setData(await getBenchmark(heroId, role));
+        setError(null);
+      } catch (e) {
+        setError(
+          e instanceof ApiError ? e.message : "Could not load your benchmarks.",
+        );
+      } finally {
+        setLoading(false);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (session.kind !== "signed-in") return;
@@ -64,7 +70,16 @@ export function Benchmark() {
 
   async function pick(heroId: number) {
     setSelected(heroId);
-    await load(heroId);
+    await load(heroId, roleScope);
+  }
+
+  async function setScope(role: CoachableRole | "all" | undefined) {
+    setRoleScope(role);
+    // The hero resets with the scope: the most-played hero in one role is
+    // frequently not the most-played in another, and keeping a stale pick would
+    // silently benchmark a hero the new scope barely contains.
+    setSelected(undefined);
+    await load(undefined, role);
   }
 
   const confidence = data.results[0]?.confidence;
@@ -107,6 +122,28 @@ export function Benchmark() {
         </nav>
       ) : null}
 
+      {/* Which of the player's own matches are being compared. The peer side
+          cannot be narrowed — see the context block below — but this side can,
+          and defaults to the role they are being coached on. */}
+      {data.context.role || roleScope === "all" ? (
+        <nav aria-label="Comparison scope" className="flex flex-wrap gap-2">
+          <ScopeChip
+            label={
+              data.context.role_label
+                ? `${data.context.role_label} only`
+                : "Coaching role"
+            }
+            active={roleScope !== "all"}
+            onClick={() => void setScope(undefined)}
+          />
+          <ScopeChip
+            label="All roles"
+            active={roleScope === "all"}
+            onClick={() => void setScope("all")}
+          />
+        </nav>
+      ) : null}
+
       {data.note ? <Alert tone="info">{data.note}</Alert> : null}
 
       {data.results.length > 0 ? (
@@ -137,24 +174,44 @@ export function Benchmark() {
         </>
       ) : null}
 
-      {/* The honesty note the whole page rests on. */}
+      {/* The honesty note the whole page rests on — composed by the backend,
+          which is the only place that knows what the provider actually
+          delivered. A second copy of these claims here would be a second thing
+          to keep true. */}
       <Card className="flex flex-col gap-2">
         <h2 className="text-xs font-semibold uppercase tracking-[0.2em] text-ink-faint">
           What this compares against
         </h2>
-        <p className="text-xs leading-relaxed text-ink-muted">
-          Percentiles come from OpenDota&apos;s distribution for{" "}
-          <strong className="text-ink">this hero across all ranks</strong>. It
-          is not segmented by rank bracket, role or patch, and the provider does
-          not publish the size of the group behind it — so read these as
-          &ldquo;against everyone who plays this hero&rdquo;, not &ldquo;against
-          players like you&rdquo;.
-        </p>
-        <p className="text-xs leading-relaxed text-ink-faint">
-          Segmented by: {data.segmented_by.join(", ") || "nothing available"}.
-        </p>
+        <ComparisonContext context={data.context} />
       </Card>
     </div>
+  );
+}
+
+function ScopeChip({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active ? "true" : undefined}
+      className={cn(
+        "focus-neon min-h-11 cursor-pointer rounded-xl border px-3 py-2 text-xs",
+        "transition-colors duration-200 ease-out",
+        active
+          ? "border-function/60 bg-function/10 text-ink"
+          : "border-glass-edge text-ink-muted hover:text-ink",
+      )}
+    >
+      {label}
+    </button>
   );
 }
 

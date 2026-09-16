@@ -6,6 +6,7 @@
 pub mod benchmark;
 pub mod billing;
 pub mod coaching;
+pub mod coaching_profile;
 pub mod dota_player;
 pub mod hero_meta;
 pub mod hero_pool;

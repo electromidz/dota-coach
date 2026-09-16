@@ -13,21 +13,28 @@
 use axum::extract::State;
 use axum::Json;
 use chrono::{Duration, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::api::extract::{AppPath, CurrentUser, EntitledUser};
-use crate::api::handlers::{benchmark, heroes};
+use crate::api::extract::{AppJson, AppPath, CurrentUser, EntitledUser};
+use crate::api::handlers::{benchmark, heroes, stats};
 use crate::domain::coaching::{AnalysisScope, CoachingAnalysis, Evidence};
+use crate::domain::coaching_profile::CoachingProfile;
 use crate::domain::player::DotaPlayer;
 use crate::domain::player_model::{PatternStatus, PlayerModel, RecurringPattern};
 use crate::domain::r#match::Match;
+use crate::domain::role::CoachableRole;
+use crate::domain::scope::{MatchScope, SampleConfidence};
 use crate::domain::training::{ProgressSeries, TrainingFocus};
 use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
 use crate::repositories::coaching::NewAnalysis;
-use crate::services::coaching::{self, evidence::EvidenceInputs, CoachingError};
+use crate::services::coaching::{
+    self,
+    evidence::{EvidenceInputs, EvidenceScope},
+    CoachingError,
+};
 use crate::services::llm::LlmError;
 use crate::services::player_model::{self, patterns, ModelInputs};
 use crate::services::training::{self, SelectionInputs};
@@ -51,7 +58,13 @@ pub struct CoachResponse {
     pub cached: bool,
     /// Recurring patterns currently detected. Deterministic, and present
     /// whether or not a model has ever run.
+    ///
+    /// Detected inside the same scope as the evidence, so a pattern here is a
+    /// statement about the role being coached.
     pub patterns: Vec<RecurringPattern>,
+    /// The role everything in this response is about.
+    pub role: Option<CoachableRole>,
+    pub role_label: Option<&'static str>,
     pub note: Option<String>,
 }
 
@@ -95,6 +108,186 @@ pub struct PatternThresholds {
     pub min_rate: f32,
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct RoleSelectionResponse {
+    /// The population the role figures were measured over.
+    pub scope: crate::api::handlers::stats::AnalysisScopeInfo,
+    /// Per-role performance and the advisory pick.
+    pub analysis: crate::domain::role::RoleAnalysis,
+    /// The player's current choice, or `null` when they have not made one.
+    pub profile: Option<CoachingProfile>,
+    /// Every role that can be chosen, whether or not it has matches behind it.
+    ///
+    /// Sent explicitly so the client offers the same five options to a player
+    /// with no history as to one with a thousand games: the choice is the
+    /// player's, and a role they have never played is a legitimate thing to
+    /// want to get better at.
+    pub selectable_roles: Vec<SelectableRole>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SelectableRole {
+    pub role: CoachableRole,
+    pub label: &'static str,
+    pub position: u8,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct SelectRoleRequest {
+    /// Role slug — `carry`, `mid`, `offlane`, `soft_support`, `hard_support`.
+    pub role: String,
+}
+
+/// `GET /api/coach/roles`
+///
+/// What the "which role do you want to improve?" screen needs: how each role is
+/// actually performing, what the system would advise, and what the player has
+/// already chosen. Deterministic — no model call.
+#[utoipa::path(
+    get, path = "/api/coach/roles", tag = "coaching",
+    summary = "Role performance, the advisory pick, and the current choice",
+    description = "Measured over the latest eligible Ranked and public All Pick matches. The recommendation is advice: any of the five roles may be selected, including one with no matches behind it.",
+    security(("session" = [])),
+    responses(
+        (status = 200, description = "Role performance, recommendation and stored profile", body = RoleSelectionResponse),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
+pub async fn roles(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+) -> AppResult<Json<RoleSelectionResponse>> {
+    let player = load_linked_player(&state, &user).await?;
+    let (scope, analysis) = stats::competitive_roles(&state, &player).await?;
+    let profile = repositories::coaching_profile::find(&state.db, player.id).await?;
+
+    Ok(Json(RoleSelectionResponse {
+        scope,
+        analysis,
+        profile,
+        selectable_roles: selectable_roles(),
+    }))
+}
+
+/// `POST /api/coach/role`
+///
+/// The player's choice, which is final. The recommendation that was on offer is
+/// stored beside it — not to second-guess the choice, but so the profile can
+/// later say what was advised and what was picked.
+#[utoipa::path(
+    post, path = "/api/coach/role", tag = "coaching",
+    summary = "Choose the role to be coached on",
+    description = "Any of the five roles is accepted, including one the system did not recommend and one the player has never played. The selection becomes the scope of every subsequent piece of coaching.",
+    security(("session" = [])),
+    request_body = SelectRoleRequest,
+    responses(
+        (status = 200, description = "The stored profile and the analysis behind it", body = RoleSelectionResponse),
+        (status = 400, description = "Not one of the five coachable roles", body = crate::error::ErrorBody),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
+pub async fn select_role(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    AppJson(body): AppJson<SelectRoleRequest>,
+) -> AppResult<Json<RoleSelectionResponse>> {
+    let role = CoachableRole::parse(&body.role).ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "'{}' is not a role that can be coached. Choose one of: {}.",
+            body.role,
+            CoachableRole::ALL
+                .iter()
+                .map(|r| r.slug())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ))
+    })?;
+
+    let player = load_linked_player(&state, &user).await?;
+    let (scope, analysis) = stats::competitive_roles(&state, &player).await?;
+
+    // Stored as context, never as a constraint: the write below uses `role`,
+    // which is what the player asked for.
+    let recommended = analysis.recommendation.as_ref().map(|r| r.role);
+    let profile = repositories::coaching_profile::upsert(
+        &state.db,
+        player.id,
+        role,
+        recommended,
+        analysis.analyzed_matches,
+    )
+    .await?;
+
+    Ok(Json(RoleSelectionResponse {
+        scope,
+        analysis,
+        profile: Some(profile),
+        selectable_roles: selectable_roles(),
+    }))
+}
+
+fn selectable_roles() -> Vec<SelectableRole> {
+    CoachableRole::ALL
+        .into_iter()
+        .map(|role| SelectableRole {
+            role,
+            label: role.label(),
+            position: role.position(),
+        })
+        .collect()
+}
+
+/// The population one player's coaching reads.
+///
+/// Built once per request and threaded through everything below it, so there is
+/// no path where one part of an answer is scoped and another is not.
+#[derive(Debug, Clone)]
+pub(crate) struct CoachingScope {
+    /// The role the player chose. Not the recommended one.
+    pub role: CoachableRole,
+    /// Eligible matches in that role, newest first, capped at the window.
+    pub matches: MatchScope,
+}
+
+/// The player's coaching scope, or a refusal.
+///
+/// Coaching without a chosen role would mean choosing one for them, and the
+/// only honest defaults are both wrong: every role mixes evidence the product
+/// exists to keep apart, and the recommended role silently overrides a decision
+/// that belongs to the player. So this is a precondition, not a fallback.
+async fn require_scope(state: &AppState, player: &DotaPlayer) -> AppResult<CoachingScope> {
+    let window = state.config.roles.analysis_match_limit;
+
+    let Some(profile) = repositories::coaching_profile::find(&state.db, player.id).await? else {
+        // Two different reasons to have no role, and they need different
+        // answers: a player with no eligible matches cannot meaningfully
+        // choose one yet, and telling them to pick would be a dead end.
+        let eligible = repositories::metrics::player_stats_scoped(
+            &state.db,
+            player.id,
+            &MatchScope::competitive(window),
+        )
+        .await?
+        .matches;
+
+        return Err(AppError::PreconditionUnmet(if eligible == 0 {
+            "Sync some Ranked or public All Pick matches first — there is nothing to coach on yet."
+                .into()
+        } else {
+            "Choose the role you want to improve first — coaching is scoped to one role.".into()
+        }));
+    };
+
+    Ok(CoachingScope {
+        role: profile.selected_role,
+        matches: MatchScope::for_role(profile.selected_role, window),
+    })
+}
+
 /// `GET /api/coach`
 ///
 /// Never calls the model, never fails on a provider outage.
@@ -115,11 +308,19 @@ pub async fn get(
     CurrentUser(user): CurrentUser,
 ) -> AppResult<Json<CoachResponse>> {
     let player = load_linked_player(&state, &user).await?;
-    let (evidence, patterns) = player_evidence(&state, &user, &player).await?;
-    let stored = repositories::coaching::latest(&state.db, player.id, None).await?;
+    let scope = require_scope(&state, &player).await?;
+    let (evidence, patterns) = role_evidence(&state, &user, &player, &scope).await?;
+    let stored =
+        repositories::coaching::latest(&state.db, player.id, None, Some(scope.role)).await?;
 
     Ok(Json(respond(
-        &state, stored, evidence, patterns, None, true,
+        &state,
+        stored,
+        evidence,
+        patterns,
+        Some(scope.role),
+        None,
+        true,
     )))
 }
 
@@ -148,7 +349,8 @@ pub async fn player_model(
 
     // Detect and persist first: `first_detected_at` and the resolved set both
     // come back from storage, and both need this run to have happened.
-    let refreshed = player_model::refresh(&state.db, player.id).await?;
+    let window = state.config.roles.analysis_match_limit;
+    let refreshed = player_model::refresh(&state.db, player.id, window).await?;
     let stored = repositories::player_model::list_patterns(&state.db, player.id).await?;
 
     let active = hydrate_patterns(refreshed.patterns, &stored);
@@ -157,14 +359,32 @@ pub async fn player_model(
         .filter(|p| p.status == PatternStatus::Resolved)
         .collect();
 
-    let benchmark = benchmark::build(&state, &player, None, None).await?;
+    let benchmark = benchmark::build(
+        &state,
+        &player,
+        None,
+        None,
+        &MatchScope::competitive(window),
+        None,
+    )
+    .await?;
     let heroes = heroes::build(
         &state,
         &user,
         Some(state.config.heroes.recommendation_limit),
+        &MatchScope::career(),
+        None,
     )
     .await?;
-    let roles = repositories::metrics::role_stats(&state.db, player.id).await?;
+    // Role affinity describes competitive play: "you mostly play support" is a
+    // claim about the ladder, and Turbo games would pad it with a population
+    // nothing else in the model reads.
+    let roles = repositories::metrics::role_stats_scoped(
+        &state.db,
+        player.id,
+        &MatchScope::competitive(window),
+    )
+    .await?;
 
     let model = player_model::build(
         &ModelInputs {
@@ -251,9 +471,13 @@ pub async fn training_focus(
     CurrentUser(user): CurrentUser,
 ) -> AppResult<Json<TrainingFocusResponse>> {
     let player = load_linked_player(&state, &user).await?;
+    let scope = require_scope(&state, &player).await?;
 
-    let refreshed = player_model::refresh(&state.db, player.id).await?;
-    let benchmark = benchmark::build(&state, &player, None, None).await?;
+    // Role-scoped throughout: the focus is "the one thing to work on" in the
+    // role being coached, and a goal derived from another role's matches would
+    // be advice about a game the player is not currently playing.
+    let refreshed = player_model::analyze_scope(&state.db, player.id, &scope.matches).await?;
+    let benchmark = role_benchmark(&state, &player, &scope).await?;
 
     let inputs = SelectionInputs {
         history: &refreshed.history,
@@ -265,6 +489,7 @@ pub async fn training_focus(
     let focus = training::ensure(
         &state.db,
         player.id,
+        Some(scope.role),
         &inputs,
         state.config.training.focus_weights,
     )
@@ -286,14 +511,21 @@ pub async fn training_focus(
         .take(3)
         .collect();
 
-    let history =
-        repositories::training::history(&state.db, player.id, state.config.training.history_limit)
-            .await?;
+    let history = repositories::training::history(
+        &state.db,
+        player.id,
+        Some(scope.role),
+        state.config.training.history_limit,
+    )
+    .await?;
 
     Ok(Json(TrainingFocusResponse {
         note: focus.is_none().then(|| {
             if refreshed.history.is_empty() {
-                "Sync some matches first — there is nothing to train on yet.".to_string()
+                format!(
+                    "No eligible {} matches yet — there is nothing to train on in this role.",
+                    scope.role.label(),
+                )
             } else {
                 "Nothing stands out as a training focus right now. Keep playing and check back."
                     .to_string()
@@ -332,12 +564,14 @@ pub async fn analyze(
     EntitledUser(user): EntitledUser,
 ) -> AppResult<Json<CoachResponse>> {
     let player = load_linked_player(&state, &user).await?;
-    let (evidence, patterns) = player_evidence(&state, &user, &player).await?;
+    let scope = require_scope(&state, &player).await?;
+    let (evidence, patterns) = role_evidence(&state, &user, &player, &scope).await?;
 
     run(
         &state,
         &player,
-        AnalysisScope::Player,
+        AnalysisScope::Role,
+        Some(scope.role),
         None,
         evidence,
         patterns,
@@ -382,6 +616,7 @@ pub async fn analyze_match(
         &state,
         &player,
         AnalysisScope::Match,
+        CoachableRole::from_stored(&match_.role),
         Some(id),
         evidence,
         patterns,
@@ -417,12 +652,13 @@ pub async fn match_analysis(
 ) -> AppResult<Json<CoachResponse>> {
     let player = load_linked_player(&state, &user).await?;
     let match_ = load_owned_match(&state, &player, id).await?;
+    let role = CoachableRole::from_stored(&match_.role);
 
     let (evidence, patterns) = match_evidence(&state, &user, &player, &match_).await?;
-    let stored = repositories::coaching::latest(&state.db, player.id, Some(id)).await?;
+    let stored = repositories::coaching::latest(&state.db, player.id, Some(id), role).await?;
 
     Ok(Json(respond(
-        &state, stored, evidence, patterns, None, true,
+        &state, stored, evidence, patterns, role, None, true,
     )))
 }
 
@@ -431,6 +667,7 @@ async fn run(
     state: &AppState,
     player: &DotaPlayer,
     scope: AnalysisScope,
+    role: Option<CoachableRole>,
     match_id: Option<Uuid>,
     evidence: Vec<Evidence>,
     patterns: Vec<RecurringPattern>,
@@ -449,7 +686,11 @@ async fn run(
     // Keyed on the configured model rather than the one that answers: it is
     // what the *next* request would use, and a served-model change behind the
     // same configuration is not a different question.
-    let hash = coaching::context_hash(&evidence, scope, &state.config.llm.model);
+    // The role is part of the question's identity, not an attribute of the
+    // answer. Without it a Carry analysis and a Support one could share a cache
+    // key, and the player would be served advice about a role they did not ask
+    // about — silently, and looking exactly like a fresh answer.
+    let hash = coaching::context_hash(&evidence, scope, role, &state.config.llm.model);
 
     if let Some(cached) =
         repositories::coaching::find_by_hash(&state.db, player.id, match_id, &hash).await?
@@ -460,6 +701,7 @@ async fn run(
             Some(cached),
             evidence,
             patterns,
+            role,
             None,
             true,
         )));
@@ -477,11 +719,13 @@ async fn run(
             dota_player_id: player.id,
             match_id,
             scope,
+            role,
             context_hash: &hash,
             model: &generated.model,
             summary: &generated.summary,
             evidence: &evidence,
             insights: &generated.insights,
+            plan: &generated.plan,
         },
     )
     .await?;
@@ -489,7 +733,7 @@ async fn run(
     let stored =
         repositories::coaching::find_by_hash(&state.db, player.id, match_id, &hash).await?;
     Ok(Json(respond(
-        state, stored, evidence, patterns, None, false,
+        state, stored, evidence, patterns, role, None, false,
     )))
 }
 
@@ -498,6 +742,7 @@ fn respond(
     analysis: Option<CoachingAnalysis>,
     evidence: Vec<Evidence>,
     patterns: Vec<RecurringPattern>,
+    role: Option<CoachableRole>,
     note: Option<String>,
     cached: bool,
 ) -> CoachResponse {
@@ -522,6 +767,8 @@ fn respond(
         stale,
         cached,
         patterns,
+        role,
+        role_label: role.map(CoachableRole::label),
         note,
     }
 }
@@ -556,20 +803,32 @@ async fn enforce_limits(state: &AppState, player: &DotaPlayer) -> AppResult<()> 
     Ok(())
 }
 
-/// Career evidence: stats, form, peer comparison and repertoire.
-async fn player_evidence(
+/// The coaching evidence set, scoped to one role.
+///
+/// This function is the architectural boundary the whole phase rests on. Every
+/// figure in the returned evidence comes from a query that was handed
+/// `scope.matches`, so a Support match cannot reach a Carry analysis by any
+/// path — not because the prompt asks the model to ignore it, but because it
+/// was never fetched.
+async fn role_evidence(
     state: &AppState,
     user: &User,
     player: &DotaPlayer,
+    scope: &CoachingScope,
 ) -> AppResult<(Vec<Evidence>, Vec<RecurringPattern>)> {
-    let stats = repositories::metrics::player_stats(&state.db, player.id).await?;
+    let stats =
+        repositories::metrics::player_stats_scoped(&state.db, player.id, &scope.matches).await?;
+
     // Patterns are what let an insight be about a habit rather than an
-    // average, so they are detected before the evidence is assembled.
-    let refreshed = player_model::refresh(&state.db, player.id).await?;
+    // average, so they are detected before the evidence is assembled — and
+    // detected inside the scope, so "you keep doing this" means "in this role".
+    let refreshed = player_model::analyze_scope(&state.db, player.id, &scope.matches).await?;
     let detected = refreshed.patterns;
-    let recent = repositories::r#match::list_by_player(
+
+    let recent = repositories::r#match::list_by_player_scoped(
         &state.db,
         player.id,
+        &scope.matches,
         state.config.coach.recent_matches,
         0,
     )
@@ -577,11 +836,19 @@ async fn player_evidence(
 
     // Both of these degrade internally rather than failing: a benchmark or
     // meta outage removes evidence, it does not remove the coach.
-    let benchmark = benchmark::build(state, player, None, None).await?;
-    let heroes = heroes::build(state, user, Some(state.config.heroes.recommendation_limit)).await?;
+    let benchmark = role_benchmark(state, player, scope).await?;
+    let heroes = heroes::build(
+        state,
+        user,
+        Some(state.config.heroes.recommendation_limit),
+        &scope.matches,
+        Some(scope.role),
+    )
+    .await?;
     let focus = active_focus(
         state,
         player,
+        Some(scope.role),
         &refreshed.history,
         &benchmark.results,
         &detected,
@@ -589,6 +856,11 @@ async fn player_evidence(
     .await?;
 
     let evidence = coaching::evidence::build(&EvidenceInputs {
+        scope: EvidenceScope {
+            role: Some(scope.role),
+            matches: stats.matches,
+            confidence: SampleConfidence::for_matches(stats.matches),
+        },
         stats: &stats,
         recent: &recent,
         benchmarks: &benchmark.results,
@@ -604,6 +876,29 @@ async fn player_evidence(
     Ok((evidence, detected))
 }
 
+/// The peer comparison for the role being coached.
+///
+/// The hero is picked from the role's own most-played, not the player's: a
+/// Phantom Assassin benchmark is not a fact about their hard support games.
+/// The comparison itself is still hero-segmented — that is all the provider
+/// offers, and it says so on every result.
+async fn role_benchmark(
+    state: &AppState,
+    player: &DotaPlayer,
+    scope: &CoachingScope,
+) -> AppResult<benchmark::BenchmarkResponse> {
+    let top = repositories::metrics::hero_stats_scoped(&state.db, player.id, &scope.matches, 1)
+        .await?
+        .into_iter()
+        .next()
+        .map(|hero| hero.hero_id);
+
+    // The scope is passed either way: the player's own averages have to come
+    // from the role's matches, or the percentile would describe a figure the
+    // coaching set does not contain.
+    benchmark::build(state, player, top, None, &scope.matches, Some(scope.role)).await
+}
+
 /// One match, read against the same career evidence.
 ///
 /// The career half is what makes a single game coachable: "six deaths" is a
@@ -614,15 +909,46 @@ async fn match_evidence(
     player: &DotaPlayer,
     match_: &Match,
 ) -> AppResult<(Vec<Evidence>, Vec<RecurringPattern>)> {
-    let stats = repositories::metrics::player_stats(&state.db, player.id).await?;
-    let refreshed = player_model::refresh(&state.db, player.id).await?;
+    // A match is read against the player's record **in the role that match was
+    // played in**, not against their chosen coaching role and not against their
+    // career. "Six deaths against your average" is only a lesson if the average
+    // is from games like this one.
+    //
+    // A match whose role the estimator could not attribute falls back to the
+    // whole competitive window, which is the honest comparison available.
+    let role = CoachableRole::from_stored(&match_.role);
+    let window = state.config.roles.analysis_match_limit;
+    let match_scope = match role {
+        Some(role) => MatchScope::for_role(role, window),
+        None => MatchScope::competitive(window),
+    };
+
+    let stats =
+        repositories::metrics::player_stats_scoped(&state.db, player.id, &match_scope).await?;
+    let refreshed = player_model::analyze_scope(&state.db, player.id, &match_scope).await?;
     let detected = refreshed.patterns;
     let metrics = repositories::metrics::for_match(&state.db, match_.id).await?;
-    let benchmark = benchmark::build(state, player, Some(match_.hero_id), None).await?;
-    let heroes = heroes::build(state, user, Some(state.config.heroes.recommendation_limit)).await?;
+    let benchmark = benchmark::build(
+        state,
+        player,
+        Some(match_.hero_id),
+        None,
+        &match_scope,
+        role,
+    )
+    .await?;
+    let heroes = heroes::build(
+        state,
+        user,
+        Some(state.config.heroes.recommendation_limit),
+        &match_scope,
+        role,
+    )
+    .await?;
     let focus = active_focus(
         state,
         player,
+        role,
         &refreshed.history,
         &benchmark.results,
         &detected,
@@ -630,6 +956,11 @@ async fn match_evidence(
     .await?;
 
     let evidence = coaching::evidence::build(&EvidenceInputs {
+        scope: EvidenceScope {
+            role,
+            matches: stats.matches,
+            confidence: SampleConfidence::for_matches(stats.matches),
+        },
         stats: &stats,
         recent: &[],
         benchmarks: &benchmark.results,
@@ -680,11 +1011,12 @@ fn coaching_error(error: CoachingError) -> AppError {
 async fn active_focus(
     state: &AppState,
     player: &DotaPlayer,
+    role: Option<CoachableRole>,
     history: &[crate::domain::player_model::AnalyzedMatch],
     benchmarks: &[crate::domain::benchmark::BenchmarkResult],
     patterns: &[RecurringPattern],
 ) -> AppResult<Option<TrainingFocus>> {
-    let Some(stored) = repositories::training::active(&state.db, player.id).await? else {
+    let Some(stored) = repositories::training::active(&state.db, player.id, role).await? else {
         return Ok(None);
     };
 

@@ -657,13 +657,14 @@ pub fn hydrate(mut focus: TrainingFocus, inputs: &SelectionInputs<'_>) -> Traini
 pub async fn ensure(
     pool: &sqlx::PgPool,
     dota_player_id: uuid::Uuid,
+    role: Option<crate::domain::role::CoachableRole>,
     inputs: &SelectionInputs<'_>,
     weights: FocusWeights,
 ) -> Result<Option<TrainingFocus>, sqlx::Error> {
     let ranked = rank(inputs, weights);
     let mut just_closed: Option<String> = None;
 
-    if let Some(stored) = crate::repositories::training::active(pool, dota_player_id).await? {
+    if let Some(stored) = crate::repositories::training::active(pool, dota_player_id, role).await? {
         let live = hydrate(stored, inputs);
 
         match review(&live, inputs) {
@@ -682,13 +683,23 @@ pub async fn ensure(
                 }));
             }
             FocusVerdict::Achieved => {
-                crate::repositories::training::close(pool, dota_player_id, FocusStatus::Achieved)
-                    .await?;
+                crate::repositories::training::close(
+                    pool,
+                    dota_player_id,
+                    role,
+                    FocusStatus::Achieved,
+                )
+                .await?;
                 just_closed = Some(live.key);
             }
             FocusVerdict::Retired => {
-                crate::repositories::training::close(pool, dota_player_id, FocusStatus::Retired)
-                    .await?;
+                crate::repositories::training::close(
+                    pool,
+                    dota_player_id,
+                    role,
+                    FocusStatus::Retired,
+                )
+                .await?;
                 just_closed = Some(live.key);
             }
         }
@@ -706,7 +717,7 @@ pub async fn ensure(
     };
 
     let (id, started_at) =
-        crate::repositories::training::start(pool, dota_player_id, &next).await?;
+        crate::repositories::training::start(pool, dota_player_id, role, &next).await?;
     Ok(Some(TrainingFocus {
         id: Some(id),
         started_at: Some(started_at),

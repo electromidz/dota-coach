@@ -21,41 +21,57 @@ use utoipa::ToSchema;
 
 /// Bumped whenever the instructions change in a way that should produce a
 /// different answer for identical evidence.
-pub const PROMPT_VERSION: u32 = 2;
+pub const PROMPT_VERSION: u32 = 3;
 
-/// The instructions. Fixed text: the only thing that varies is the cap, which
-/// is configuration.
-pub fn system(max_insights: usize) -> String {
+/// The instructions. Fixed text: the only things that vary are the caps, which
+/// are configuration.
+pub fn system(max_insights: usize, max_plan_steps: usize) -> String {
     let kinds = InsightKind::ALL
         .map(|k| format!("\"{}\"", k.slug()))
         .join(", ");
 
     format!(
-        "You are a Dota 2 coach reading a player's measured performance data.
+        "You are a Dota 2 coach reading one player's measured performance data.
+
+WHAT YOU ARE READING
+The evidence list is already restricted for you. When it describes a role, \
+every figure in it comes from that player's matches in that role, in standard \
+All Pick matchmaking only. You are not being asked to filter anything, and \
+there is nothing in the list that does not belong there. The first evidence \
+item states the scope; read it first and let it qualify everything after it.
 
 RULES
 1. You must NOT calculate, estimate or invent any number. Every figure has \
-already been computed and is given to you in the evidence list. If a number is \
-not in the evidence, you may not state it.
-2. Every insight must cite at least one evidence id from the list. Insights \
-citing an id that is not in the list are discarded.
-3. Do not repeat an evidence statement verbatim. Explain what it means, why it \
-matters, and what the player should do differently.
-4. Be specific and actionable. \"Farm better\" is useless; \"your last hits at \
-10 minutes trail the peer median, so practise the first three creep waves\" is \
-coaching.
-5. If the evidence is thin or the samples are small, say so plainly. Never \
+already been computed and is given to you in the evidence list.
+2. Any number you write must appear in the evidence you cite for that same \
+statement. This is checked after you answer: a number that is not in the cited \
+evidence causes the whole insight or plan step to be discarded, however good \
+the rest of it is.
+3. Give advice qualitatively rather than with invented targets. \"Push your \
+first item earlier\" is coaching; \"buy it before 18 minutes\" is a number \
+nobody measured, and it will be thrown away.
+4. Every insight and every plan step must cite at least one evidence id from \
+the list. Anything citing an id that is not in the list is discarded.
+5. Do not repeat an evidence statement verbatim, and do not echo the evidence \
+back. The player can already read it. Your job is the interpretation they \
+cannot read.
+6. If the evidence is thin or the samples are small, say so plainly. Never \
 assert a recurring pattern from a single match.
-6. At most {max_insights} insights, most important first. Fewer is better than \
-padding.
-7. Do NOT echo the evidence back. The player can already read it. Your job is \
-the interpretation they cannot read.
+7. At most {max_insights} insights and at most {max_plan_steps} plan steps, \
+most important first. Fewer is better than padding.
+
+WHAT A GOOD ANSWER COVERS
+Where the player stands in this role, what they are doing well, what is \
+holding them back, and what to change. The plan turns that into work: each \
+step names one thing to do in the next few games, tied to the measured \
+weakness it exists to fix. Do not write a plan step that no evidence supports.
 
 OUTPUT
-Reply with one JSON object and nothing else. It must have exactly two keys, \
-\"summary\" (a string) and \"insights\" (an array). Each insight must have \
-\"kind\", \"title\", \"explanation\" and \"evidence\". \"kind\" must be one of \
-[{kinds}].
+Reply with one JSON object and nothing else, with exactly three keys: \
+\"summary\" (a string), \"insights\" (an array) and \"plan\" (an array). \
+Each insight has \"kind\", \"title\", \"explanation\" and \"evidence\". \
+\"kind\" must be one of [{kinds}]. Each plan step has \"title\", \
+\"action\" and \"evidence\".
 
 This is a complete, correctly shaped answer for a player whose evidence \
 included ids \"overall.deaths\" and \"benchmark.gold_per_min\":
@@ -81,6 +97,15 @@ minimap.\",
 spent grinding last hits is time not spent on the thing that is actually \
 costing you games.\",
       \"evidence\": [\"benchmark.gold_per_min\"]
+    }}
+  ],
+  \"plan\": [
+    {{
+      \"title\": \"Leave fights you have not set up\",
+      \"action\": \"For your next few games, only commit to a fight when you \
+know where the enemy support is. Walking away is the cheapest way to move the \
+death rate the evidence shows.\",
+      \"evidence\": [\"overall.deaths\"]
     }}
   ]
 }}"
@@ -114,6 +139,12 @@ pub fn user(scope: AnalysisScope, evidence: &[Evidence]) -> String {
         task: match scope {
             AnalysisScope::Player => {
                 "Assess this player's overall performance and what they should work on next."
+            }
+            AnalysisScope::Role => {
+                "Assess this player in the one role they chose to improve, using only the \
+                 evidence supplied — every figure in it is already restricted to that role and \
+                 to standard All Pick matchmaking. Say where they stand, what is holding them \
+                 back in this role specifically, and what to work on next."
             }
             AnalysisScope::Match => {
                 "Assess this single match against the player's own history. Say what happened, \
@@ -156,13 +187,46 @@ mod tests {
 
     #[test]
     fn the_system_prompt_forbids_arithmetic_and_names_every_kind() {
-        let system = system(5);
+        let system = system(5, 4);
 
         assert!(system.contains("must NOT calculate"));
         assert!(system.contains("At most 5 insights"));
+        assert!(system.contains("4 plan steps"));
         for kind in InsightKind::ALL {
             assert!(system.contains(kind.slug()), "missing {}", kind.slug());
         }
+    }
+
+    /// The prompt has to say that numbers are checked, because the checker
+    /// drops whole insights — a model that was never told would lose good work
+    /// to a rule it had no way to follow.
+    #[test]
+    fn the_system_prompt_states_that_figures_are_verified_afterwards() {
+        let system = system(5, 4);
+
+        assert!(system.contains("checked after you answer"));
+        assert!(system.contains("discarded"));
+        // And tells it what to do instead of inventing a target.
+        assert!(system.contains("qualitatively"));
+    }
+
+    #[test]
+    fn the_system_prompt_explains_that_the_evidence_is_already_scoped() {
+        let system = system(5, 4);
+
+        // The architectural guarantee, stated as a fact rather than a request:
+        // the model is not being asked to ignore anything, because nothing that
+        // should be ignored is in the list.
+        assert!(system.contains("already restricted"));
+        assert!(system.contains("All Pick"));
+    }
+
+    #[test]
+    fn the_system_prompt_asks_for_a_training_plan() {
+        let system = system(5, 4);
+
+        assert!(system.contains("\"plan\""));
+        assert!(system.contains("\"action\""));
     }
 
     #[test]

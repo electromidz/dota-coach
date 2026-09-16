@@ -1,6 +1,7 @@
 use std::env;
 
 use crate::domain::hero::FitWeights;
+use crate::domain::role::RoleScoreWeights;
 use crate::domain::training::FocusWeights;
 use crate::services::hero_meta::strength::MetaWeights;
 
@@ -21,6 +22,7 @@ pub struct Config {
     pub auth: AuthConfig,
     pub dota: DotaConfig,
     pub heroes: HeroConfig,
+    pub roles: RoleConfig,
     pub coach: CoachConfig,
     pub training: TrainingConfig,
     pub llm: LlmConfig,
@@ -137,6 +139,9 @@ pub struct CoachConfig {
     pub daily_limit: i64,
     /// Ceiling on insights kept from one answer.
     pub max_insights: usize,
+    /// Ceiling on training-plan steps kept from one answer. Small on purpose:
+    /// a plan with ten items is a list, and a player works on one thing.
+    pub max_plan_steps: usize,
     pub max_output_tokens: u32,
     /// Low: this is interpretation of fixed numbers, not creative writing.
     pub temperature: f32,
@@ -152,6 +157,7 @@ impl CoachConfig {
             cooldown_seconds: parsed("COACH_COOLDOWN_SECONDS", 30)?,
             daily_limit: parsed::<i64>("COACH_DAILY_LIMIT", 20)?.max(0),
             max_insights: parsed::<usize>("COACH_MAX_INSIGHTS", 5)?.clamp(1, 20),
+            max_plan_steps: parsed::<usize>("COACH_MAX_PLAN_STEPS", 4)?.clamp(1, 10),
             // The ceiling has to cover a reasoning model, which spends the bulk
             // of this budget thinking and emits nothing at all if it runs out
             // mid-thought. Raising the ceiling costs nothing on a model that
@@ -193,6 +199,71 @@ fn validate_weights(weights: &FitWeights) -> Result<(), ConfigError> {
         return Err(ConfigError::Invalid(
             "FIT_WEIGHT_*",
             "fit weights must sum to more than zero".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Role analysis tuning.
+///
+/// The competitive window and how a role's performance score is composed. As
+/// with the fit weights, the numbers are a starting point: the scoring rule is
+/// fixed in code and documented in `services::roles`, the emphasis is not.
+#[derive(Clone, Debug)]
+pub struct RoleConfig {
+    /// How many eligible matches the overall and role analysis reads.
+    ///
+    /// Applied *after* eligibility filtering, never before — see
+    /// `domain::scope::MatchScope`.
+    pub analysis_match_limit: i64,
+    pub score_weights: RoleScoreWeights,
+}
+
+impl RoleConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let defaults = RoleScoreWeights::default();
+
+        let weights = RoleScoreWeights {
+            win_rate: parsed("ROLE_WEIGHT_WIN_RATE", defaults.win_rate)?,
+            kill_participation: parsed(
+                "ROLE_WEIGHT_KILL_PARTICIPATION",
+                defaults.kill_participation,
+            )?,
+            kda: parsed("ROLE_WEIGHT_KDA", defaults.kda)?,
+            deaths: parsed("ROLE_WEIGHT_DEATHS", defaults.deaths)?,
+        };
+
+        validate_role_weights(&weights)?;
+
+        Ok(Self {
+            // A hundred is the product's target window. The floor is twenty
+            // because a smaller window would make the per-role samples
+            // meaningless; the ceiling keeps one player's analysis from
+            // scanning an unbounded history.
+            analysis_match_limit: parsed::<i64>("ROLE_ANALYSIS_MATCH_LIMIT", 100)?.clamp(20, 500),
+            score_weights: weights,
+        })
+    }
+}
+
+fn validate_role_weights(weights: &RoleScoreWeights) -> Result<(), ConfigError> {
+    let named = [
+        ("ROLE_WEIGHT_WIN_RATE", weights.win_rate),
+        ("ROLE_WEIGHT_KILL_PARTICIPATION", weights.kill_participation),
+        ("ROLE_WEIGHT_KDA", weights.kda),
+        ("ROLE_WEIGHT_DEATHS", weights.deaths),
+    ];
+
+    for (key, value) in named {
+        if value < 0.0 || !value.is_finite() {
+            return Err(ConfigError::Invalid(key, "must be zero or positive".into()));
+        }
+    }
+    if named.iter().map(|(_, v)| v).sum::<f32>() <= 0.0 {
+        return Err(ConfigError::Invalid(
+            "ROLE_WEIGHT_*",
+            "role score weights must sum to more than zero".into(),
         ));
     }
 
@@ -410,13 +481,21 @@ impl Config {
             dota: DotaConfig {
                 base_url: optional("DOTA_API_BASE_URL", "https://api.opendota.com/api"),
                 api_key: env::var("DOTA_API_KEY").ok().filter(|s| !s.is_empty()),
-                sync_match_limit: parsed("SYNC_MATCH_LIMIT", 20)?.clamp(1, 100),
+                // The ceiling is what decides whether the hundred-match
+                // competitive window is reachable at all: the limit counts
+                // *raw* matches, and a player whose history is half Turbo needs
+                // to pull two hundred to store a hundred eligible ones. The
+                // default stays low because a first sync fetches a match detail
+                // per new match, and a deep first pull can outlast the route's
+                // own timeout — raising it is an operator's decision.
+                sync_match_limit: parsed("SYNC_MATCH_LIMIT", 20)?.clamp(1, 500),
                 sync_cooldown_seconds: parsed("SYNC_COOLDOWN_SECONDS", 30)?,
                 request_timeout_seconds: parsed("DOTA_API_TIMEOUT_SECONDS", 10)?,
                 benchmark_ttl_hours: parsed("BENCHMARK_TTL_HOURS", 24)?,
                 significant_only: parsed("DOTA_SIGNIFICANT_ONLY", false)?,
             },
             heroes: HeroConfig::from_env()?,
+            roles: RoleConfig::from_env()?,
             coach: CoachConfig::from_env()?,
             training: TrainingConfig::from_env()?,
             llm: LlmConfig {
@@ -595,6 +674,7 @@ mod tests {
                 significant_only: false,
             },
             heroes: HeroConfig::from_env().unwrap(),
+            roles: RoleConfig::from_env().unwrap(),
             coach: CoachConfig::from_env().unwrap(),
             training: TrainingConfig::from_env().unwrap(),
             llm: llm(None),

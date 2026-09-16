@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
-import { BarList } from "@/components/charts/BarList";
 import { FormStrip } from "@/components/charts/FormStrip";
 import { Meter } from "@/components/charts/Meter";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { TrainingFocusCard } from "@/components/coach/TrainingFocusCard";
+import { RolePerformance } from "@/components/dashboard/RolePerformance";
+import { ScopeBanner } from "@/components/dashboard/ScopeBanner";
 import { StatTile } from "@/components/dashboard/StatTile";
 import { SignedOut } from "@/components/shell/SignedOut";
 import { Alert } from "@/components/ui/Alert";
@@ -29,7 +30,11 @@ import { useSession } from "@/lib/session-context";
 import { cn } from "@/lib/utils";
 
 /** Enough recent matches for the trend line and form strip. Aggregates come
- *  from the backend, so this is a display sample, not a statistical one. */
+ *  from the backend, so this is a display sample, not a statistical one.
+ *
+ *  Drawn from the **competitive** scope: the strip and the sparkline describe
+ *  the same games as the numbers beside them, so a Turbo win can never appear
+ *  as form on a screen whose win rate excludes it. */
 const SAMPLE = 20;
 
 export function Overview({ loginError }: { loginError?: string }) {
@@ -45,9 +50,10 @@ export function Overview({ loginError }: { loginError?: string }) {
   const load = useCallback(async () => {
     try {
       // Aggregates and the recent list in parallel: the numbers come from the
-      // backend, the list only feeds the trend and form visuals.
+      // backend, the list only feeds the trend and form visuals — and both
+      // read the competitive population, so they describe the same games.
       const [page, computed] = await Promise.all([
-        getMatches(1, SAMPLE),
+        getMatches(1, SAMPLE, "competitive"),
         getStats(),
       ]);
       setMatches(page.matches);
@@ -104,7 +110,12 @@ export function Overview({ loginError }: { loginError?: string }) {
   const { me } = session;
   const list = matches ?? [];
   const overall = stats?.overall;
+  /** Eligible matches — the population every number on this screen describes. */
   const hasMatches = (overall?.matches ?? 0) > 0;
+  /** Every stored match, whatever mode. A player can have plenty of these and
+   *  no eligible ones at all, which is a different problem with a different
+   *  answer, so the two empty states are kept apart. */
+  const stored = stats?.eligibility.total_matches ?? 0;
 
   return (
     <div className="flex flex-col gap-6 pb-4">
@@ -119,8 +130,8 @@ export function Overview({ loginError }: { loginError?: string }) {
             />
           </p>
           <p className="text-xs text-ink-faint">
-            {hasMatches && overall
-              ? `Reading ${overall.matches} ${overall.matches === 1 ? "match" : "matches"}.`
+            {hasMatches && stats
+              ? "Your performance in Ranked and public All Pick."
               : "Sync your matches to see your numbers."}
           </p>
         </div>
@@ -151,16 +162,44 @@ export function Overview({ loginError }: { loginError?: string }) {
 
       {matchesError ? <Alert>{matchesError}</Alert> : null}
 
+      {/* Which games everything below is about. Above the numbers, because it
+          is what makes them readable. */}
+      {stats && stored > 0 ? (
+        <ScopeBanner
+          analyzed={stats.scope.analyzed_matches}
+          confidence={stats.scope.confidence}
+          confidenceLabel={stats.scope.confidence_label}
+          caveat={stats.scope.confidence_caveat}
+          description={stats.scope.description}
+          eligibility={stats.eligibility}
+        />
+      ) : null}
+
       {/* The dashboard's first question is "what should I work on", not "what
           are my numbers". Statistics follow underneath. */}
       {hasMatches ? <TrainingFocusCard compact /> : null}
 
-      {!hasMatches && !matchesError ? (
+      {stored === 0 && !matchesError ? (
         <Card>
           <p className="text-sm leading-relaxed text-ink-muted">
             No matches stored yet. Tap{" "}
             <strong className="font-semibold text-keyword">Sync Matches</strong>{" "}
             to pull your recent games from OpenDota.
+          </p>
+        </Card>
+      ) : null}
+
+      {/* Stored games, none of them eligible. Never solved by syncing more of
+          the same, so it does not say "sync". */}
+      {stored > 0 && !hasMatches && !matchesError ? (
+        <Card>
+          <p className="text-sm leading-relaxed text-ink-muted">
+            None of your {stored} stored{" "}
+            {stored === 1 ? "match is" : "matches are"} Ranked or public All
+            Pick, so there is nothing to analyse yet. Coaching reads standard
+            All Pick matchmaking only — Turbo has a different economy, and
+            reading it against All Pick benchmarks would give you the wrong
+            advice rather than more of it.
           </p>
         </Card>
       ) : null}
@@ -233,30 +272,20 @@ export function Overview({ loginError }: { loginError?: string }) {
           </div>
 
           <div className="grid gap-4 lg:grid-cols-2">
-            <Card className="flex min-w-0 flex-col gap-4">
-              <h2 className="text-xs uppercase tracking-wider text-ink-faint">
-                Roles played
-              </h2>
-              <BarList
-                caption="Matches played per role"
-                data={stats.roles.map((r) => ({
-                  label: r.role,
-                  value: r.matches,
-                  meta: formatPercent(r.win_rate),
-                }))}
-              />
-            </Card>
+            <RolePerformance analysis={stats.role_analysis} />
 
             <Card className="flex min-w-0 flex-col gap-4">
               <div className="flex items-baseline justify-between gap-3">
                 <h2 className="text-xs uppercase tracking-wider text-ink-faint">
                   Most played
                 </h2>
+                {/* Named for the scope difference: this card is the eligible
+                    window, that page is every game the player played. */}
                 <Link
                   href="/matches"
                   className="focus-neon cursor-pointer rounded text-xs text-function transition-colors duration-200 ease-out hover:text-ink"
                 >
-                  All matches
+                  Full history
                 </Link>
               </div>
 
@@ -291,9 +320,10 @@ export function Overview({ loginError }: { loginError?: string }) {
 
           {overall.parsed_matches < overall.matches ? (
             <p className="text-xs leading-relaxed text-ink-faint">
-              {overall.parsed_matches} of {overall.matches} matches have a
-              parsed replay. Timing metrics such as last hits at 10 minutes are
-              only available for those.
+              {overall.parsed_matches} of the {overall.matches} analysed
+              matches have a parsed replay. Timing metrics such as last hits at
+              10 minutes are only available for those, and role detection is
+              sharpest on them.
             </p>
           ) : null}
         </>

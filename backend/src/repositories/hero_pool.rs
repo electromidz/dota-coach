@@ -1,5 +1,7 @@
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 use uuid::Uuid;
+
+use crate::domain::scope::MatchScope;
 
 /// One hero's history for a player, straight from SQL.
 ///
@@ -34,9 +36,10 @@ pub async fn all(
     pool: &PgPool,
     dota_player_id: Uuid,
     recent_window: i64,
+    scope: &MatchScope,
 ) -> Result<Vec<HeroPoolRow>, sqlx::Error> {
-    sqlx::query_as::<_, HeroPoolRow>(
-        "WITH ranked AS (
+    sqlx::query_as::<_, HeroPoolRow>(AssertSqlSafe(format!(
+        "{cte}, ranked AS (
              SELECT
                  m.hero_id,
                  m.hero_name,
@@ -50,6 +53,7 @@ pub async fn all(
                  ) AS recency
                FROM matches m
                JOIN match_metrics mm ON mm.match_id = m.id
+               {join}
               WHERE m.dota_player_id = $1
          )
          SELECT
@@ -69,7 +73,9 @@ pub async fn all(
            FROM ranked
           GROUP BY hero_id
           ORDER BY matches DESC, last_played_at DESC",
-    )
+        cte = scope.cte(),
+        join = scope.join(),
+    )))
     .bind(dota_player_id)
     .bind(recent_window)
     .fetch_all(pool)

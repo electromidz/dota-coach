@@ -92,6 +92,7 @@ pub async fn sync(
         user.id,
         &dota_player,
         state.config.dota.sync_match_limit,
+        state.config.roles.analysis_match_limit,
     )
     .await?;
 

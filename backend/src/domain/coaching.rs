@@ -120,14 +120,37 @@ pub struct Insight {
     pub evidence: Vec<String>,
 }
 
+/// One step of a training plan.
+///
+/// The plan is the answer to "so what do I actually do this week", and it is
+/// held to the same rule as an insight: every step points at the measured
+/// weakness it exists to fix, and may state no figure the backend did not
+/// compute. A step that cannot name its evidence is advice about Dota rather
+/// than advice about this player, and the product already has enough of that
+/// available for free elsewhere.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PlanStep {
+    /// 1-based, in the order the model ranked them.
+    pub position: u32,
+    /// What to work on, short enough to scan.
+    pub title: String,
+    /// What to actually do about it in the next few games.
+    pub action: String,
+    /// Evidence ids, every one guaranteed to exist in the parent analysis.
+    pub evidence: Vec<String>,
+}
+
 /// What an analysis is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AnalysisScope {
-    /// The player's whole stored history.
+    /// The player's whole stored history. Only produced before role coaching
+    /// existed; kept so stored analyses stay readable.
     Player,
-    /// One match, read against that history.
+    /// One match, read against the player's record in that match's role.
     Match,
+    /// The eligible matches in the one role the player chose to work on.
+    Role,
 }
 
 /// A stored analysis: the evidence that went in, and the interpretation that
@@ -136,12 +159,19 @@ pub enum AnalysisScope {
 pub struct CoachingAnalysis {
     pub id: Uuid,
     pub scope: AnalysisScope,
+    /// The role it is about. `None` for a stored analysis that predates role
+    /// coaching.
+    pub role: Option<crate::domain::role::CoachableRole>,
+    pub role_label: Option<&'static str>,
     /// Set only for a match-scoped analysis.
     pub match_id: Option<Uuid>,
     /// The model that produced it, as the provider reported itself.
     pub model: String,
     pub summary: String,
     pub insights: Vec<Insight>,
+    /// The training plan, in order. Empty when the model produced none that
+    /// survived validation — which is a real answer, not a rendering bug.
+    pub plan: Vec<PlanStep>,
     /// The exact evidence the model was shown, kept so an old analysis can
     /// still be read against the numbers that produced it.
     pub evidence: Vec<Evidence>,

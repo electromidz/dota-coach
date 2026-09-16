@@ -4,6 +4,11 @@
 //! behaviour under test (uniqueness, ownership scoping, pagination) lives in
 //! SQL and would be meaningless against a fake.
 
+// Each test binary compiles this module separately and uses a different part of
+// it, so anything one of them does not touch reads as dead code there. The
+// alternative is annotating half the file.
+#![allow(dead_code)]
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,7 +20,7 @@ use axum::Router;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use dota_coach_backend::api;
 use dota_coach_backend::config::{
-    AuthConfig, BillingConfig, CoachConfig, Config, DotaConfig, HeroConfig, LlmConfig,
+    AuthConfig, BillingConfig, CoachConfig, Config, DotaConfig, HeroConfig, LlmConfig, RoleConfig,
     TrainingConfig,
 };
 use dota_coach_backend::domain::benchmark::{BenchmarkContext, BenchmarkMetric, Bucket, Segment};
@@ -23,6 +28,7 @@ use dota_coach_backend::domain::billing::PaymentStatus;
 use dota_coach_backend::domain::hero::FitWeights;
 use dota_coach_backend::domain::hero::{HeroMeta, HeroMetaContext};
 use dota_coach_backend::domain::r#match::NormalizedMatch;
+use dota_coach_backend::domain::role::RoleScoreWeights;
 use dota_coach_backend::domain::session::{hash_token, NewToken};
 use dota_coach_backend::domain::training::FocusWeights;
 use dota_coach_backend::services::auth::steam_openid::{OpenIdError, SteamOpenId, SteamVerifier};
@@ -575,6 +581,7 @@ pub fn test_config() -> Config {
             cooldown_seconds: 0,
             daily_limit: 20,
             max_insights: 5,
+            max_plan_steps: 4,
             max_output_tokens: 900,
             temperature: 0.0,
             request_timeout_seconds: 5,
@@ -590,6 +597,14 @@ pub fn test_config() -> Config {
             benchmark_lookups: 5,
             fit_weights: FitWeights::default(),
             meta_weights: MetaWeights::default(),
+        },
+        roles: RoleConfig {
+            // The production default. It used to be smaller, until the window
+            // started deciding how much history the player model reads — at
+            // which point a harness that quietly analysed a fifth of a test's
+            // matches was testing something nobody ships.
+            analysis_match_limit: 100,
+            score_weights: RoleScoreWeights::default(),
         },
         llm: LlmConfig {
             base_url: "https://llm.example/v1".into(),
@@ -824,6 +839,50 @@ impl TestApp {
 
     pub async fn post(&self, path: &str, session: Option<&str>) -> TestResponse {
         self.request(build_request("POST", path, session)).await
+    }
+
+    /// Choose a coaching role.
+    ///
+    /// Every coaching read requires one: coaching without a chosen role would
+    /// mean the server picking a role for the player, which is the decision the
+    /// whole flow exists to leave with them. Tests that exercise coaching
+    /// therefore make the choice first, exactly as the UI does.
+    pub async fn choose_role(&self, session: &Session, role: &str) {
+        let response = self
+            .post_json(
+                "/api/coach/role",
+                &format!(r#"{{"role":"{role}"}}"#),
+                Some(&session.token),
+            )
+            .await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "choosing a coaching role failed: {}",
+            response.body
+        );
+    }
+
+    /// POST a JSON body as a signed-in user.
+    pub async fn post_json(&self, path: &str, body: &str, session: Option<&str>) -> TestResponse {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json");
+
+        if let Some(token) = session {
+            builder = builder.header(
+                header::COOKIE,
+                format!(
+                    "{}={token}",
+                    dota_coach_backend::domain::session::SESSION_COOKIE
+                ),
+            );
+        }
+
+        self.request(builder.body(Body::from(body.to_string())).unwrap())
+            .await
     }
 
     /// Create a signed-in user directly, bypassing the OpenID round trip.
@@ -1088,4 +1147,126 @@ pub fn sample_matches(count: i64) -> Vec<NormalizedMatch> {
             sample_match(9_000_000_000 + i, started)
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Competitive-population fixtures
+// ---------------------------------------------------------------------------
+//
+// Shared by every test binary that needs a player whose history is a known mix
+// of game modes and roles. Kept here rather than in one test file so a second
+// binary does not end up with a second, subtly different definition of "a
+// Turbo carry game".
+
+/// Ranked All Pick, as OpenDota reports it: `all_draft` in a ranked lobby.
+pub const RANKED_ALL_PICK: (i32, i32) = (22, 7);
+/// Unranked public All Pick.
+pub const PUBLIC_ALL_PICK: (i32, i32) = (22, 0);
+pub const TURBO: (i32, i32) = (23, 0);
+pub const ABILITY_DRAFT: (i32, i32) = (18, 7);
+/// All Pick, but in a tournament lobby: the right draft, the wrong population.
+pub const TOURNAMENT: (i32, i32) = (22, 2);
+
+/// How a seeded match should be read by the role estimator.
+#[derive(Clone, Copy)]
+pub enum Lane {
+    Carry,
+    Mid,
+    Offlane,
+    Support,
+    HardSupport,
+    /// An unparsed replay: farm priority says core, nothing says which lane.
+    UnclassifiedCore,
+}
+
+/// One batch of matches with a fixed mode and role.
+///
+/// Ids are offset per batch so several batches can be seeded into one player's
+/// history without colliding. `wins` counts from the start of the batch.
+pub fn batch(
+    start_id: i64,
+    count: i64,
+    mode: (i32, i32),
+    lane: Lane,
+    wins: i64,
+) -> Vec<NormalizedMatch> {
+    (0..count)
+        .map(|i| {
+            let started = Utc
+                .timestamp_opt(1_700_000_000 + (start_id + i) * 3_600, 0)
+                .single()
+                .unwrap();
+
+            let mut m = sample_match(start_id + i, started);
+            m.game_mode = Some(mode.0);
+            m.lobby_type = Some(mode.1);
+            m.won = i < wins;
+
+            match lane {
+                Lane::Carry => {
+                    m.lane_role = Some(1);
+                    m.last_hits = 300;
+                }
+                Lane::Mid => {
+                    m.lane_role = Some(2);
+                    m.last_hits = 280;
+                }
+                Lane::Offlane => {
+                    m.lane_role = Some(3);
+                    m.last_hits = 220;
+                }
+                Lane::Support => {
+                    m.lane_role = Some(3);
+                    m.last_hits = 40;
+                }
+                Lane::HardSupport => {
+                    m.lane_role = Some(1);
+                    m.last_hits = 30;
+                }
+                Lane::UnclassifiedCore => {
+                    m.lane_role = None;
+                    m.farm_rank = Some(1);
+                    m.last_hits = 250;
+                }
+            }
+
+            m
+        })
+        .collect()
+}
+
+/// Sync a crafted history and keep the router, so a test can go through the
+/// HTTP surface the product actually serves.
+///
+/// `window` is the competitive window the app is configured with — what
+/// `/api/stats`, `/api/coach/roles` and `?scope=competitive` read.
+pub async fn seed_app(
+    db: PgPool,
+    matches: Vec<NormalizedMatch>,
+    window: i64,
+) -> (TestApp, Session) {
+    let mut config = test_config();
+    // Above anything these tests seed: the sync cap is a separate concern with
+    // its own test, and letting it truncate here would make the window
+    // assertions vacuous.
+    config.dota.sync_match_limit = 500;
+    config.roles.analysis_match_limit = window;
+
+    let app = app_with_config(
+        db,
+        MockDota::with_matches(matches),
+        StubVerifier::rejecting(),
+        config,
+    );
+
+    let session = app.login_as(unique_steam_id()).await;
+    let response = app.post("/api/players/me/sync", Some(&session.token)).await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "seeding sync failed: {}",
+        response.body
+    );
+
+    (app, session)
 }

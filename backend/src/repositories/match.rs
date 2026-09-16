@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 use uuid::Uuid;
 
 use crate::domain::r#match::{Match, NewMatch};
+use crate::domain::scope::MatchScope;
 
 /// A macro rather than a `const` because sqlx only accepts `&'static str`
 /// queries; `concat!` keeps the composed SQL a compile-time literal.
@@ -136,11 +137,64 @@ pub async fn list_by_player(
     .await
 }
 
+/// One page of matches from a [`MatchScope`].
+///
+/// The metrics join is inner here where the unscoped list has it outer: the
+/// scope's own window already requires computed metrics, so an outer join would
+/// promise rows the window cannot contain.
+pub async fn list_by_player_scoped(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    scope: &MatchScope,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Match>, sqlx::Error> {
+    sqlx::query_as::<_, Match>(AssertSqlSafe(format!(
+        "{cte}
+         SELECT {cols}, mm.kda AS metrics_kda
+           FROM matches m
+           JOIN match_metrics mm ON mm.match_id = m.id
+           {join}
+          WHERE m.dota_player_id = $1
+          ORDER BY m.started_at DESC
+          LIMIT $2 OFFSET $3",
+        cte = scope.cte(),
+        cols = columns!(),
+        join = scope.join(),
+    )))
+    .bind(dota_player_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn count_by_player(pool: &PgPool, dota_player_id: Uuid) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar("SELECT COUNT(*) FROM matches WHERE dota_player_id = $1")
         .bind(dota_player_id)
         .fetch_one(pool)
         .await
+}
+
+/// How many matches the scope contains, which is what the pagination of a
+/// scoped list has to divide.
+pub async fn count_by_player_scoped(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    scope: &MatchScope,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(AssertSqlSafe(format!(
+        "{cte}
+         SELECT COUNT(*)
+           FROM matches m
+           {join}
+          WHERE m.dota_player_id = $1",
+        cte = scope.cte(),
+        join = scope.join(),
+    )))
+    .bind(dota_player_id)
+    .fetch_one(pool)
+    .await
 }
 
 /// Fetch a match **scoped to its owner**.

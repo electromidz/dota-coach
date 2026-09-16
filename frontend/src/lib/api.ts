@@ -4,6 +4,7 @@ import type {
   BillingResponse,
   CheckoutResponse,
   PlanResponse,
+  CoachableRole,
   CoachResponse,
   HealthResponse,
   HeroIntelligenceResponse,
@@ -12,6 +13,7 @@ import type {
   MatchResponse,
   MeResponse,
   PlayerModelResponse,
+  RoleSelectionResponse,
   StatsResponse,
   SyncResponse,
   TrainingFocusResponse,
@@ -114,10 +116,25 @@ export function getStats(): Promise<StatsResponse> {
   return apiFetch<StatsResponse>("/api/stats");
 }
 
-/** Peer comparison for one hero. Defaults to the most-played. */
-export function getBenchmark(heroId?: number): Promise<BenchmarkResponse> {
-  const query = heroId === undefined ? "" : `?hero_id=${heroId}`;
-  return apiFetch<BenchmarkResponse>(`/api/benchmark${query}`);
+/**
+ * Peer comparison for one hero.
+ *
+ * Defaults to the most-played hero in scope, and the scope defaults to the role
+ * being coached — pass `"all"` to compare across every role. Game-mode
+ * eligibility is never a preference: Turbo is excluded either way.
+ */
+export function getBenchmark(
+  heroId?: number,
+  role?: CoachableRole | "all",
+): Promise<BenchmarkResponse> {
+  const params = new URLSearchParams();
+  if (heroId !== undefined) params.set("hero_id", String(heroId));
+  if (role !== undefined) params.set("role", role);
+
+  const query = params.toString();
+  return apiFetch<BenchmarkResponse>(
+    `/api/benchmark${query ? `?${query}` : ""}`,
+  );
 }
 
 /**
@@ -165,6 +182,30 @@ export function getTrainingFocus(): Promise<TrainingFocusResponse> {
   return apiFetch<TrainingFocusResponse>("/api/coach/training-focus");
 }
 
+/**
+ * Role performance, the advisory pick, and whatever the player has chosen.
+ *
+ * Deterministic and free — choosing what to work on is not a model call.
+ */
+export function getRoleSelection(): Promise<RoleSelectionResponse> {
+  return apiFetch<RoleSelectionResponse>("/api/coach/roles");
+}
+
+/**
+ * Choose the role to be coached on.
+ *
+ * Any of the five is accepted, including one the backend did not recommend.
+ * The recommendation is advice; this call is the decision.
+ */
+export function selectCoachingRole(
+  role: CoachableRole,
+): Promise<RoleSelectionResponse> {
+  return apiFetch<RoleSelectionResponse>("/api/coach/role", {
+    method: "POST",
+    body: JSON.stringify({ role }),
+  });
+}
+
 export function getMatchAnalysis(id: string): Promise<CoachResponse> {
   return apiFetch<CoachResponse>(`/api/matches/${id}/analysis`);
 }
@@ -175,8 +216,21 @@ export function analyzeMatch(id: string): Promise<CoachResponse> {
   });
 }
 
-export function getMatches(page = 1, limit = 20): Promise<MatchListResponse> {
-  return apiFetch<MatchListResponse>(`/api/matches?page=${page}&limit=${limit}`);
+/**
+ * One page of matches.
+ *
+ * `scope` defaults to the player's whole history, which is what the match list
+ * shows. Pass `"competitive"` for anything that is *analysing* — the dashboard's
+ * trend line and form strip read the same games its statistics do, so a chart
+ * and the number above it cannot disagree.
+ */
+export function getMatches(
+  page = 1,
+  limit = 20,
+  scope: "all" | "competitive" = "all",
+): Promise<MatchListResponse> {
+  const query = `page=${page}&limit=${limit}${scope === "all" ? "" : `&scope=${scope}`}`;
+  return apiFetch<MatchListResponse>(`/api/matches?${query}`);
 }
 
 export function getMatch(id: string): Promise<MatchResponse> {

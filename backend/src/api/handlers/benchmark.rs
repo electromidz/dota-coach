@@ -12,9 +12,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::extract::{AppPath, AppQuery, CurrentUser};
 use crate::domain::benchmark::{
-    BenchmarkContext, BenchmarkMetric, BenchmarkResult, Confidence, Segment,
+    BenchmarkContext, BenchmarkContextInfo, BenchmarkMetric, BenchmarkResult, Confidence,
+    PopulationScope, Segment, UnavailableSegment,
 };
 use crate::domain::player::DotaPlayer;
+use crate::domain::role::CoachableRole;
+use crate::domain::scope::MatchScope;
 use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
@@ -26,35 +29,108 @@ use utoipa::ToSchema;
 #[derive(Deserialize)]
 pub struct BenchmarkQuery {
     pub hero_id: Option<i32>,
+    /// Role slug. Omit to follow the coaching profile, `all` to compare across
+    /// every role.
+    pub role: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct BenchmarkResponse {
     pub hero_id: i32,
     pub hero_name: String,
-    /// Matches on this hero — the sample every percentile below rests on.
+    /// Matches on this hero **inside the scope** — the sample every percentile
+    /// below rests on.
     pub sample: i64,
     pub results: Vec<BenchmarkResult>,
     /// Dimensions the provider could actually segment on, repeated at the top
     /// level so a client can caveat the whole page at once.
     pub segmented_by: Vec<Segment>,
+    /// What was asked for, what was delivered, and what each side of the
+    /// comparison actually covers.
+    pub context: BenchmarkContextInfo,
     /// Set when the whole comparison is unavailable rather than any one metric.
     pub note: Option<String>,
+}
+
+/// The dimensions the product asks to compare on. The spec's four.
+const REQUESTED_SEGMENTS: [Segment; 4] = Segment::ALL;
+
+/// Why each dimension the provider cannot segment on is missing.
+///
+/// Worded as statements about the data source rather than apologies: a reader
+/// deciding how much to trust a percentile needs to know what it is a
+/// percentile *of*.
+fn unavailability_reason(segment: Segment) -> &'static str {
+    match segment {
+        Segment::Hero => "",
+        Segment::Role => {
+            "The benchmark provider publishes one distribution per hero and does not segment it \
+             by position. Your own figures below are restricted to the selected role; the peer \
+             values are not."
+        }
+        Segment::RankBracket => {
+            "The benchmark provider does not segment its distribution by rank, so these peer \
+             values cover every bracket rather than yours."
+        }
+        Segment::Patch => {
+            "The benchmark provider does not state which patch its distribution covers."
+        }
+    }
+}
+
+/// Describe both sides of the comparison.
+fn population_scope(
+    scope: &MatchScope,
+    role: Option<CoachableRole>,
+    hero: &str,
+) -> PopulationScope {
+    let player = match (role, scope.limit) {
+        (Some(role), Some(limit)) => format!(
+            "Your last {limit} eligible Ranked and public All Pick matches on {hero} as {}.",
+            role.label(),
+        ),
+        (Some(role), None) => format!(
+            "Your eligible Ranked and public All Pick matches on {hero} as {}.",
+            role.label(),
+        ),
+        (None, Some(limit)) => format!(
+            "Your last {limit} eligible Ranked and public All Pick matches on {hero}, any role.",
+        ),
+        (None, None) => {
+            format!("Your eligible Ranked and public All Pick matches on {hero}, any role.")
+        }
+    };
+
+    PopulationScope {
+        player,
+        peers: "The provider's public distribution for this hero. It does not publish which \
+                game modes, ranks or patches that distribution covers.",
+        // Never true against this provider, and it is not a defect to hide: an
+        // unknown population cannot be declared equal to a known one.
+        comparable: false,
+        note: "The two populations are described differently and are not known to match. Read \
+               these percentiles as a rough placement, not a measurement.",
+    }
 }
 
 /// `GET /api/benchmark`
 #[utoipa::path(
     get, path = "/api/benchmark", tag = "benchmark",
     summary = "Every metric against peers",
-    description = "Percentiles are omitted, not estimated, when the sample is too small — read `confidence` before quoting any of these numbers.",
+    description = "Your own figures are averaged over the eligible Ranked and public All Pick matches in the selected role. The peer distribution is segmented by hero only — the provider ignores rank and position, verified against the live API — so `context.unavailable` names every dimension the comparison could not honour, and `context.population` describes what each side actually covers. Percentiles are omitted, not estimated, when the sample is too small.",
     security(("session" = [])),
     params(
         ("hero_id" = Option<i32>, Query,
-            description = "Dota hero id. Omit to benchmark the player's most-played hero.",
+            description = "Dota hero id. Omit to benchmark the player's most-played hero in scope.",
             example = 26, minimum = 1),
+        ("role" = Option<String>, Query,
+            description = "Restrict your own figures to one role. Omit to follow the coaching \
+profile, or pass `all` for every role. The peer distribution is hero-segmented either way — see \
+`context.unavailable`.",
+            example = "carry"),
     ),
     responses(
-        (status = 200, description = "Player values beside peer medians", body = BenchmarkResponse),
+        (status = 200, description = "Player values beside peer medians, with the context each side covers", body = BenchmarkResponse),
         (status = 502, description = "The benchmark provider is unavailable", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
@@ -67,7 +143,48 @@ pub async fn overview(
     AppQuery(query): AppQuery<BenchmarkQuery>,
 ) -> AppResult<Json<BenchmarkResponse>> {
     let player = load_linked_player(&state, &user).await?;
-    build(&state, &player, query.hero_id, None).await.map(Json)
+    let (scope, role) = resolve_scope(&state, &player, query.role.as_deref()).await?;
+    build(&state, &player, query.hero_id, None, &scope, role)
+        .await
+        .map(Json)
+}
+
+/// Which matches of the player's own the comparison reads.
+///
+/// Defaults to the role they are being coached on, because that is the
+/// comparison they came for: a support player's Phantom Assassin percentile is
+/// a fact about a different game than the one they are trying to improve at.
+/// `?role=all` opts out, and an explicit slug overrides both.
+async fn resolve_scope(
+    state: &AppState,
+    player: &DotaPlayer,
+    requested: Option<&str>,
+) -> AppResult<(MatchScope, Option<CoachableRole>)> {
+    let window = state.config.roles.analysis_match_limit;
+
+    let role = match requested.map(str::trim) {
+        // Explicit opt-out: every role, still competitive-only.
+        Some("all") => return Ok((MatchScope::competitive(window), None)),
+        Some(slug) if !slug.is_empty() => Some(CoachableRole::parse(slug).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "'{slug}' is not a role. Use one of: {}, or 'all'.",
+                CoachableRole::ALL
+                    .iter()
+                    .map(|r| r.slug())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ))
+        })?),
+        // No preference stated: follow the coaching profile if there is one.
+        _ => repositories::coaching_profile::find(&state.db, player.id)
+            .await?
+            .map(|profile| profile.selected_role),
+    };
+
+    Ok(match role {
+        Some(role) => (MatchScope::for_role(role, window), Some(role)),
+        None => (MatchScope::competitive(window), None),
+    })
 }
 
 /// `GET /api/benchmark/:metric` — the same comparison, narrowed to one metric.
@@ -81,8 +198,12 @@ pub async fn overview(
 `kills_per_min`, `deaths_per_min`, `assists_per_min`, `hero_damage_per_min`, `tower_damage`.",
             example = "gold_per_min"),
         ("hero_id" = Option<i32>, Query,
-            description = "Dota hero id. Omit to benchmark the player's most-played hero.",
+            description = "Dota hero id. Omit to benchmark the player's most-played hero in scope.",
             example = 26, minimum = 1),
+        ("role" = Option<String>, Query,
+            description = "Restrict your own figures to one role. Omit to follow the coaching \
+profile, or pass `all` for every role.",
+            example = "carry"),
     ),
     responses(
         (status = 200, description = "That metric only", body = BenchmarkResponse),
@@ -103,22 +224,30 @@ pub async fn metric(
         .ok_or_else(|| AppError::BadRequest(format!("Unknown metric '{slug}'.")))?;
 
     let player = load_linked_player(&state, &user).await?;
-    build(&state, &player, query.hero_id, Some(wanted))
+    let (scope, role) = resolve_scope(&state, &player, query.role.as_deref()).await?;
+    build(&state, &player, query.hero_id, Some(wanted), &scope, role)
         .await
         .map(Json)
 }
 
 /// The comparison itself, shared with the coaching layer so an insight and the
 /// benchmark page can never disagree about a percentile.
+/// `scope` decides which of the player's matches their own figures are averaged
+/// over. The peer distribution is whatever the provider offers and is described
+/// honestly by `segmented_by`; this parameter is about our side of the
+/// comparison, and getting it wrong means benchmarking a player against a
+/// percentile their average does not belong to.
 pub(crate) async fn build(
     state: &AppState,
     player: &DotaPlayer,
     hero_id: Option<i32>,
     only: Option<BenchmarkMetric>,
+    scope: &MatchScope,
+    role: Option<CoachableRole>,
 ) -> AppResult<BenchmarkResponse> {
     // Default to the hero with the most matches: the only one likely to clear
     // the sample floor.
-    let heroes = repositories::metrics::hero_stats(&state.db, player.id, 1).await?;
+    let heroes = repositories::metrics::hero_stats_scoped(&state.db, player.id, scope, 1).await?;
     let (hero_id, hero_name) = match hero_id {
         Some(id) => {
             let name = heroes
@@ -131,27 +260,42 @@ pub(crate) async fn build(
         None => match heroes.first() {
             Some(h) => (h.hero_id, h.hero_name.clone()),
             None => {
+                let note = match role {
+                    Some(role) => format!(
+                        "No eligible {} matches yet, so there is nothing to compare.",
+                        role.label(),
+                    ),
+                    None => "Sync some matches first — there is nothing to compare yet.".into(),
+                };
+
                 return Ok(BenchmarkResponse {
                     hero_id: 0,
                     hero_name: String::new(),
                     sample: 0,
                     results: Vec::new(),
                     segmented_by: Vec::new(),
-                    note: Some("Sync some matches first — there is nothing to compare yet.".into()),
-                })
+                    context: context_info(0, "", role, player, scope, &[]),
+                    note: Some(note),
+                });
             }
         },
     };
 
-    let averages = repositories::metrics::hero_averages(&state.db, player.id, hero_id).await?;
+    let averages =
+        repositories::metrics::hero_averages(&state.db, player.id, hero_id, scope).await?;
     let values = PlayerValues {
         values: player_values(&averages),
         sample: averages.sample,
     };
 
+    // What we *ask* the provider for. It segments on hero alone — verified
+    // against the live API, which returns identical buckets for any `rank` or
+    // `lane_role` passed to it — so the extra dimensions are a statement of
+    // intent that a future provider can honour, and the response reports which
+    // of them actually came back.
     let context = BenchmarkContext {
         hero_id,
-        role: None,
+        role: role.map(|r| r.slug().to_string()),
         rank_tier: player.rank_tier,
         patch: None,
     };
@@ -171,6 +315,7 @@ pub(crate) async fn build(
             tracing::warn!(error = %e, hero_id, "benchmark distribution unavailable");
 
             return Ok(BenchmarkResponse {
+                context: context_info(hero_id, &hero_name, role, player, scope, &[]),
                 hero_id,
                 hero_name,
                 sample: averages.sample,
@@ -188,6 +333,7 @@ pub(crate) async fn build(
     }
 
     Ok(BenchmarkResponse {
+        context: context_info(hero_id, &hero_name, role, player, scope, &segmented_by),
         hero_id,
         hero_name,
         sample: averages.sample,
@@ -195,6 +341,42 @@ pub(crate) async fn build(
         segmented_by,
         note: None,
     })
+}
+
+/// What was asked for, what arrived, and what each side covers.
+///
+/// Built on every path — including the two failure paths above — because a
+/// response that omits it when the provider is down is a response whose caveats
+/// disappear exactly when they matter most.
+fn context_info(
+    hero_id: i32,
+    hero_name: &str,
+    role: Option<CoachableRole>,
+    player: &DotaPlayer,
+    scope: &MatchScope,
+    segmented_by: &[Segment],
+) -> BenchmarkContextInfo {
+    let unavailable = REQUESTED_SEGMENTS
+        .into_iter()
+        .filter(|segment| !segmented_by.contains(segment))
+        .map(|segment| UnavailableSegment {
+            segment,
+            label: segment.label(),
+            reason: unavailability_reason(segment),
+        })
+        .collect();
+
+    BenchmarkContextInfo {
+        hero_id,
+        hero_name: hero_name.to_string(),
+        role,
+        role_label: role.map(CoachableRole::label),
+        rank_tier: player.rank_tier,
+        requested: REQUESTED_SEGMENTS.to_vec(),
+        segmented_by: segmented_by.to_vec(),
+        unavailable,
+        population: population_scope(scope, role, hero_name),
+    }
 }
 
 /// The player's figures with no distribution to place them in.

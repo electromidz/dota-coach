@@ -52,6 +52,10 @@ pub async fn sync_player(
     user_id: Uuid,
     player: &DotaPlayer,
     limit: u32,
+    // The competitive window persistent pattern detection reads. Passed in
+    // rather than read here so the sync service keeps knowing nothing about
+    // configuration.
+    analysis_window: i64,
 ) -> Result<(SyncReport, DotaPlayer), SyncError> {
     // Refresh the display profile first; it is cheap and makes the response
     // useful even when there are no new matches. A failure here is not fatal:
@@ -126,7 +130,7 @@ pub async fn sync_player(
     // Patterns are read off the metrics that were just recomputed. A failure
     // here must not fail the sync: the matches are stored either way, and the
     // model is rebuilt on the next read.
-    if let Err(e) = crate::services::player_model::refresh(pool, player.id).await {
+    if let Err(e) = crate::services::player_model::refresh(pool, player.id, analysis_window).await {
         tracing::warn!(error = %e, "player model refresh failed after sync");
     }
 

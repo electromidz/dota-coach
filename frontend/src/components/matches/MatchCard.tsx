@@ -2,7 +2,7 @@ import Link from "next/link";
 
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
 import { TiltCard } from "@/components/ui/TiltCard";
-import type { Match } from "@/lib/types";
+import type { MatchView } from "@/lib/types";
 import { cn, formatDuration, timeAgo } from "@/lib/utils";
 
 /** Rough ceilings for the inline bars, so a good game visibly fills them. */
@@ -16,7 +16,13 @@ const XPM_CEILING = 1000;
  * The whole card is one link and one tap target. It tilts in 3D toward the
  * press, and the portrait sits forward on the Z axis so the depth is real.
  */
-export function MatchCard({ match, index = 0 }: { match: Match; index?: number }) {
+export function MatchCard({
+  match,
+  index = 0,
+}: {
+  match: MatchView;
+  index?: number;
+}) {
   const won = match.won;
 
   return (
@@ -64,6 +70,27 @@ export function MatchCard({ match, index = 0 }: { match: Match; index?: number }
                 </span>
                 {" · "}
                 {timeAgo(match.started_at)}
+              </p>
+
+              {/* What this game was, and whether the coach reads it. Without
+                  this a player sees Turbo games in their history and a
+                  dashboard that counts fewer matches, with nothing connecting
+                  the two. The label is the server's — eligibility is decided in
+                  one place and rendered here, never recomputed. */}
+              <p className="mt-1 flex items-center gap-1.5 text-[0.625rem]">
+                <span
+                  className={cn(
+                    "rounded px-1.5 py-0.5 uppercase tracking-wider",
+                    match.eligible
+                      ? "bg-function/10 text-function"
+                      : "bg-surface-2 text-ink-faint",
+                  )}
+                >
+                  {match.mode_label}
+                </span>
+                {!match.eligible ? (
+                  <span className="truncate text-ink-faint">Not coached</span>
+                ) : null}
               </p>
             </div>
 

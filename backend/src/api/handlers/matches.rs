@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::extract::{AppPath, AppQuery, CurrentUser};
+use crate::domain::eligibility;
 use crate::domain::player::DotaPlayer;
 use crate::domain::r#match::Match;
+use crate::domain::scope::MatchScope;
 use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
@@ -24,15 +26,82 @@ const MAX_LIMIT: i64 = 100;
 pub struct PageQuery {
     pub page: Option<i64>,
     pub limit: Option<i64>,
+    pub scope: Option<String>,
+}
+
+/// Which population a caller wants listed.
+///
+/// The default is every stored match, because the match list is a record of
+/// what the player actually played — hiding their Turbo games from their own
+/// history would be a strange thing for a Dota app to do. `competitive` exists
+/// for the callers that are *analysing* rather than browsing: the dashboard's
+/// trend line and form strip read the same games the dashboard's numbers do,
+/// which is what stops a chart and the statistic above it disagreeing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListScope {
+    All,
+    Competitive,
+}
+
+impl ListScope {
+    fn slug(self) -> &'static str {
+        match self {
+            ListScope::All => "all",
+            ListScope::Competitive => "competitive",
+        }
+    }
+
+    /// Rejected rather than defaulted: a client that misspells the scope is
+    /// asking for a population it will not get, and silently serving the other
+    /// one is how a Turbo game ends up on a competitive chart.
+    fn parse(value: Option<&str>) -> AppResult<Self> {
+        match value.map(str::trim) {
+            None | Some("") | Some("all") => Ok(ListScope::All),
+            Some("competitive") => Ok(ListScope::Competitive),
+            Some(other) => Err(AppError::BadRequest(format!(
+                "Unknown scope '{other}'. Use 'all' or 'competitive'."
+            ))),
+        }
+    }
+}
+
+/// A match with the two facts a list row needs and the row cannot derive.
+///
+/// Eligibility is one rule in one place, and the client is not a second copy
+/// of it: rather than shipping the mode tables to the browser, the server says
+/// what each match was and whether coaching reads it. That is also what lets
+/// the match list and the dashboard visibly agree — a player looking at nine
+/// Turbo games can see exactly why their analysis says thirty matches.
+#[derive(Serialize, ToSchema)]
+pub struct MatchView {
+    #[serde(flatten)]
+    pub match_: Match,
+    /// Whether this match is part of the competitive population.
+    pub eligible: bool,
+    /// What it was: `Ranked All Pick`, `Turbo`, `Other mode`…
+    pub mode_label: &'static str,
+}
+
+impl MatchView {
+    fn of(match_: Match) -> Self {
+        Self {
+            eligible: eligibility::is_eligible(match_.game_mode, match_.lobby_type),
+            mode_label: eligibility::mode_label(match_.game_mode, match_.lobby_type),
+            match_,
+        }
+    }
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct MatchListResponse {
-    pub matches: Vec<Match>,
+    pub matches: Vec<MatchView>,
     pub page: i64,
     pub limit: i64,
     pub total: i64,
     pub total_pages: i64,
+    /// Which population this page was drawn from.
+    pub scope: &'static str,
 }
 
 /// `GET /api/matches?page=1&limit=20`
@@ -47,6 +116,10 @@ pub struct MatchListResponse {
         ("limit" = Option<i64>, Query,
             description = "Matches per page. Defaults to 20.",
             example = 20, minimum = 1, maximum = 100),
+        ("scope" = Option<String>, Query,
+            description = "`all` (default) lists every stored match. `competitive` lists only the \
+latest eligible Ranked and public All Pick matches — the same population `/api/stats` reads.",
+            example = "competitive"),
     ),
     responses(
         (status = 200, description = "One page of matches, newest first", body = MatchListResponse),
@@ -62,18 +135,34 @@ pub async fn list(
 ) -> AppResult<Json<MatchListResponse>> {
     let player = load_linked_player(&state, &user).await?;
     let (page, limit) = validate_pagination(query.page, query.limit)?;
+    let scope = ListScope::parse(query.scope.as_deref())?;
+    let offset = (page - 1) * limit;
 
-    let matches =
-        repositories::r#match::list_by_player(&state.db, player.id, limit, (page - 1) * limit)
-            .await?;
-    let total = repositories::r#match::count_by_player(&state.db, player.id).await?;
+    let (matches, total) = match scope {
+        ListScope::All => (
+            repositories::r#match::list_by_player(&state.db, player.id, limit, offset).await?,
+            repositories::r#match::count_by_player(&state.db, player.id).await?,
+        ),
+        ListScope::Competitive => {
+            let window = MatchScope::competitive(state.config.roles.analysis_match_limit);
+            (
+                repositories::r#match::list_by_player_scoped(
+                    &state.db, player.id, &window, limit, offset,
+                )
+                .await?,
+                repositories::r#match::count_by_player_scoped(&state.db, player.id, &window)
+                    .await?,
+            )
+        }
+    };
 
     Ok(Json(MatchListResponse {
-        matches,
+        matches: matches.into_iter().map(MatchView::of).collect(),
         page,
         limit,
         total,
         total_pages: total_pages(total, limit),
+        scope: scope.slug(),
     }))
 }
 
@@ -109,13 +198,15 @@ pub async fn get(
         .await?
         .ok_or_else(|| AppError::NotFound("Match not found.".into()))?;
 
-    Ok(Json(MatchResponse { match_ }))
+    Ok(Json(MatchResponse {
+        match_: MatchView::of(match_),
+    }))
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct MatchResponse {
     #[serde(rename = "match")]
-    pub match_: Match,
+    pub match_: MatchView,
 }
 
 async fn load_linked_player(state: &AppState, user: &User) -> AppResult<DotaPlayer> {
@@ -162,6 +253,32 @@ fn total_pages(total: i64, limit: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_scope_is_the_players_whole_history() {
+        assert_eq!(ListScope::parse(None).unwrap(), ListScope::All);
+        assert_eq!(ListScope::parse(Some("")).unwrap(), ListScope::All);
+        assert_eq!(ListScope::parse(Some("all")).unwrap(), ListScope::All);
+    }
+
+    #[test]
+    fn the_competitive_scope_is_requested_by_name() {
+        assert_eq!(
+            ListScope::parse(Some("competitive")).unwrap(),
+            ListScope::Competitive
+        );
+        assert_eq!(
+            ListScope::parse(Some(" competitive ")).unwrap(),
+            ListScope::Competitive
+        );
+    }
+
+    #[test]
+    fn an_unknown_scope_is_rejected_rather_than_served_the_other_population() {
+        assert!(ListScope::parse(Some("ranked")).is_err());
+        assert!(ListScope::parse(Some("turbo")).is_err());
+        assert!(ListScope::parse(Some("Competitive")).is_err());
+    }
 
     #[test]
     fn pagination_defaults_to_the_first_page() {
