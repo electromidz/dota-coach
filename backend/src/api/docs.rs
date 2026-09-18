@@ -53,6 +53,8 @@ stable and worth branching on; `message` is safe to show a user.",
         (name = "matches", description = "Stored match history and per-match metrics."),
         (name = "coaching", description = "Evidence, insights, the long-term player model and the current training focus. Generation is the only rate-limited verb in the API."),
         (name = "billing", description = "Trial, entitlement, subscription and payment callbacks. The server is the only source of truth for access."),
+        (name = "events", description = "Client-reported analytics the backend cannot observe on its own."),
+        (name = "admin", description = "Usage, trial and revenue reporting, and account moderation. Requires users.is_admin."),
     ),
     paths(
         crate::api::handlers::health::health,
@@ -85,6 +87,19 @@ stable and worth branching on; `message` is safe to show a user.",
         crate::api::handlers::billing::payments,
         crate::api::handlers::billing::checkout,
         crate::api::handlers::billing::webhook,
+        crate::api::handlers::subscribe::redeem,
+        crate::api::handlers::events::page_view,
+        crate::api::handlers::admin::stats,
+        crate::api::handlers::admin::list_users,
+        crate::api::handlers::admin::get_user,
+        crate::api::handlers::admin::extend,
+        crate::api::handlers::admin::disable_user,
+        crate::api::handlers::admin::enable_user,
+        crate::api::handlers::admin::create_vouchers,
+        crate::api::handlers::admin::list_vouchers,
+        crate::api::handlers::admin::get_voucher,
+        crate::api::handlers::admin::deactivate_voucher,
+        crate::api::handlers::admin::list_audit_log,
     )
 )]
 pub struct ApiDoc;
@@ -155,8 +170,10 @@ mod tests {
         let spec = spec();
         let paths = spec["paths"].as_object().expect("paths object");
 
-        // 30 handlers; `health` is mounted at two URLs but documented once.
-        assert_eq!(paths.len(), 30, "every routed handler is documented");
+        // 43 handlers; `health` is mounted at two URLs but documented once,
+        // and `/admin/vouchers` carries two handlers (GET and POST) under
+        // one path — 42 unique path strings.
+        assert_eq!(paths.len(), 42, "every routed handler is documented");
     }
 
     #[test]
@@ -210,6 +227,9 @@ mod tests {
             "/api/players/me/sync",
             "/api/billing",
             "/api/matches",
+            "/api/admin/stats",
+            "/api/admin/users",
+            "/api/admin/users/{id}",
         ] {
             let item = &spec["paths"][path];
             assert!(!item.is_null(), "{path} is not documented");
@@ -291,7 +311,7 @@ mod tests {
             }
         }
 
-        assert_eq!(seen, 13, "every documented parameter was checked");
+        assert_eq!(seen, 31, "every documented parameter was checked");
     }
 
     /// A path parameter the server requires must be required in the document,

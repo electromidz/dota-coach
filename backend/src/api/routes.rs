@@ -9,7 +9,8 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::api::handlers::{
-    auth, benchmark, billing, coach, health, heroes, matches, players, stats,
+    admin, auth, benchmark, billing, coach, events, health, heroes, matches, players, stats,
+    subscribe,
 };
 use crate::api::{docs, observability};
 use crate::config::Config;
@@ -34,6 +35,7 @@ pub fn build(state: AppState, config: &Config) -> Router {
         .route("/auth/steam/callback", get(auth::callback))
         .route("/auth/me", get(auth::me))
         .route("/auth/logout", post(auth::logout))
+        .route("/events/page-view", post(events::page_view))
         .route("/players/me", get(players::me))
         .route("/players/me/sync", post(players::sync))
         .route("/stats", get(stats::get))
@@ -67,9 +69,25 @@ pub fn build(state: AppState, config: &Config) -> Router {
         // The only unauthenticated write in the API. It is safe because it
         // believes nothing that is not signed by the payment provider.
         .route("/billing/webhook", post(billing::webhook))
+        .route("/subscribe/redeem", post(subscribe::redeem))
         .route("/matches", get(matches::list))
         .route("/matches/{id}", get(matches::get))
-        .route("/matches/{id}/analysis", get(coach::match_analysis));
+        .route("/matches/{id}/analysis", get(coach::match_analysis))
+        // Admin panel. Gated by `AdminUser` in every handler, not by a layer —
+        // same reasoning as the session requirement above.
+        .route("/admin/stats", get(admin::stats))
+        .route("/admin/users", get(admin::list_users))
+        .route("/admin/users/{id}", get(admin::get_user))
+        .route("/admin/users/{id}/extend", post(admin::extend))
+        .route("/admin/users/{id}/disable", post(admin::disable_user))
+        .route("/admin/users/{id}/enable", post(admin::enable_user))
+        .route("/admin/vouchers", post(admin::create_vouchers).get(admin::list_vouchers))
+        .route("/admin/vouchers/{id}", get(admin::get_voucher))
+        .route(
+            "/admin/vouchers/{id}/deactivate",
+            post(admin::deactivate_voucher),
+        )
+        .route("/admin/audit-log", get(admin::list_audit_log));
 
     // The two routes that call a model, and the only ones that can honestly
     // take minutes: a reasoning model spends most of a coaching call thinking

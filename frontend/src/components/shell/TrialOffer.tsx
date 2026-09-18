@@ -8,7 +8,7 @@ import type { Plan } from "@/lib/types";
 
 /**
  * The offer line on the signed-out page: "Start your 14-day free trial. Then
- * $1/month."
+ * $9.98/month."
  *
  * Both figures come from the backend, which is the only place they are
  * configured. Until they arrive — or if the API is unreachable, which is

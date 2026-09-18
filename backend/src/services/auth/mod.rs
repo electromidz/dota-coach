@@ -7,10 +7,12 @@ use chrono::{Duration, Utc};
 use sqlx::PgPool;
 
 use crate::config::AuthConfig;
+use crate::domain::event::EventType;
 use crate::domain::player::{DotaPlayer, PlayerIdentity};
 use crate::domain::session::{NewToken, LOGIN_STATE_COOKIE, SESSION_COOKIE};
 use crate::domain::user::User;
 use crate::repositories;
+use crate::services::events;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -51,6 +53,8 @@ pub async fn establish_session(
     repositories::session::create(&mut tx, user.id, &token.hash, expires_at).await?;
 
     tx.commit().await?;
+
+    events::track(pool, user.id, EventType::Login, serde_json::json!({})).await;
 
     Ok(LoggedIn {
         user,

@@ -1,9 +1,12 @@
+pub mod admin;
 pub mod auth;
 pub mod benchmark;
 pub mod billing;
 pub mod coach;
+pub mod events;
 pub mod health;
 pub mod heroes;
 pub mod matches;
 pub mod players;
 pub mod stats;
+pub mod subscribe;

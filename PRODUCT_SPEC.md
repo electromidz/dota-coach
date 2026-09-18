@@ -342,7 +342,7 @@ The backend must decide whether a user can access premium features.
 Initial subscription price:
 
 ```text
-$1/month
+$9.98/month
 ```
 
 But do NOT hard-code this throughout the application.
@@ -1411,7 +1411,7 @@ Improve one weakness at a time.
 
 Start 14-Day Free Trial
 
-Then $1/month
+Then $9.98/month
 ```
 
 The exact copy can be refined later.

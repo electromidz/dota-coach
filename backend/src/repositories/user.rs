@@ -3,12 +3,25 @@ use uuid::Uuid;
 
 use crate::domain::user::{SteamProfileUpdate, User};
 
+/// Every account with no `subscriptions` row at all. Feeds the one-off
+/// backfill (`bin/backfill_subscriptions`) — everyone else already gets one
+/// materialised at their next login (Phase 3).
+pub async fn ids_without_subscription(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT u.id FROM users u
+           LEFT JOIN subscriptions s ON s.user_id = u.id
+          WHERE s.user_id IS NULL",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// A macro rather than a `const` because sqlx only accepts `&'static str`
 /// queries; `concat!` keeps the composed SQL a compile-time literal.
 macro_rules! columns {
     () => {
         "id, steam_id, persona_name, avatar_url, profile_url, last_login_at, \
-         created_at, updated_at"
+         is_admin, status, created_at, updated_at"
     };
 }
 

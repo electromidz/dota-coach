@@ -1,10 +1,13 @@
 //! Business logic, organized as independent services composed in `AppState`.
 
+pub mod admin;
+pub mod audit;
 pub mod auth;
 pub mod benchmarks;
 pub mod billing;
 pub mod coaching;
 pub mod dota;
+pub mod events;
 pub mod hero_meta;
 pub mod heroes;
 pub mod llm;
@@ -14,3 +17,4 @@ pub mod player_model;
 pub mod roles;
 pub mod sync;
 pub mod training;
+pub mod voucher;

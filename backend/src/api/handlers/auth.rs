@@ -9,6 +9,7 @@ use axum_extra::extract::CookieJar;
 use serde::Serialize;
 
 use crate::api::extract::CurrentUser;
+use crate::domain::event::EventType;
 use crate::domain::session::{hash_token, LOGIN_STATE_COOKIE, SESSION_COOKIE};
 use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
@@ -17,6 +18,7 @@ use crate::services::auth::{
     self, constant_time_eq, establish_session, expired_login_state_cookie, expired_session_cookie,
     login_state_cookie, session_cookie,
 };
+use crate::services::events;
 use crate::state::AppState;
 use utoipa::ToSchema;
 
@@ -160,6 +162,21 @@ async fn complete_login(
         "steam login complete"
     );
 
+    // Best-effort: the trial clock is anchored to `users.created_at` either
+    // way, so a hiccup here does not cost anyone a day of trial — it only
+    // means the row is materialised on a later request instead of this one,
+    // same as it was before this call existed.
+    if let Err(e) =
+        crate::services::billing::subscription_for(&state.db, &state.config.billing, logged_in.user.id)
+            .await
+    {
+        tracing::warn!(
+            error = %e,
+            user_id = %logged_in.user.id,
+            "could not materialize the trial subscription at login"
+        );
+    }
+
     Ok(logged_in.token)
 }
 
@@ -203,7 +220,17 @@ pub async fn me(CurrentUser(user): CurrentUser) -> AppResult<Json<SessionRespons
 )]
 pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> AppResult<Response> {
     if let Some(cookie) = jar.get(SESSION_COOKIE) {
-        repositories::session::delete_by_token_hash(&state.db, &hash_token(cookie.value())).await?;
+        let token_hash = hash_token(cookie.value());
+
+        // Resolved before deletion, purely for the event: an unknown or
+        // already-expired token still clears the cookie either way.
+        let user = repositories::session::find_user_by_token_hash(&state.db, &token_hash).await?;
+
+        repositories::session::delete_by_token_hash(&state.db, &token_hash).await?;
+
+        if let Some(user) = user {
+            events::track(&state.db, user.id, EventType::Logout, serde_json::json!({})).await;
+        }
     }
 
     let jar = jar.remove(expired_session_cookie(&state.config.auth));

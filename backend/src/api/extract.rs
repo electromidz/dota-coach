@@ -47,6 +47,37 @@ where
                 .await?
                 .ok_or(AppError::Unauthenticated)?;
 
+        if user.is_disabled() {
+            return Err(AppError::AccountDisabled);
+        }
+
+        Ok(Self(user))
+    }
+}
+
+/// An authenticated account with admin access.
+///
+/// The only gate on `/api/admin/*`. There is no self-serve promotion path —
+/// `users.is_admin` is set directly in the database — so a non-admin caller is
+/// refused rather than shown a different, cut-down version of the panel.
+pub struct AdminUser(pub User);
+
+impl<S> FromRequestParts<S> for AdminUser
+where
+    AppState: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let CurrentUser(user) = CurrentUser::from_request_parts(parts, state).await?;
+
+        if !user.is_admin {
+            return Err(AppError::Forbidden(
+                "This account does not have admin access.".into(),
+            ));
+        }
+
         Ok(Self(user))
     }
 }

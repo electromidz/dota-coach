@@ -9,6 +9,7 @@ use crate::services::dota::DotaDataProvider;
 use crate::services::hero_meta::HeroMetaProvider;
 use crate::services::llm::LlmProvider;
 use crate::services::payments::PaymentProvider;
+use crate::services::voucher::RateLimiter;
 
 /// Shared, cheaply-cloneable application state handed to every handler.
 ///
@@ -35,6 +36,9 @@ pub struct AppState {
     /// Takes money and signs for it. Never decides what a payment *means* —
     /// that stays in `services::billing`.
     pub payments: Arc<dyn PaymentProvider>,
+    /// Per-user abuse guard for `POST /api/subscribe/redeem`. In-memory, not
+    /// a provider: nothing external to swap, so no trait.
+    pub redeem_rate_limiter: Arc<RateLimiter>,
 }
 
 /// Every external dependency, chosen once at startup.
@@ -63,6 +67,7 @@ impl AppState {
             hero_meta: providers.hero_meta,
             llm: providers.llm,
             payments: providers.payments,
+            redeem_rate_limiter: Arc::new(RateLimiter::new()),
         }
     }
 }

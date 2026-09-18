@@ -348,7 +348,7 @@ impl LlmConfig {
 
 /// Trial, price and payment provider.
 ///
-/// The price is configuration in the strongest sense: `$1/month` is a launch
+/// The price is configuration in the strongest sense: `$9.98/month` is a launch
 /// decision, not an invariant, and it appears exactly once in the system — in
 /// `BILLING_PRICE_CENTS`. Minor units, because a float price is a rounding bug
 /// waiting for a currency with different conventions.
@@ -365,6 +365,10 @@ pub struct BillingConfig {
     pub period_days: i64,
     /// How many charges the payments endpoint returns.
     pub history_limit: i64,
+    /// How often the background sweep rewrites subscriptions whose window has
+    /// closed. Trial/period boundaries are day-granularity, so an hourly sweep
+    /// is far more precise than anything that matters downstream of it.
+    pub sweep_interval_seconds: u64,
 
     pub base_url: String,
     pub api_key: Option<String>,
@@ -393,7 +397,7 @@ impl BillingConfig {
             .filter(|s| !s.is_empty());
         let configured = api_key.is_some() && ipn_secret.is_some();
 
-        let price_cents = checked_price(parsed("BILLING_PRICE_CENTS", 100)?)?;
+        let price_cents = checked_price(parsed("BILLING_PRICE_CENTS", 998)?)?;
 
         Ok(Self {
             plan: optional("BILLING_PLAN", "pro"),
@@ -402,6 +406,8 @@ impl BillingConfig {
             trial_days: parsed::<i64>("BILLING_TRIAL_DAYS", 14)?.clamp(0, 365),
             period_days: parsed::<i64>("BILLING_PERIOD_DAYS", 30)?.clamp(1, 366),
             history_limit: parsed::<i64>("BILLING_HISTORY_LIMIT", 20)?.clamp(1, 100),
+            sweep_interval_seconds: parsed::<u64>("BILLING_SWEEP_INTERVAL_SECONDS", 3600)?
+                .clamp(60, 86_400),
             base_url: optional("NOWPAYMENTS_BASE_URL", "https://api.nowpayments.io/v1"),
             api_key,
             ipn_secret,
@@ -687,7 +693,7 @@ mod tests {
     fn billing_defaults_to_the_launch_offer() {
         let billing = BillingConfig::from_env().unwrap();
 
-        assert_eq!(billing.price_cents, 100, "$1");
+        assert_eq!(billing.price_cents, 998, "$9.98");
         assert_eq!(billing.currency, "usd");
         assert_eq!(billing.trial_days, 14);
         assert_eq!(billing.period_days, 30);

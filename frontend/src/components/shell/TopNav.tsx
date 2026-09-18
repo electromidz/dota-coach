@@ -10,6 +10,32 @@ import { useSession } from "@/lib/session-context";
 import { cn, formatRank } from "@/lib/utils";
 
 /**
+ * The admin panel is not in `NAV_ITEMS`: almost no account ever sees it, and
+ * a link every visitor sees but only one role can use is worse than no link
+ * at all. Shown only to `is_admin` accounts, and only here — the phone tab
+ * bar stays exactly the six destinations everyone gets.
+ */
+function AdminLink({ active }: { active: boolean }) {
+  return (
+    <Link
+      href="/admin"
+      aria-current={active ? "page" : undefined}
+      className={cn(
+        "focus-neon flex cursor-pointer items-center gap-2 rounded-xl border px-3.5 py-2",
+        "text-sm font-medium tracking-wide",
+        "transition-[color,background-color,border-color] duration-200 ease-out",
+        active
+          ? "border-keyword/60 bg-keyword/10 text-keyword"
+          : "border-transparent text-ink-faint hover:border-glass-edge hover:text-ink",
+      )}
+    >
+      <Icon name="shield" className="size-4" />
+      Admin
+    </Link>
+  );
+}
+
+/**
  * Desktop header: brand, horizontal navigation, account chip.
  *
  * Phones never see this — they navigate from the bottom tab bar, which is
@@ -55,6 +81,8 @@ export function TopNav() {
             })}
           </ul>
         </nav>
+
+        {me?.user.is_admin ? <AdminLink active={pathname.startsWith("/admin")} /> : null}
 
         {me ? (
           <Link

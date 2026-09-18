@@ -2,13 +2,15 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::domain::billing::{Payment, PaymentStatus, Subscription, SubscriptionStatus};
+use crate::domain::billing::{
+    Payment, PaymentStatus, Subscription, SubscriptionSource, SubscriptionStatus,
+};
 
 /// A macro rather than a `const`: sqlx needs a `&'static str` query, and
 /// `concat!` only composes literals.
 macro_rules! subscription_columns {
     () => {
-        "id, status, plan, trial_started_at, trial_ends_at, current_period_start,
+        "id, status, source, plan, trial_started_at, trial_ends_at, current_period_start,
          current_period_end, provider, provider_customer_id, provider_subscription_id,
          created_at"
     };
@@ -27,35 +29,52 @@ macro_rules! payment_columns {
 /// on a user's first visit to the billing page must describe the same fourteen
 /// days it would have described on the day they signed up. `ON CONFLICT DO
 /// NOTHING` makes two concurrent first requests agree on one row.
+///
+/// The returned `bool` is whether *this call* created the row — `RETURNING id`
+/// on the insert itself, not a reselect, so a race with another request cannot
+/// both report "created".
 pub async fn ensure_subscription(
     pool: &PgPool,
     user_id: Uuid,
     plan: &str,
     trial_days: i64,
-) -> Result<Subscription, sqlx::Error> {
+) -> Result<(Subscription, bool), sqlx::Error> {
     if let Some(existing) = find_by_user(pool, user_id).await? {
-        return Ok(existing);
+        return Ok((existing, false));
     }
 
-    sqlx::query(
+    let inserted: Option<Uuid> = sqlx::query_scalar(
         "INSERT INTO subscriptions
              (user_id, status, plan, trial_started_at, trial_ends_at)
          SELECT u.id, 'trialing', $2, u.created_at, u.created_at + make_interval(days => $3)
            FROM users u
           WHERE u.id = $1
-         ON CONFLICT (user_id) DO NOTHING",
+         ON CONFLICT (user_id) DO NOTHING
+         RETURNING id",
     )
     .bind(user_id)
     .bind(plan)
     .bind(i32::try_from(trial_days).unwrap_or(i32::MAX))
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
 
-    find_by_user(pool, user_id)
+    let subscription = find_by_user(pool, user_id)
         .await?
         // The insert selects from `users`, so the only way to get here is an
         // account that vanished mid-request.
-        .ok_or(sqlx::Error::RowNotFound)
+        .ok_or(sqlx::Error::RowNotFound)?;
+
+    Ok((subscription, inserted.is_some()))
+}
+
+/// The account a charge belongs to. Used only for eventing — the domain
+/// `Payment` deliberately has no `user_id`, since the API response never needs
+/// one.
+pub async fn payment_user_id(pool: &PgPool, payment_id: Uuid) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar("SELECT user_id FROM payments WHERE id = $1")
+        .bind(payment_id)
+        .fetch_optional(pool)
+        .await
 }
 
 pub async fn find_by_user(
@@ -96,6 +115,31 @@ pub async fn mark_status(
     .await?;
 
     Ok(())
+}
+
+/// Every subscription whose window has closed as of `now`.
+///
+/// A pre-filter for the background sweep, not a re-implementation of the
+/// entitlement rule — `Subscription::drifted_status` remains the single
+/// authority on whether a row is actually expired; this just narrows the scan
+/// to rows likely to need it, using the same index `mark_status`'s target
+/// column and `entitlement()`'s two windows already rely on.
+pub async fn find_expiring(
+    pool: &PgPool,
+    now: DateTime<Utc>,
+) -> Result<Vec<(Uuid, Subscription)>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, ExpiringSubscriptionRow>(concat!(
+        "SELECT user_id, ",
+        subscription_columns!(),
+        " FROM subscriptions
+           WHERE (status = 'trialing' AND trial_ends_at <= $1)
+              OR (status = 'active' AND current_period_end IS NOT NULL AND current_period_end <= $1)"
+    ))
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().filter_map(ExpiringSubscriptionRow::into_domain).collect())
 }
 
 /// A charge, reserved before the provider is called.
@@ -297,7 +341,9 @@ pub async fn update_payment_status(
 /// Grant a paid window, inside the caller's transaction.
 ///
 /// The period is computed by the domain and passed in, so this statement makes
-/// no decisions about time at all.
+/// no decisions about time at all. Only ever called from a verified payment
+/// settling, so `source` is unconditionally `'payment'` — a voucher grants
+/// through `extend_with_voucher` below instead, which has no provider to set.
 pub async fn activate_subscription(
     tx: &mut Transaction<'_, Postgres>,
     subscription_id: Uuid,
@@ -309,6 +355,7 @@ pub async fn activate_subscription(
     sqlx::query(
         "UPDATE subscriptions
             SET status                   = 'active',
+                source                   = 'payment',
                 current_period_start     = $2,
                 current_period_end       = $3,
                 provider                 = $4,
@@ -325,6 +372,55 @@ pub async fn activate_subscription(
     .await?;
 
     Ok(())
+}
+
+/// Grant a paid window from a redeemed voucher, inside the caller's
+/// transaction. No provider is involved, so — unlike `activate_subscription`
+/// — `provider`/`provider_subscription_id` are left exactly as they were: a
+/// voucher redeemed by an account that also has payment history should not
+/// erase which provider that history was with.
+pub async fn extend_with_voucher(
+    tx: &mut Transaction<'_, Postgres>,
+    subscription_id: Uuid,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE subscriptions
+            SET status               = 'active',
+                source               = 'voucher',
+                current_period_start = $2,
+                current_period_end   = $3,
+                updated_at           = now()
+          WHERE id = $1",
+    )
+    .bind(subscription_id)
+    .bind(period_start)
+    .bind(period_end)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+/// The redeeming account's subscription, locked for the duration of the
+/// transaction — same reasoning as `lock_subscription_for_payment`: two
+/// concurrent redemptions (of the same or different vouchers) must not both
+/// read the old `current_period_end` and extend from it.
+pub async fn lock_subscription_for_user(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<Option<Subscription>, sqlx::Error> {
+    let row = sqlx::query_as::<_, SubscriptionRow>(concat!(
+        "SELECT ",
+        subscription_columns!(),
+        " FROM subscriptions WHERE user_id = $1 FOR UPDATE"
+    ))
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(row.and_then(SubscriptionRow::into_domain))
 }
 
 /// The subscription a charge belongs to, locked for the duration of the
@@ -374,6 +470,7 @@ pub async fn lock_payment(
 struct SubscriptionRow {
     id: Uuid,
     status: String,
+    source: String,
     plan: String,
     trial_started_at: DateTime<Utc>,
     trial_ends_at: DateTime<Utc>,
@@ -392,11 +489,13 @@ impl SubscriptionRow {
     /// explain.
     fn into_domain(self) -> Option<Subscription> {
         let status = SubscriptionStatus::parse(&self.status)?;
+        let source = SubscriptionSource::parse(&self.source)?;
 
         Some(Subscription {
             id: self.id,
             status,
             status_label: status.label(),
+            source,
             plan: self.plan,
             trial_started_at: self.trial_started_at,
             trial_ends_at: self.trial_ends_at,
@@ -407,6 +506,52 @@ impl SubscriptionRow {
             provider_subscription_id: self.provider_subscription_id,
             created_at: self.created_at,
         })
+    }
+}
+
+/// The same shape as `SubscriptionRow`, plus the account it belongs to — only
+/// `find_expiring` needs `user_id`, so it isn't in `subscription_columns!` and
+/// doesn't leak into every other query built from that macro.
+#[derive(sqlx::FromRow)]
+struct ExpiringSubscriptionRow {
+    user_id: Uuid,
+    id: Uuid,
+    status: String,
+    source: String,
+    plan: String,
+    trial_started_at: DateTime<Utc>,
+    trial_ends_at: DateTime<Utc>,
+    current_period_start: Option<DateTime<Utc>>,
+    current_period_end: Option<DateTime<Utc>>,
+    provider: Option<String>,
+    provider_customer_id: Option<String>,
+    provider_subscription_id: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
+impl ExpiringSubscriptionRow {
+    fn into_domain(self) -> Option<(Uuid, Subscription)> {
+        let status = SubscriptionStatus::parse(&self.status)?;
+        let source = SubscriptionSource::parse(&self.source)?;
+
+        Some((
+            self.user_id,
+            Subscription {
+                id: self.id,
+                status,
+                status_label: status.label(),
+                source,
+                plan: self.plan,
+                trial_started_at: self.trial_started_at,
+                trial_ends_at: self.trial_ends_at,
+                current_period_start: self.current_period_start,
+                current_period_end: self.current_period_end,
+                provider: self.provider,
+                provider_customer_id: self.provider_customer_id,
+                provider_subscription_id: self.provider_subscription_id,
+                created_at: self.created_at,
+            },
+        ))
     }
 }
 

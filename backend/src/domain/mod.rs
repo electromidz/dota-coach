@@ -5,11 +5,14 @@
 //!
 //! Phase 4 adds `metrics`; Phase 5 `coaching`.
 
+pub mod admin;
+pub mod audit;
 pub mod benchmark;
 pub mod billing;
 pub mod coaching;
 pub mod coaching_profile;
 pub mod eligibility;
+pub mod event;
 pub mod hero;
 pub mod r#match;
 pub mod metrics;
@@ -20,3 +23,4 @@ pub mod scope;
 pub mod session;
 pub mod training;
 pub mod user;
+pub mod voucher;

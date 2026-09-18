@@ -19,6 +19,9 @@ export interface User {
   avatar_url: string | null;
   profile_url: string | null;
   last_login_at: string | null;
+  /** Gates the admin panel. Set only by hand in the database. */
+  is_admin: boolean;
+  status: "active" | "disabled";
   created_at: string;
   updated_at: string;
 }
@@ -801,10 +804,16 @@ export type PaymentStatus =
   | "expired"
   | "refunded";
 
+/** Where the account's current access actually came from. Independent of
+ *  `status`: whichever of paying, redeeming a voucher, or an admin grant
+ *  happened most recently is what this says. */
+export type SubscriptionSource = "trial" | "payment" | "voucher" | "admin";
+
 export interface Subscription {
   id: string;
   status: SubscriptionStatus;
   status_label: string;
+  source: SubscriptionSource;
   plan: string;
   trial_started_at: string;
   trial_ends_at: string;
@@ -858,4 +867,135 @@ export interface CheckoutResponse {
 export interface PlanResponse {
   plan: Plan;
   checkout_available: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Admin
+// ---------------------------------------------------------------------------
+
+/** One row of the admin user list, and the base of the detail view. */
+export interface AdminUserSummary {
+  id: string;
+  steam_id: string;
+  persona_name: string | null;
+  avatar_url: string | null;
+  status: "active" | "disabled";
+  is_admin: boolean;
+  created_at: string;
+  last_login_at: string | null;
+  /** `null` for an account that has never had a subscription materialised —
+   *  in practice, one that has never logged in since trials started at
+   *  signup. */
+  subscription_status: SubscriptionStatus | null;
+  subscription_plan: string | null;
+  trial_ends_at: string | null;
+  current_period_end: string | null;
+}
+
+/** One row of an account's activity timeline. `type` is not narrowed to a
+ *  known set here: a future event type this build doesn't know about should
+ *  still render rather than break the page. */
+export interface AdminEventRecord {
+  id: string;
+  type: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AdminUserDetail extends AdminUserSummary {
+  /** Newest first. */
+  events: AdminEventRecord[];
+}
+
+export interface AdminUserListResponse {
+  users: AdminUserSummary[];
+  page: number;
+  limit: number;
+  total: number;
+  total_pages: number;
+}
+
+export interface AdminDailyStat {
+  date: string;
+  signups: number;
+  /** Distinct accounts, not raw login events. */
+  logins: number;
+  /** Raw purchase events — two charges from one account the same day are
+   *  two purchases, unlike `logins`. */
+  purchases: number;
+}
+
+/** Everything `GET /admin/stats` answers. */
+export interface AdminStats {
+  from: string;
+  to: string;
+  total_users: number;
+  /** Fixed-width windows ending at `to`, independent of `from`. */
+  dau: number;
+  wau: number;
+  mau: number;
+  active_trials: number;
+  /** `trial_expired` events inside `[from, to]`. */
+  trials_expired: number;
+  /** All-time, the top of the funnel. */
+  trials_started: number;
+  /** All-time — "how many have ever bought". */
+  paid_users: number;
+  /** Right now — smaller than `paid_users` once anyone has lapsed. */
+  currently_paid: number;
+  /** Of the cohort that started a trial inside `[from, to]`, the percentage
+   *  that has purchased by now. `null` when no trial started in the window. */
+  trial_to_paid_conversion_pct: number | null;
+  /** `voucher_redeemed` events inside `[from, to]` — kept separate from the
+   *  payment-based conversion above; a voucher redemption is not a purchase. */
+  voucher_redemptions: number;
+  revenue_cents: number;
+  currency: string;
+  /** Oldest first, `from`..=`to` with no gaps. */
+  daily: AdminDailyStat[];
+}
+
+// ---------------------------------------------------------------------------
+// Vouchers
+// ---------------------------------------------------------------------------
+
+export interface Voucher {
+  id: string;
+  code: string;
+  duration_days: number;
+  max_uses: number;
+  used_count: number;
+  expires_at: string | null;
+  active: boolean;
+  /** The admin's own label. Never shown to the redeeming user. */
+  note: string | null;
+  /** `null` once the admin who made it no longer has an account. */
+  created_by: string | null;
+  created_at: string;
+}
+
+/** One redemption, with who redeemed it — the admin voucher-detail page. */
+export interface VoucherRedemptionSummary {
+  id: string;
+  user_id: string;
+  steam_id: string;
+  persona_name: string | null;
+  redeemed_at: string;
+}
+
+export interface AdminVoucherDetail extends Voucher {
+  /** Newest first. */
+  redemptions: VoucherRedemptionSummary[];
+}
+
+export interface VoucherListResponse {
+  vouchers: Voucher[];
+  page: number;
+  limit: number;
+  total: number;
+  total_pages: number;
+}
+
+export interface RedeemResponse {
+  subscription: Subscription;
 }

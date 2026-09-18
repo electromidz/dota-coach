@@ -21,7 +21,7 @@ The product answers:
 > has the evidence, picks **one** training focus with a checkable target and
 > tracks whether it is actually improving, and has an LLM interpret all of it
 > into insights it is **not allowed to make numbers up in** — free for fourteen
-> days, then $1/month for the AI coaching, settled in crypto and activated only
+> days, then $9.98/month for the AI coaching, settled in crypto and activated only
 > by a payment the provider signed for. It installs as a PWA, says something
 > useful when it is offline, and tags every request with an id you can quote.
 
@@ -143,7 +143,8 @@ dota-coach/
 │       │   ├── observability.rs # request ids and one log line per request
 │       │   └── handlers/
 │       ├── domain/            # user, session, player, match, metrics, hero,
-│       │                       #   coaching, player_model, training
+│       │                       #   coaching, player_model, training, admin,
+│       │                       #   event, voucher, audit
 │       ├── services/
 │       │   ├── auth/          # Steam OpenID + server-side sessions
 │       │   ├── dota/          # DotaDataProvider trait + OpenDota impl
@@ -157,17 +158,23 @@ dota-coach/
 │       │   ├── coaching/      # evidence builder, prompt, answer validation
 │       │   ├── billing/       # trial, entitlement, idempotent settlement
 │       │   ├── payments/      # PaymentProvider trait + NOWPayments impl
-│       │   └── llm/           # LlmProvider trait + OpenAI-compatible impl
+│       │   ├── llm/           # LlmProvider trait + OpenAI-compatible impl
+│       │   ├── admin/         # GET /admin/stats assembly
+│       │   ├── events/        # trackEvent-equivalent, fire-and-forget
+│       │   ├── voucher/       # redemption transaction + rate limiter
+│       │   └── audit/         # admin-action logging, fire-and-forget
 │       ├── repositories/      # SQL access, one module per aggregate
+│       ├── bin/                # backfill_subscriptions — one-off, idempotent
 │       └── tests/             # integration suite against the real router
 └── frontend/
     ├── Dockerfile
     └── src/
         ├── app/               # App Router: /, /matches, /benchmark, /heroes,
-        │                      #   /coach, /billing, /profile, /offline
+        │                      #   /coach, /billing, /profile, /offline,
+        │                      #   /admin, /admin/users, /admin/vouchers
         │                      #   + manifest, error, not-found, loading states
         ├── components/        # shell / dashboard / matches / heroes / coach /
-        │                      #   billing / charts / ui
+        │                      #   billing / charts / ui / admin
         └── lib/               # api client, types, hero map, formatters
 ```
 
@@ -399,6 +406,34 @@ Pagination is validated, not clamped: `page` must be ≥ 1 and `limit` must be
 `steam_id` is serialized as a **string**: a SteamID64 does not fit in a
 JavaScript number. `dota_account_id` is a plain number — it is 32-bit.
 
+### Vouchers
+
+| Method | Path                    | Description                                      |
+| ------ | ----------------------- | ------------------------------------------------ |
+| `POST` | `/api/subscribe/redeem` | Redeem a code for subscription time. Any signed-in account — existing access is not a precondition |
+
+See [Admin panel and vouchers](#admin-panel-and-vouchers).
+
+### Admin
+
+Every route below requires `users.is_admin` — see
+[Admin panel and vouchers](#admin-panel-and-vouchers). There is no self-serve
+promotion path; the first admin is set directly in the database.
+
+| Method | Path                                  | Description                                      |
+| ------ | -------------------------------------- | ------------------------------------------------ |
+| `GET`  | `/api/admin/stats`                     | Usage, trial, funnel and revenue counts. `?from&to`, default last 30 days |
+| `GET`  | `/api/admin/users`                     | Paginated, filtered by status/plan/last-login, searched by persona name or SteamID64 |
+| `GET`  | `/api/admin/users/:id`                 | Profile, subscription and event timeline         |
+| `POST` | `/api/admin/users/:id/extend`          | Extends whichever window governs access — trial end or paid-through date |
+| `POST` | `/api/admin/users/:id/disable`         | Every future request from this account is refused |
+| `POST` | `/api/admin/users/:id/enable`          | Reverses a disable                               |
+| `POST` | `/api/admin/vouchers`                  | Create one voucher, or `count` independent ones sharing the same settings |
+| `GET`  | `/api/admin/vouchers`                  | Paginated, with usage counts                     |
+| `GET`  | `/api/admin/vouchers/:id`              | One voucher and everyone who has redeemed it     |
+| `POST` | `/api/admin/vouchers/:id/deactivate`   | Existing redemptions are unaffected — only future ones are refused |
+| `GET`  | `/api/admin/audit-log`                 | Every mutating admin action above, newest first  |
+
 ### Errors
 
 One envelope everywhere, including malformed paths, bad query strings,
@@ -413,6 +448,8 @@ through the same type, so no serde or SQL text ever reaches a client:
 | ------------------------ | ------ | --------------------------------------------- |
 | `BAD_REQUEST`            | 400    | Invalid path, query or pagination             |
 | `UNAUTHENTICATED`        | 401    | No session, or an expired/unknown cookie      |
+| `ACCOUNT_DISABLED`       | 403    | The session is valid; the account itself has been disabled by an admin |
+| `FORBIDDEN`              | 403    | Signed in, but `users.is_admin` is false — the `/api/admin/*` gate |
 | `NOT_FOUND`              | 404    | Unknown route, or a match the caller does not own |
 | `DOTA_ACCOUNT_NOT_LINKED`| 409    | Signed in, but no Dota identity is linked     |
 | `PRECONDITION_UNMET`     | 409    | Nothing to analyse yet — no synced matches    |
@@ -970,7 +1007,7 @@ analysis would — and that is where a queue belongs when it arrives.
 ## Billing: trial, subscription and settlement
 
 Every account gets a **14-day trial** the moment it exists, and after that
-**$1/month** buys the part of the product that costs money to run. The price,
+**$9.98/month** buys the part of the product that costs money to run. The price,
 the trial length and the period are configuration (`BILLING_PRICE_CENTS`,
 `BILLING_TRIAL_DAYS`, `BILLING_PERIOD_DAYS`); they appear once, in
 `BillingConfig`, and nowhere else in the system.
@@ -1045,6 +1082,97 @@ its status vocabulary and its `x-nowpayments-sig` header live behind it;
 `partially_paid` maps to `confirming`, never to paid, and a status this build
 has never heard of is an error rather than a guess. Swapping providers is a
 `main.rs` change.
+
+---
+
+## Admin panel and vouchers
+
+Three questions this surface exists to answer: how many people use the
+product, what happens during their trial, and how many buy — plus a way to
+grant access by hand, through a code, without a payment.
+
+### Who gets in
+
+`users.is_admin` is a boolean, set only by hand in the database — there is no
+self-serve promotion path, and no separate roles table: two states (admin,
+not-admin) do not earn a second place that has to agree with `is_admin`
+forever. The `AdminUser` extractor wraps `CurrentUser`, so a **disabled**
+admin is refused with `ACCOUNT_DISABLED` before the admin check ever runs —
+disabling an account revokes the panel too, immediately, on its very next
+request.
+
+### The numbers are event-sourced, not derived from current state
+
+`events` is one append-only table (`user_id, type, metadata, created_at`) that
+every meaningful thing writes to: logins, logouts, `trial_started`,
+`trial_expired`, `subscription_expired`, `purchase`, `voucher_redeemed`,
+`feature_used`, `page_view`. `GET /api/admin/stats` is entirely `count`/`group
+by` over this table plus `subscriptions` and `payments` — nothing is
+estimated, and nothing here does arithmetic outside SQL.
+
+Two metrics that look similar are computed differently on purpose:
+
+- **DAU/WAU/MAU** count *distinct accounts* — ten logins from one person is
+  one active user, not ten.
+- **Daily purchases** count *raw events* — two charges from one account the
+  same day are two purchases, unlike logins.
+
+`trial_to_paid_conversion_pct` is a **cohort** figure: of the accounts whose
+trial started inside `[from, to]`, what fraction have purchased by the time
+the query runs — not "purchases inside the window," which would conflate two
+different populations. Voucher redemptions are counted separately from that
+conversion rate; redeeming a code is not a purchase.
+
+### `subscriptions.source`: where access actually came from
+
+Independent of `status` — a `trialing` row is always `trial`, but an `active`
+one could have got there by paying, redeeming a voucher, or an admin granting
+time directly. Whichever happened most recently overwrites it; there is one
+current answer to "why does this account have access," not a history of every
+way it ever got some. Money itself still lives only in `payments` — a
+subscription can have many payments over its life, and vouchers/admin grants
+have no amount at all, so nothing duplicates what `payments` already tracks
+correctly.
+
+### Vouchers: the concurrency guarantee is the database, not the pre-checks
+
+```text
+POST /api/admin/vouchers            DOTA-XXXX-XXXX, over an alphabet with
+        ↓                           no 0/O or 1/I — a code read aloud or
+count independent codes             retyped from a screenshot should never
+                                     have an ambiguous character
+        ↓
+POST /api/subscribe/redeem          SELECT ... FOR UPDATE locks the voucher
+        ↓                           row for the transaction
+insert into voucher_redemptions     UNIQUE(voucher_id, user_id) — this is
+        ↓                           what actually stops a double-redeem
+        ↓                           under concurrency, not the check above it
+extend the subscription             new_end = max(now, current_period_end)
+                                     + duration_days — early redemption never
+                                     costs days already granted
+```
+
+The checks that run first (voucher active, not expired, uses remaining, not
+already redeemed by this account) exist for a clear error message, not the
+guarantee — a second, simultaneous redemption attempt can pass every one of
+them and still lose to the unique constraint. `POST /api/subscribe/redeem` is
+rate limited at 5 attempts/minute per account, tracked in an in-memory
+sliding window rather than a database write: a mistyped code is not a product
+event worth a row, and this keeps abuse-prevention noise out of `events`
+entirely.
+
+### Audit log
+
+Every mutating admin route — extend, disable, enable, create a voucher,
+deactivate one — writes one row to `admin_audit_log`
+(`admin_id, action, target_type, target_id, metadata, created_at`) before
+answering, readable at `GET /api/admin/audit-log`. Best-effort, like the
+`events` table: a logging failure is warned about and never blocks the
+action itself, because losing one audit entry is a smaller problem than an
+admin who can't disable a malicious account because logging it failed.
+`admin_id` is nullable and `ON DELETE SET NULL` — the admin's own account
+being deleted later must not erase the historical record that they took the
+action.
 
 ---
 

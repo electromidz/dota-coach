@@ -618,6 +618,7 @@ pub fn test_config() -> Config {
             trial_days: 14,
             period_days: 30,
             history_limit: 20,
+            sweep_interval_seconds: 3600,
             base_url: "https://pay.example/v1".into(),
             api_key: Some("test-key".into()),
             ipn_secret: Some("test-secret".into()),

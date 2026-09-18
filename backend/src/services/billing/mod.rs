@@ -16,16 +16,19 @@
 //!      first, then the order id, the amount and the currency. A mismatch on
 //!      any of them grants nothing.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::config::BillingConfig;
 use crate::domain::billing::{
     next_period, BillingOverview, Entitlement, Payment, PaymentStatus, Plan, Subscription,
+    SubscriptionStatus,
 };
+use crate::domain::event::EventType;
 use crate::domain::user::User;
 use crate::repositories;
+use crate::services::events;
 use crate::services::payments::{CheckoutRequest, PaymentError, PaymentProvider, PaymentUpdate};
 
 #[derive(Debug, thiserror::Error)]
@@ -67,31 +70,96 @@ pub async fn subscription_for(
     config: &BillingConfig,
     user_id: Uuid,
 ) -> Result<Subscription, sqlx::Error> {
-    let mut subscription =
+    let (subscription, created) =
         repositories::billing::ensure_subscription(pool, user_id, &config.plan, config.trial_days)
             .await?;
 
-    let now = Utc::now();
-    if let Some(corrected) = subscription.drifted_status(now) {
-        if let Err(e) = repositories::billing::mark_status(
+    if created {
+        events::track(
             pool,
-            subscription.id,
-            subscription.status,
-            corrected,
+            user_id,
+            EventType::TrialStarted,
+            serde_json::json!({ "plan": subscription.plan }),
         )
-        .await
-        {
-            tracing::warn!(error = %e, "could not rewrite an elapsed subscription status");
-        }
-
-        // Carried into the answer whether or not the write landed: the
-        // timestamps already say the window closed, and reporting `trialing`
-        // next to `entitlement: free` would be two answers to one question.
-        subscription.status = corrected;
-        subscription.status_label = corrected.label();
+        .await;
     }
 
-    Ok(subscription)
+    Ok(correct_drift(pool, user_id, subscription, Utc::now()).await)
+}
+
+/// Rewrite `subscription` if its window has closed as of `now`, and report the
+/// fact through the event stream. Shared by the lazy path above (one row, on
+/// whatever request happens to touch it) and the background sweep below
+/// (every row that has closed, whether or not anyone ever asks).
+///
+/// A failure to write is logged rather than propagated — entitlement never
+/// depended on the stored label, only on the timestamps, so a caller still
+/// gets the right answer even if this bookkeeping write did not land.
+async fn correct_drift(
+    pool: &PgPool,
+    user_id: Uuid,
+    mut subscription: Subscription,
+    now: DateTime<Utc>,
+) -> Subscription {
+    let Some(corrected) = subscription.drifted_status(now) else {
+        return subscription;
+    };
+    let previous = subscription.status;
+
+    if let Err(e) =
+        repositories::billing::mark_status(pool, subscription.id, previous, corrected).await
+    {
+        tracing::warn!(error = %e, "could not rewrite an elapsed subscription status");
+    }
+
+    // Carried into the answer whether or not the write landed: the timestamps
+    // already say the window closed, and reporting `trialing` next to
+    // `entitlement: free` would be two answers to one question.
+    subscription.status = corrected;
+    subscription.status_label = corrected.label();
+
+    // Which fact this is depends on which window closed: a trial running out
+    // and a paid period lapsing are different things to see in an account's
+    // timeline, even though `drifted_status` corrects both the same way.
+    if corrected == SubscriptionStatus::Expired {
+        let event_type = match previous {
+            SubscriptionStatus::Trialing => Some(EventType::TrialExpired),
+            SubscriptionStatus::Active => Some(EventType::SubscriptionExpired),
+            _ => None,
+        };
+
+        if let Some(event_type) = event_type {
+            events::track(
+                pool,
+                user_id,
+                event_type,
+                serde_json::json!({ "plan": subscription.plan }),
+            )
+            .await;
+        }
+    }
+
+    subscription
+}
+
+/// Rewrite every subscription whose trial or paid window has closed, whether
+/// or not anyone has made a request that would have corrected it lazily.
+///
+/// Run on an interval from `main`, not gated on `BillingConfig::enforce`: the
+/// lazy path already corrects drift regardless of that flag (it only governs
+/// `entitlement_for`'s early return), and this sweep exists to keep stored
+/// state — and the `trial_expired` event stream — accurate for accounts that
+/// never come back, not to enforce anything itself.
+pub async fn sweep_expired(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let now = Utc::now();
+    let expiring = repositories::billing::find_expiring(pool, now).await?;
+    let count = expiring.len() as u64;
+
+    for (user_id, subscription) in expiring {
+        correct_drift(pool, user_id, subscription, now).await;
+    }
+
+    Ok(count)
 }
 
 /// The gate every premium handler goes through.
@@ -386,6 +454,22 @@ async fn apply_update(
     }
 
     tx.commit().await?;
+
+    if activated {
+        if let Ok(Some(user_id)) = repositories::billing::payment_user_id(pool, payment.id).await {
+            events::track(
+                pool,
+                user_id,
+                EventType::Purchase,
+                serde_json::json!({
+                    "amount_cents": payment.amount_cents,
+                    "currency": payment.currency,
+                }),
+            )
+            .await;
+        }
+    }
+
     Ok(WebhookOutcome::Applied { activated })
 }
 

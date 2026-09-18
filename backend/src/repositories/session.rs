@@ -31,7 +31,7 @@ pub async fn find_user_by_token_hash(
 ) -> Result<Option<User>, sqlx::Error> {
     sqlx::query_as::<_, User>(
         "SELECT u.id, u.steam_id, u.persona_name, u.avatar_url, u.profile_url,
-                u.last_login_at, u.created_at, u.updated_at
+                u.last_login_at, u.is_admin, u.status, u.created_at, u.updated_at
            FROM sessions s
            JOIN users u ON u.id = s.user_id
           WHERE s.token_hash = $1

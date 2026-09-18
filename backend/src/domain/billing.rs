@@ -85,6 +85,52 @@ impl SubscriptionStatus {
     }
 }
 
+/// Where this subscription's current access actually came from.
+///
+/// Independent of `status`: a `trialing` row is always `Trial`, but an
+/// `active` one could have got there by paying, redeeming a voucher, or an
+/// admin granting time directly. Whichever of those happens most recently
+/// overwrites this — there is one current answer to "why does this account
+/// have access", not a history of every way it ever got some.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionSource {
+    Trial,
+    Payment,
+    Voucher,
+    Admin,
+}
+
+impl SubscriptionSource {
+    pub fn slug(self) -> &'static str {
+        match self {
+            SubscriptionSource::Trial => "trial",
+            SubscriptionSource::Payment => "payment",
+            SubscriptionSource::Voucher => "voucher",
+            SubscriptionSource::Admin => "admin",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "trial" => SubscriptionSource::Trial,
+            "payment" => SubscriptionSource::Payment,
+            "voucher" => SubscriptionSource::Voucher,
+            "admin" => SubscriptionSource::Admin,
+            _ => return None,
+        })
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SubscriptionSource::Trial => "Trial",
+            SubscriptionSource::Payment => "Payment",
+            SubscriptionSource::Voucher => "Voucher",
+            SubscriptionSource::Admin => "Admin grant",
+        }
+    }
+}
+
 /// How far a charge has got.
 ///
 /// Deliberately coarser than any provider's own vocabulary: the domain only
@@ -151,6 +197,7 @@ pub struct Subscription {
     pub id: Uuid,
     pub status: SubscriptionStatus,
     pub status_label: &'static str,
+    pub source: SubscriptionSource,
     pub plan: String,
     pub trial_started_at: DateTime<Utc>,
     pub trial_ends_at: DateTime<Utc>,
@@ -293,6 +340,7 @@ mod tests {
             id: Uuid::nil(),
             status,
             status_label: status.label(),
+            source: SubscriptionSource::Trial,
             plan: "pro".into(),
             trial_started_at: at(0),
             // A 14-day trial in hours.

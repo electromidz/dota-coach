@@ -7,6 +7,7 @@ use crate::services::billing::BillingError;
 use crate::services::dota::ProviderError;
 use crate::services::payments::PaymentError;
 use crate::services::sync::SyncError;
+use crate::services::voucher::VoucherError;
 use utoipa::ToSchema;
 
 /// Every error the API can return. Variants carry only what is safe to show a
@@ -24,6 +25,16 @@ pub enum AppError {
 
     #[error("not authenticated")]
     Unauthenticated,
+
+    /// Authenticated, but disabled by an admin. Distinct from `Unauthenticated`:
+    /// the session is valid, the account itself is not usable.
+    #[error("account disabled")]
+    AccountDisabled,
+
+    /// Authenticated, correctly so, but not allowed to do this. Used only by
+    /// the admin surface today — `AdminUser` for a non-admin caller.
+    #[error("{0}")]
+    Forbidden(String),
 
     /// Authenticated, but no Dota identity is linked to the account.
     #[error("no Dota account linked")]
@@ -65,6 +76,8 @@ impl AppError {
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "BAD_REQUEST"),
             AppError::NotFound(_) => (StatusCode::NOT_FOUND, "NOT_FOUND"),
             AppError::Unauthenticated => (StatusCode::UNAUTHORIZED, "UNAUTHENTICATED"),
+            AppError::AccountDisabled => (StatusCode::FORBIDDEN, "ACCOUNT_DISABLED"),
+            AppError::Forbidden(_) => (StatusCode::FORBIDDEN, "FORBIDDEN"),
             AppError::DotaAccountNotLinked => (StatusCode::CONFLICT, "DOTA_ACCOUNT_NOT_LINKED"),
             AppError::Upstream(_) => (StatusCode::BAD_GATEWAY, "UPSTREAM_UNAVAILABLE"),
             AppError::TooManyRequests(_) => (StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED"),
@@ -87,8 +100,12 @@ impl AppError {
             | AppError::TooManyRequests(m)
             | AppError::PreconditionUnmet(m)
             | AppError::FeatureUnavailable(m)
+            | AppError::Forbidden(m)
             | AppError::PaymentRequired(m) => m.clone(),
             AppError::Unauthenticated => "Sign in with Steam to continue.".into(),
+            AppError::AccountDisabled => {
+                "This account has been disabled. Contact support if you think that's wrong.".into()
+            }
             AppError::DotaAccountNotLinked => {
                 "No Dota account is linked to your Steam profile yet.".into()
             }
@@ -199,6 +216,33 @@ impl From<SyncError> for AppError {
         match error {
             SyncError::Provider(e) => e.into(),
             SyncError::Database(e) => AppError::Database(e),
+        }
+    }
+}
+
+/// A voucher code is user-typed free text, not a system-generated id, so an
+/// unknown one is `400` — the caller asked for something that does not
+/// exist, not a resource that used to. Having already redeemed a code is
+/// `409`: nothing is wrong with the request, the account's own history is
+/// just why it cannot be honoured again.
+impl From<VoucherError> for AppError {
+    fn from(error: VoucherError) -> Self {
+        match error {
+            VoucherError::NotFound => AppError::BadRequest("That code is not valid.".into()),
+            VoucherError::Inactive => {
+                AppError::BadRequest("That code is no longer active.".into())
+            }
+            VoucherError::Expired => AppError::BadRequest("That code has expired.".into()),
+            VoucherError::UsedUp => AppError::BadRequest(
+                "That code has already been used the maximum number of times.".into(),
+            ),
+            VoucherError::AlreadyRedeemed => {
+                AppError::PreconditionUnmet("You have already redeemed this code.".into())
+            }
+            VoucherError::RateLimited => {
+                AppError::TooManyRequests("Too many attempts — try again in a minute.".into())
+            }
+            VoucherError::Database(e) => AppError::Database(e),
         }
     }
 }

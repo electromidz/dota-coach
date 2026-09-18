@@ -7,7 +7,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Icon } from "@/components/ui/Icon";
-import { ApiError, getBilling, startCheckout } from "@/lib/api";
+import { ApiError, getBilling, redeemVoucher, startCheckout } from "@/lib/api";
 import {
   accessSummary,
   canSubscribe,
@@ -127,6 +127,8 @@ export function Billing() {
         )}
       </Card>
 
+      <RedeemVoucher onRedeemed={() => void getBilling().then(setData)} />
+
       {/* What the trial covers, stated plainly: an expired account keeps every
           measured feature, and loses only what costs money per use. */}
       <Card className="flex flex-col gap-2">
@@ -154,6 +156,60 @@ export function Billing() {
         )}
       </section>
     </div>
+  );
+}
+
+function RedeemVoucher({ onRedeemed }: { onRedeemed: () => void }) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!code.trim()) return;
+
+    setBusy(true);
+    setError(null);
+    setSuccess(false);
+
+    try {
+      await redeemVoucher(code.trim());
+      setSuccess(true);
+      setCode("");
+      onRedeemed();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not redeem that code.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="flex flex-col gap-3">
+      <p className="text-sm text-ink">Have a voucher code?</p>
+
+      <form onSubmit={handleSubmit} className="flex flex-wrap items-center gap-3">
+        <input
+          type="text"
+          value={code}
+          onChange={(e) => {
+            setCode(e.target.value);
+            setSuccess(false);
+          }}
+          placeholder="DOTA-XXXX-XXXX"
+          className="min-h-11 flex-1 rounded-xl border border-glass-edge bg-surface-2/60 px-3 font-mono text-sm uppercase text-ink outline-none focus-neon"
+        />
+        <Button type="submit" variant="ghost" disabled={busy || !code.trim()} className="px-5 text-sm">
+          {busy ? "Redeeming…" : "Redeem"}
+        </Button>
+      </form>
+
+      {error ? <Alert>{error}</Alert> : null}
+      {success ? (
+        <Alert tone="success">Redeemed — your access has been extended.</Alert>
+      ) : null}
+    </Card>
   );
 }
 

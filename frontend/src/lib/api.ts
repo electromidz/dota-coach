@@ -1,4 +1,9 @@
 import type {
+  AdminStats,
+  AdminUserDetail,
+  AdminUserSummary,
+  AdminUserListResponse,
+  AdminVoucherDetail,
   ApiErrorBody,
   BenchmarkResponse,
   BillingResponse,
@@ -13,10 +18,13 @@ import type {
   MatchResponse,
   MeResponse,
   PlayerModelResponse,
+  RedeemResponse,
   RoleSelectionResponse,
   StatsResponse,
   SyncResponse,
   TrainingFocusResponse,
+  Voucher,
+  VoucherListResponse,
 } from "./types";
 
 /**
@@ -254,6 +262,130 @@ export function getPlan(): Promise<PlanResponse> {
 /** Trial, subscription, price and charge history in one payload. */
 export function getBilling(): Promise<BillingResponse> {
   return apiFetch<BillingResponse>("/api/billing");
+}
+
+/**
+ * Redeem a voucher code for subscription time.
+ *
+ * Any signed-in account may call this — existing access is not a
+ * precondition, since redeeming is how an account with none gets some.
+ */
+export function redeemVoucher(code: string): Promise<RedeemResponse> {
+  return apiFetch<RedeemResponse>("/api/subscribe/redeem", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Admin
+// ---------------------------------------------------------------------------
+
+/** Usage, trial and revenue counts. `from`/`to` are RFC3339; both default to
+ *  the last 30 days on the backend when omitted. */
+export function getAdminStats(from?: string, to?: string): Promise<AdminStats> {
+  const params = new URLSearchParams();
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+
+  const query = params.toString();
+  return apiFetch<AdminStats>(`/api/admin/stats${query ? `?${query}` : ""}`);
+}
+
+export interface AdminUserListParams {
+  page?: number;
+  limit?: number;
+  status?: string;
+  plan?: string;
+  search?: string;
+}
+
+/** One page of accounts, optionally filtered. Every param is optional; an
+ *  absent one means "don't filter on this", matching the backend. */
+export function getAdminUsers(
+  params: AdminUserListParams = {},
+): Promise<AdminUserListResponse> {
+  const query = new URLSearchParams();
+  if (params.page) query.set("page", String(params.page));
+  if (params.limit) query.set("limit", String(params.limit));
+  if (params.status) query.set("status", params.status);
+  if (params.plan) query.set("plan", params.plan);
+  if (params.search) query.set("search", params.search);
+
+  const qs = query.toString();
+  return apiFetch<AdminUserListResponse>(`/api/admin/users${qs ? `?${qs}` : ""}`);
+}
+
+export function getAdminUser(id: string): Promise<AdminUserDetail> {
+  return apiFetch<AdminUserDetail>(`/api/admin/users/${id}`);
+}
+
+/** Adds `days` to whichever window currently governs the account's access —
+ *  the trial end for a trialing/expired account, the paid-through date for
+ *  an active/past-due one — and pulls a lapsed row back to `trialing`. */
+export function extendAccess(
+  id: string,
+  days: number,
+): Promise<AdminUserSummary> {
+  return apiFetch<AdminUserSummary>(`/api/admin/users/${id}/extend`, {
+    method: "POST",
+    body: JSON.stringify({ days }),
+  });
+}
+
+/** Every future request from this account is refused, checked fresh each
+ *  time — no separate session revocation needed. */
+export function disableUser(id: string): Promise<AdminUserSummary> {
+  return apiFetch<AdminUserSummary>(`/api/admin/users/${id}/disable`, {
+    method: "POST",
+  });
+}
+
+export function enableUser(id: string): Promise<AdminUserSummary> {
+  return apiFetch<AdminUserSummary>(`/api/admin/users/${id}/enable`, {
+    method: "POST",
+  });
+}
+
+export interface CreateVoucherParams {
+  duration_days: number;
+  max_uses: number;
+  expires_at?: string;
+  note?: string;
+  /** How many independent codes to generate. Defaults to 1 on the backend —
+   *  a "bulk" creation is this same request with a bigger number. */
+  count?: number;
+}
+
+/** Always returns a list, even for a single voucher, so the caller never
+ *  branches on shape. */
+export function createVouchers(
+  params: CreateVoucherParams,
+): Promise<VoucherListResponse> {
+  return apiFetch<VoucherListResponse>("/api/admin/vouchers", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+}
+
+export function getAdminVouchers(
+  page = 1,
+  limit = 20,
+): Promise<VoucherListResponse> {
+  return apiFetch<VoucherListResponse>(
+    `/api/admin/vouchers?page=${page}&limit=${limit}`,
+  );
+}
+
+export function getAdminVoucher(id: string): Promise<AdminVoucherDetail> {
+  return apiFetch<AdminVoucherDetail>(`/api/admin/vouchers/${id}`);
+}
+
+/** Existing redemptions are untouched — only future ones are refused. */
+export function deactivateVoucher(id: string): Promise<Voucher> {
+  return apiFetch<Voucher>(`/api/admin/vouchers/${id}/deactivate`, {
+    method: "POST",
+  });
 }
 
 /**

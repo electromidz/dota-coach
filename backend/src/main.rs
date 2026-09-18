@@ -11,6 +11,7 @@ use dota_coach_backend::services::benchmarks::opendota::OpenDotaBenchmarkProvide
 use dota_coach_backend::services::dota::opendota::OpenDotaProvider;
 use dota_coach_backend::services::hero_meta::opendota::OpenDotaHeroMetaProvider;
 use dota_coach_backend::services::llm::openai::OpenAiLlmProvider;
+use dota_coach_backend::services::billing;
 use dota_coach_backend::services::payments::nowpayments::NowPaymentsProvider;
 use dota_coach_backend::services::payments::{PaymentProvider, UnconfiguredPaymentProvider};
 use dota_coach_backend::state::{AppState, Providers};
@@ -135,6 +136,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             payments,
         },
     );
+    spawn_expiry_sweep(state.db.clone(), config.billing.sweep_interval_seconds);
+
     let app = api::routes::build(state, &config);
 
     let listener = TcpListener::bind(&addr).await?;
@@ -192,6 +195,29 @@ fn warn_about_deployment(config: &Config) {
             "FRONTEND_BASE_URL is not in CORS_ORIGINS - the frontend it redirects to cannot call the API"
         );
     }
+}
+
+/// Recurring correction for subscriptions whose trial or paid window has
+/// closed. Deliberately outside graceful shutdown: each tick is one
+/// idempotent, interruptible unit of work, so dropping it mid-run costs
+/// nothing that the next tick — or the next lazy read — won't correct anyway.
+fn spawn_expiry_sweep(db: sqlx::PgPool, interval_seconds: u64) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_seconds));
+        loop {
+            ticker.tick().await;
+            match billing::sweep_expired(&db).await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(count = n, "trial/subscription sweep corrected expired rows"),
+                Err(e) => tracing::warn!(error = %e, "trial/subscription sweep failed"),
+            }
+        }
+    });
+
+    tracing::info!(
+        interval_seconds,
+        "trial/subscription expiry sweep scheduled"
+    );
 }
 
 fn init_tracing() {

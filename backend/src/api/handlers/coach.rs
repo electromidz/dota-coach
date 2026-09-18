@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::api::extract::{AppJson, AppPath, CurrentUser, EntitledUser};
 use crate::api::handlers::{benchmark, heroes, stats};
 use crate::domain::coaching::{AnalysisScope, CoachingAnalysis, Evidence};
+use crate::domain::event::EventType;
 use crate::domain::coaching_profile::CoachingProfile;
 use crate::domain::player::DotaPlayer;
 use crate::domain::player_model::{PatternStatus, PlayerModel, RecurringPattern};
@@ -36,6 +37,7 @@ use crate::services::coaching::{
     CoachingError,
 };
 use crate::services::llm::LlmError;
+use crate::services::events;
 use crate::services::player_model::{self, patterns, ModelInputs};
 use crate::services::training::{self, SelectionInputs};
 use crate::state::AppState;
@@ -682,6 +684,22 @@ async fn run(
             LlmError::NotConfigured.user_note().to_string(),
         ));
     }
+
+    // Recorded once the preconditions pass, whether this call ends up
+    // generating or serving a cached answer — either way the player invoked
+    // the paid feature.
+    let scope_slug = match scope {
+        AnalysisScope::Player => "player",
+        AnalysisScope::Match => "match_analysis",
+        AnalysisScope::Role => "role_analysis",
+    };
+    events::track(
+        &state.db,
+        player.user_id,
+        EventType::FeatureUsed,
+        serde_json::json!({ "scope": scope_slug }),
+    )
+    .await;
 
     // Keyed on the configured model rather than the one that answers: it is
     // what the *next* request would use, and a served-model change behind the
