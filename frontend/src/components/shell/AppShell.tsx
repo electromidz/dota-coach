@@ -1,8 +1,7 @@
 import { AppBackdrop } from "@/components/shell/AppBackdrop";
 import { AppChrome } from "@/components/shell/AppChrome";
-import { PageHeader } from "@/components/shell/PageHeader";
+import { AppMain } from "@/components/shell/AppMain";
 import { SessionProvider } from "@/lib/session-context";
-import { cn } from "@/lib/utils";
 
 /**
  * The application frame: mobile-first, with a real desktop layout on top.
@@ -37,23 +36,15 @@ export function AppShell({
         <AppBackdrop />
         <AppChrome title={title} action={action} showTabs={showTabs} />
 
-        <main
-          className={cn(
-            "safe-x mx-auto w-full max-w-lg pt-5 lg:max-w-7xl lg:pt-8",
-            showTabs ? "app-scroll" : "pb-10",
-          )}
+        <AppMain
+          title={title}
+          eyebrow={eyebrow}
+          description={description}
+          action={action}
+          showTabs={showTabs}
         >
-          {title ? (
-            <PageHeader
-              title={title}
-              eyebrow={eyebrow}
-              description={description}
-              action={action}
-            />
-          ) : null}
-
           {children}
-        </main>
+        </AppMain>
       </div>
     </SessionProvider>
   );

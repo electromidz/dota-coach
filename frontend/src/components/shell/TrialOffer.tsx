@@ -1,10 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-
-import { getPlan } from "@/lib/api";
 import { formatPlanPrice } from "@/lib/billing";
-import type { Plan } from "@/lib/types";
+import { usePlan } from "@/lib/usePlan";
 
 /**
  * The offer line on the signed-out page: "Start your 14-day free trial. Then
@@ -16,21 +13,7 @@ import type { Plan } from "@/lib/types";
  * rendered rather than a guessed price.
  */
 export function TrialOffer({ className }: { className?: string }) {
-  const [plan, setPlan] = useState<Plan | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    getPlan()
-      .then((response) => {
-        if (!cancelled) setPlan(response.plan);
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const { plan } = usePlan();
 
   if (!plan) return null;
 
