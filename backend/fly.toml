@@ -4,12 +4,19 @@ primary_region = "ams"
 # Fly will build straight from backend/Dockerfile - no [build] section needed
 # as long as this file lives at backend/fly.toml (next to the Dockerfile).
 
+# NOT the current deployment target. Production runs on Belmo, built from
+# backend/Dockerfile with the environment described in .env.production.example.
+# This file is kept only as a working Fly fallback; if you deploy it, the
+# PUBLIC_BASE_URL below must be whatever origin Fly actually serves, because
+# Steam signs return_to and rejects a mismatch.
+
 [env]
   PORT = "8080"
   HOST = "0.0.0.0"
   COOKIE_SECURE = "true"
   PUBLIC_BASE_URL = "https://dota-coach-backend.fly.dev"
-  # Add FRONTEND_BASE_URL / CORS_ORIGINS here once the frontend has a real URL.
+  FRONTEND_BASE_URL = "https://dashboard.belmo.io"
+  CORS_ORIGINS = "https://dashboard.belmo.io"
 
 [http_service]
   internal_port = 8080

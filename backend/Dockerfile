@@ -11,13 +11,18 @@ WORKDIR /app
 # invalidate the (slow) dependency layer.
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs \
-    && cargo build --release \
+    && cargo build --release --locked --bin dota-coach-backend \
     && rm -rf src
 
+# `sqlx::migrate!` embeds this directory at compile time, so it has to be
+# present before the build, not just at runtime.
 COPY migrations ./migrations
 COPY src ./src
-# Touch so cargo rebuilds the binary rather than reusing the stub.
-RUN touch src/main.rs && cargo build --release
+# Touch so cargo rebuilds the binary rather than reusing the stub. Only the
+# serving binary is built: src/bin/backfill_subscriptions.rs is a one-off
+# operator tool that the runtime stage does not copy, and building it here
+# would cost a second link for something the image never contains.
+RUN touch src/main.rs && cargo build --release --locked --bin dota-coach-backend
 
 # ---- runtime -----------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
