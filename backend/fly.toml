@@ -1,0 +1,31 @@
+app = "dota-coach-backend"
+primary_region = "ams"
+
+# Fly will build straight from backend/Dockerfile - no [build] section needed
+# as long as this file lives at backend/fly.toml (next to the Dockerfile).
+
+[env]
+  PORT = "8080"
+  HOST = "0.0.0.0"
+  COOKIE_SECURE = "true"
+  PUBLIC_BASE_URL = "https://dota-coach-backend.fly.dev"
+  # Add FRONTEND_BASE_URL / CORS_ORIGINS here once the frontend has a real URL.
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+[[http_service.checks]]
+  interval = "10s"
+  timeout = "3s"
+  grace_period = "20s"
+  method = "GET"
+  path = "/health/live"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
