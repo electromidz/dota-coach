@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { BarList } from "@/components/charts/BarList";
 import { MatchAnalysis } from "@/components/coach/MatchAnalysis";
+import { MatchBenchmark } from "@/components/matches/MatchBenchmark";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
@@ -186,6 +188,49 @@ export function MatchDetail({ id }: { id: string }) {
           ) : null}
         </section>
       </div>
+
+      {/* Visual reads of the same numbers above — nothing here is a new
+          figure, only a different shape for the ones already on the page. */}
+      <div className="grid gap-5 lg:grid-cols-2 lg:items-start">
+        <section className="flex flex-col gap-3">
+          <h2 className="text-xs font-semibold uppercase tracking-[0.2em] text-ink-faint">
+            Combat
+          </h2>
+          <Card>
+            <BarList
+              caption="Kills, deaths and assists"
+              data={[
+                { label: "Kills", value: match.kills },
+                { label: "Deaths", value: match.deaths },
+                { label: "Assists", value: match.assists },
+              ]}
+            />
+          </Card>
+        </section>
+
+        {match.detail_synced &&
+        match.hero_damage !== null &&
+        match.tower_damage !== null &&
+        match.hero_healing !== null ? (
+          <section className="flex flex-col gap-3">
+            <h2 className="text-xs font-semibold uppercase tracking-[0.2em] text-ink-faint">
+              Impact
+            </h2>
+            <Card>
+              <BarList
+                caption="Hero damage, tower damage and hero healing"
+                data={[
+                  { label: "Hero damage", value: match.hero_damage },
+                  { label: "Tower damage", value: match.tower_damage },
+                  { label: "Hero healing", value: match.hero_healing },
+                ]}
+              />
+            </Card>
+          </section>
+        ) : null}
+      </div>
+
+      <MatchBenchmark heroId={match.hero_id} heroName={match.hero_name} />
 
       <MatchAnalysis id={match.id} />
 
