@@ -1,8 +1,11 @@
 # ---- builder -----------------------------------------------------------
 FROM rust:1-slim-bookworm AS builder
 
+# curl is a build dependency, not a convenience: utoipa-swagger-ui's build.rs
+# downloads the Swagger UI bundle during compilation and shells out to curl to
+# do it, failing the build with `curl command not found` without it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential \
+    && apt-get install -y --no-install-recommends build-essential curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
