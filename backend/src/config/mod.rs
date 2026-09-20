@@ -149,6 +149,16 @@ pub struct CoachConfig {
     pub request_timeout_seconds: u64,
     /// How many recent matches feed the evidence builder.
     pub recent_matches: i64,
+    /// How long a cached coaching context may be served for.
+    ///
+    /// A backstop, not the invalidation mechanism: the cache key carries a
+    /// fingerprint of everything the value depends on, so a stale entry is
+    /// already unreachable. This bounds how long an entry nobody will look up
+    /// again takes up space.
+    pub cache_ttl_minutes: i64,
+    /// Whether the coaching context is cached at all. Off switches the
+    /// service to a no-op implementation with no second code path.
+    pub cache_enabled: bool,
 }
 
 impl CoachConfig {
@@ -170,6 +180,11 @@ impl CoachConfig {
             // default stays short for providers that answer immediately.
             request_timeout_seconds: parsed::<u64>("LLM_TIMEOUT_SECONDS", 30)?.clamp(1, 180),
             recent_matches: parsed::<i64>("COACH_RECENT_MATCHES", 10)?.clamp(1, 50),
+            // An hour is long for a value the key already invalidates and
+            // short enough that a fingerprint input nobody thought of cannot
+            // go stale for a day.
+            cache_ttl_minutes: parsed::<i64>("COACH_CACHE_TTL_MINUTES", 60)?.clamp(1, 1_440),
+            cache_enabled: parsed::<bool>("COACH_CACHE_ENABLED", true)?,
         })
     }
 }

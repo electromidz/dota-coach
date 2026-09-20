@@ -33,6 +33,7 @@ use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
 use crate::repositories::coaching::NewAnalysis;
+use crate::services::cache;
 use crate::services::coaching::{
     self,
     evidence::{EvidenceInputs, EvidenceScope},
@@ -918,10 +919,136 @@ async fn role_evidence(
     player: &DotaPlayer,
     scope: &CoachingScope,
 ) -> AppResult<(Vec<Evidence>, Vec<RecurringPattern>)> {
-    let inputs = role_inputs(state, user, player, scope).await?;
-    let progress = progress_context(state, player, scope.role).await?;
-    let evidence = inputs.evidence(scope, state.config.coach.recent_matches as usize, &progress);
-    Ok((evidence, inputs.patterns))
+    let key = evidence_cache_key(state, player, scope).await;
+
+    let compute = || async {
+        let inputs = role_inputs(state, user, player, scope).await?;
+        let progress = progress_context(state, player, scope.role).await?;
+        let evidence =
+            inputs.evidence(scope, state.config.coach.recent_matches as usize, &progress);
+        Ok(CachedEvidence {
+            evidence,
+            patterns: inputs.patterns,
+        })
+    };
+
+    let cached = match key {
+        Some(key) => cache::read_through(state.cache.as_ref(), &key, player.id, compute).await?,
+        // No fingerprint means something the key depends on could not be read.
+        // Computing without caching is the safe half of that: a value nobody
+        // can describe is a value nobody should store.
+        None => compute().await?,
+    };
+
+    Ok((cached.evidence, cached.patterns))
+}
+
+/// The cached half of a coaching read.
+///
+/// Both halves travel together because they are computed together and are
+/// consistent only with each other: patterns detected in one window and
+/// evidence built from another would let the page cite a habit its own
+/// figures do not show.
+#[derive(Serialize, Deserialize)]
+struct CachedEvidence {
+    evidence: Vec<Evidence>,
+    patterns: Vec<RecurringPattern>,
+}
+
+/// A key that stops matching the moment anything behind the value moves.
+///
+/// This is the invalidation mechanism, and it is deliberately not eviction.
+/// Forgetting to evict is how a coaching cache starts telling a player about
+/// last week; a key that cannot match cannot be forgotten about.
+///
+/// The fingerprint covers every input the cached evidence depends on:
+///
+/// | Input | Why it is in the key |
+/// |---|---|
+/// | `last_synced_at` | New matches, and the metrics recomputed with them |
+/// | `metrics_version` | A formula change makes every stored figure different |
+/// | coaching profile `updated_at` | The role, and the window it implies |
+/// | active focus id and `updated_at` | `focus.current` evidence |
+/// | newest session id | The progress comparison |
+/// | benchmark and hero-meta snapshot freshness | Peer and meta evidence |
+///
+/// `None` when the fingerprint itself could not be read, which is treated as
+/// "do not cache" rather than "cache under a guess".
+async fn evidence_cache_key(
+    state: &AppState,
+    player: &DotaPlayer,
+    scope: &CoachingScope,
+) -> Option<cache::CacheKey> {
+    if !state.cache.is_enabled() {
+        return None;
+    }
+
+    let fingerprint: String = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT concat_ws(
+                    '|',
+                    to_char(p.last_synced_at, 'YYYYMMDDHH24MISSUS'),
+                    $2::text,
+                    to_char(cp.updated_at, 'YYYYMMDDHH24MISSUS'),
+                    tf.id::text,
+                    to_char(tf.updated_at, 'YYYYMMDDHH24MISSUS'),
+                    cs.id::text,
+                    to_char(bs.newest, 'YYYYMMDDHH24MISSUS'),
+                    to_char(hms.newest, 'YYYYMMDDHH24MISSUS')
+                )
+           FROM dota_players p
+           LEFT JOIN coaching_profiles cp ON cp.dota_player_id = p.id
+           LEFT JOIN training_focus tf
+                  ON tf.dota_player_id = p.id
+                 AND tf.status = 'active'
+                 AND tf.role IS NOT DISTINCT FROM $3
+           LEFT JOIN LATERAL (
+                    SELECT id FROM coaching_sessions
+                     WHERE dota_player_id = p.id AND role = $3
+                     ORDER BY sequence DESC LIMIT 1
+                ) cs ON TRUE
+           LEFT JOIN LATERAL (
+                    SELECT MAX(fetched_at) AS newest FROM benchmark_snapshots
+                ) bs ON TRUE
+           LEFT JOIN LATERAL (
+                    SELECT MAX(fetched_at) AS newest FROM hero_meta_snapshots
+                ) hms ON TRUE
+          WHERE p.id = $1",
+    )
+    .bind(player.id)
+    .bind(crate::services::metrics::METRICS_VERSION)
+    .bind(scope.role.slug())
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "coaching cache fingerprint failed; computing uncached");
+        None
+    })
+    // `fetch_optional` wraps the column's own nullability, so flatten before
+    // using it: no row and a null fingerprint both mean "do not cache".
+    .flatten()?;
+
+    Some(cache::CacheKey::new(
+        "coach-evidence",
+        player.id,
+        scope.role.slug(),
+        &short_hash(&fingerprint),
+    ))
+}
+
+/// A fingerprint short enough to read in a log line.
+///
+/// Hashed rather than concatenated because the raw string carries timestamps
+/// and ids that have no business being a primary key, and because a key of
+/// bounded length keeps the index small.
+fn short_hash(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(input.as_bytes());
+    digest[..16].iter().fold(String::new(), |mut acc, byte| {
+        use std::fmt::Write;
+        let _ = write!(acc, "{byte:02x}");
+        acc
+    })
 }
 
 /// Everything one role's coaching is computed from, fetched once.

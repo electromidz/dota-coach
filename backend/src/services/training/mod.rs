@@ -770,7 +770,7 @@ mod tests {
             recent_rate: Some(rate),
             recent_measured: 10,
             status,
-            status_label: status.label(),
+            status_label: status.label().to_string(),
             confidence: Confidence::Adequate,
             statement: "Dies too often in 12 of the 20 matches this could be measured in (60%)."
                 .into(),

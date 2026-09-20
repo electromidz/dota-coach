@@ -598,6 +598,10 @@ pub fn test_config() -> Config {
             temperature: 0.0,
             request_timeout_seconds: 5,
             recent_matches: 10,
+            cache_ttl_minutes: 60,
+            // On by default in tests, so the cached path is the one being
+            // exercised everywhere rather than a path nothing covers.
+            cache_enabled: true,
         },
         training: TrainingConfig {
             focus_weights: FocusWeights::default(),

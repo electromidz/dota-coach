@@ -205,7 +205,7 @@ pub async fn list_patterns(
                 // measured with, which the detector recomputes.
                 recent_measured: 0,
                 status,
-                status_label: status.label(),
+                status_label: status.label().to_string(),
                 confidence: confidence_for(row.measured),
                 statement: stored_statement(
                     detector.label,

@@ -241,7 +241,7 @@ fn evaluate(
         recent_rate,
         recent_measured,
         status,
-        status_label: status.label(),
+        status_label: status.label().to_string(),
         confidence: percentile::confidence_for(measured),
         statement: statement(detector, occurrences, measured, rate, recent_rate, status),
         examples: hits.iter().take(3).map(|m| m.match_id).collect(),
