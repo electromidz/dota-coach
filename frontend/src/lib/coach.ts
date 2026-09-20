@@ -33,6 +33,9 @@ export function citedBy(insight: Insight, evidence: Evidence[]): Evidence[] {
 /** Evidence grouped by kind, in reading order. */
 export const EVIDENCE_GROUPS: Array<{ kind: Evidence["kind"]; label: string }> = [
   { kind: "match", label: "This match" },
+  // Change leads, where there is any: "you are dying less than last time" is
+  // the thing a returning player came back to read.
+  { kind: "progress", label: "Since your last session" },
   { kind: "focus", label: "Training focus" },
   { kind: "pattern", label: "Recurring patterns" },
   { kind: "overall", label: "Career" },

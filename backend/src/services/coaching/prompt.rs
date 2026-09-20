@@ -21,7 +21,7 @@ use utoipa::ToSchema;
 
 /// Bumped whenever the instructions change in a way that should produce a
 /// different answer for identical evidence.
-pub const PROMPT_VERSION: u32 = 3;
+pub const PROMPT_VERSION: u32 = 4;
 
 /// The instructions. Fixed text: the only things that vary are the caps, which
 /// are configuration.
@@ -59,6 +59,15 @@ cannot read.
 assert a recurring pattern from a single match.
 7. At most {max_insights} insights and at most {max_plan_steps} plan steps, \
 most important first. Fewer is better than padding.
+8. Evidence ids beginning \"progress.\" describe how the player has changed \
+since their previous coaching session. Everything else describes where they \
+stand now. Keep the two apart: \"your deaths are high\" and \"your deaths have \
+got worse\" are different claims, and only the second needs a progress id.
+9. Do not say anything has improved, worsened, or stayed the same unless a \
+\"progress.\" item says so. If the evidence contains \"progress.none\", the \
+player has nothing to be compared against yet — say so if it is relevant, and \
+make no claim about change in either direction. An insight of kind \
+\"improvement\" that cites no \"progress.\" id is discarded.
 
 WHAT A GOOD ANSWER COVERS
 Where the player stands in this role, what they are doing well, what is \

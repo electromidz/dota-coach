@@ -634,7 +634,9 @@ export type EvidenceKind =
   | "hero"
   | "pattern"
   | "focus"
-  | "match";
+  | "match"
+  /** What changed since the previous coaching session. */
+  | "progress";
 
 export type InsightKind =
   | "strength"

@@ -42,6 +42,7 @@ use crate::services::coaching_session;
 use crate::services::events;
 use crate::services::llm::LlmError;
 use crate::services::player_model::{self, patterns, ModelInputs};
+use crate::services::progress as progress_engine;
 use crate::services::training::{self, SelectionInputs};
 use crate::state::AppState;
 use utoipa::ToSchema;
@@ -575,7 +576,6 @@ pub async fn analyze(
     // numbers the session records. Fetching twice would let the snapshot and
     // the advice written about it describe different windows.
     let inputs = role_inputs(&state, &user, &player, &scope).await?;
-    let evidence = inputs.evidence(&scope, state.config.coach.recent_matches as usize);
     let patterns = inputs.patterns.clone();
 
     // A threshold of one, not ten: an analysis has to bind to a snapshot
@@ -597,6 +597,15 @@ pub async fn analyze(
             .await?
             .map(|s| s.id),
     };
+
+    // Read *after* the checkpoint, so a session written a moment ago is the
+    // current half of the comparison rather than being compared against.
+    let progress = progress_context(&state, &player, scope.role).await?;
+    let evidence = inputs.evidence(
+        &scope,
+        state.config.coach.recent_matches as usize,
+        &progress,
+    );
 
     run(
         &state,
@@ -910,7 +919,8 @@ async fn role_evidence(
     scope: &CoachingScope,
 ) -> AppResult<(Vec<Evidence>, Vec<RecurringPattern>)> {
     let inputs = role_inputs(state, user, player, scope).await?;
-    let evidence = inputs.evidence(scope, state.config.coach.recent_matches as usize);
+    let progress = progress_context(state, player, scope.role).await?;
+    let evidence = inputs.evidence(scope, state.config.coach.recent_matches as usize, &progress);
     Ok((evidence, inputs.patterns))
 }
 
@@ -950,7 +960,16 @@ impl RoleInputs {
     }
 
     /// The prose rendering, for the model.
-    fn evidence(&self, scope: &CoachingScope, recent: usize) -> Vec<Evidence> {
+    ///
+    /// `progress` is passed in rather than gathered here because its value
+    /// depends on *when* it is read: a generation checkpoints first, so the
+    /// session it just wrote is part of the comparison the model is shown.
+    fn evidence(
+        &self,
+        scope: &CoachingScope,
+        recent: usize,
+        progress: &ProgressContext,
+    ) -> Vec<Evidence> {
         let recent = &self.window[..recent.min(self.window.len())];
 
         coaching::evidence::build(&EvidenceInputs {
@@ -967,6 +986,8 @@ impl RoleInputs {
             pool: &self.heroes.pool,
             recommendations: &self.heroes.recommendations,
             patterns: &self.patterns,
+            progress: progress.comparison.as_ref(),
+            has_session: progress.has_session,
             focus: self.focus.as_ref(),
             focus_match: None,
             focus_metrics: None,
@@ -1056,6 +1077,39 @@ pub(crate) async fn role_inputs(
 
 /// How many of the role's heroes a session records.
 const HERO_SNAPSHOT_LIMIT: i64 = 5;
+
+/// What the coach knows about this player's history with the role.
+///
+/// Carries the absence as well as the comparison, because they are different
+/// absences: a player with no sessions and a player with exactly one both have
+/// no comparison, and only the second has been measured before.
+pub(crate) struct ProgressContext {
+    pub comparison: Option<crate::domain::progress::SessionProgress>,
+    pub has_session: bool,
+}
+
+/// Compare the two newest sessions for a role, if there are two.
+///
+/// Read at the point of use rather than cached on [`RoleInputs`]: a generation
+/// checkpoints *before* building its evidence, so the session it just wrote
+/// has to be part of the comparison the model is shown.
+pub(crate) async fn progress_context(
+    state: &AppState,
+    player: &DotaPlayer,
+    role: CoachableRole,
+) -> AppResult<ProgressContext> {
+    // Two is all a comparison needs. The trend across ten is a different
+    // question, answered by `/api/coach/progress`.
+    let sessions = repositories::coaching_session::list(&state.db, player.id, role, 2, 0).await?;
+
+    Ok(ProgressContext {
+        has_session: !sessions.is_empty(),
+        comparison: match sessions.as_slice() {
+            [current, previous] => Some(progress_engine::compare(previous, current)),
+            _ => None,
+        },
+    })
+}
 
 /// The coaching scope, or `None` when the player has not chosen a role.
 ///
@@ -1286,6 +1340,10 @@ async fn match_evidence(
         // A single match read against the player's habits, not just their
         // averages: "you did it again" is the coachable observation.
         patterns: &detected,
+        // A single match is not a coaching session, so it is never described
+        // as progress against one.
+        progress: None,
+        has_session: false,
         focus: focus.as_ref(),
         focus_match: Some(match_),
         focus_metrics: metrics.as_ref(),
