@@ -134,6 +134,26 @@ impl CoachingSession {
     }
 }
 
+/// One session, reduced to what a history list needs.
+///
+/// A list of twenty sessions is twenty copies of five JSONB documents if the
+/// full snapshot is sent. The columns here are the ones a list row actually
+/// renders; `GET /api/coach/sessions/{id}` serves the rest.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SessionSummary {
+    pub id: Uuid,
+    pub role: CoachableRole,
+    pub role_label: &'static str,
+    pub sequence: i32,
+    pub analyzed_match_count: i32,
+    pub newest_match_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub performance: Option<f32>,
+    /// Whether a model ever interpreted this session. The summary itself is
+    /// not carried — it belongs with the full snapshot.
+    pub has_analysis: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// A session that has been computed but not yet stored.
 ///
 /// Separate from [`CoachingSession`] because `id`, `sequence` and `created_at`

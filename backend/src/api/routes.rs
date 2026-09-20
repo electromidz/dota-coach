@@ -9,8 +9,8 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::api::handlers::{
-    admin, auth, benchmark, billing, coach, events, health, heroes, matches, players, stats,
-    subscribe,
+    admin, auth, benchmark, billing, coach, events, health, heroes, matches, players, sessions,
+    stats, subscribe,
 };
 use crate::api::{docs, observability};
 use crate::config::Config;
@@ -55,6 +55,8 @@ pub fn build(state: AppState, config: &Config) -> Router {
         // unable to say what it wants coaching on.
         .route("/coach/roles", get(coach::roles))
         .route("/coach/role", post(coach::select_role))
+        .route("/coach/sessions", get(sessions::list))
+        .route("/coach/sessions/{id}", get(sessions::get))
         .route("/coach/player-model", get(coach::player_model))
         .route("/coach/training-focus", get(coach::training_focus))
         // Billing. Reading is always allowed — an expired account still needs

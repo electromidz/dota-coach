@@ -9,10 +9,12 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::api::extract::CurrentUser;
+use crate::api::handlers::coach;
 use crate::domain::player::DotaPlayer;
 use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
+use crate::services::coaching_session;
 use crate::services::sync::{sync_player, SyncReport};
 use crate::state::AppState;
 use utoipa::ToSchema;
@@ -96,10 +98,52 @@ pub async fn sync(
     )
     .await?;
 
+    checkpoint_after_sync(&state, &user, &dota_player).await;
+
     Ok(Json(SyncResponse {
         dota_player,
         sync: report,
     }))
+}
+
+/// Record where the player stands, now that new matches have landed.
+///
+/// This lives here rather than inside `sync_player` because a snapshot needs
+/// the benchmark provider, and the sync service deliberately knows nothing
+/// about providers beyond Dota or about configuration at all. The handler is
+/// where those are already in scope.
+///
+/// **Never fatal.** A player must not lose their sync because a snapshot could
+/// not be written — the matches are stored either way, and the next sync will
+/// checkpoint instead. Same contract as `player_model::refresh` inside the sync
+/// service, which is also logged rather than propagated.
+///
+/// Silent by design when the player has not chosen a role: sessions are
+/// per-role, so there is nothing to snapshot yet.
+async fn checkpoint_after_sync(state: &AppState, user: &User, player: &DotaPlayer) {
+    let scope = match coach::scope_for_checkpoint(state, player).await {
+        Ok(Some(scope)) => scope,
+        // No role chosen. Not a problem, and not worth a log line on every
+        // sync a new player runs.
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "coaching session skipped: could not resolve the role");
+            return;
+        }
+    };
+
+    match coach::checkpoint(
+        state,
+        user,
+        player,
+        &scope,
+        coaching_session::MIN_NEW_MATCHES,
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "coaching session skipped after sync"),
+    }
 }
 
 /// The Dota identity is created during login, so a missing row means the link

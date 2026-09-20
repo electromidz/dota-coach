@@ -11,7 +11,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::domain::coaching_session::{
-    BenchmarkSnapshot, CoachingSession, HeroSnapshot, MetricSnapshot, SessionDraft,
+    BenchmarkSnapshot, CoachingSession, HeroSnapshot, MetricSnapshot, SessionDraft, SessionSummary,
 };
 use crate::domain::player_model::PlayerTrait;
 use crate::domain::role::CoachableRole;
@@ -123,6 +123,36 @@ pub async fn list(
     Ok(rows.into_iter().map(Row::into_domain).collect())
 }
 
+/// One page of a role's history as summaries, newest first.
+///
+/// Deliberately does not `SELECT` the five JSONB columns: a twenty-row list
+/// would otherwise carry twenty full snapshots, almost none of which the list
+/// view renders.
+pub async fn list_summaries(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    role: CoachableRole,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<SessionSummary>, sqlx::Error> {
+    let rows: Vec<SummaryRow> = sqlx::query_as(
+        "SELECT id, role, sequence, analyzed_match_count, newest_match_at,
+                performance, analysis_id IS NOT NULL AS has_analysis, created_at
+           FROM coaching_sessions
+          WHERE dota_player_id = $1 AND role = $2
+          ORDER BY sequence DESC
+          LIMIT $3 OFFSET $4",
+    )
+    .bind(dota_player_id)
+    .bind(role.slug())
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(SummaryRow::into_domain).collect())
+}
+
 pub async fn count(
     pool: &PgPool,
     dota_player_id: Uuid,
@@ -193,6 +223,45 @@ pub async fn attach_analysis(
     Ok(affected == 1)
 }
 
+#[derive(sqlx::FromRow)]
+struct SummaryRow {
+    id: Uuid,
+    role: String,
+    sequence: i32,
+    analyzed_match_count: i32,
+    newest_match_at: Option<chrono::DateTime<chrono::Utc>>,
+    performance: Option<f32>,
+    has_analysis: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl SummaryRow {
+    fn into_domain(self) -> SessionSummary {
+        let role = parse_role(&self.role);
+
+        SessionSummary {
+            id: self.id,
+            role,
+            role_label: role.label(),
+            sequence: self.sequence,
+            analyzed_match_count: self.analyzed_match_count,
+            newest_match_at: self.newest_match_at,
+            performance: self.performance,
+            has_analysis: self.has_analysis,
+            created_at: self.created_at,
+        }
+    }
+}
+
+/// A stored role slug back into the enum.
+///
+/// Unknown is impossible by construction — `CoachableRole::slug()` wrote it —
+/// and falling back to Carry would silently refile someone's Support history,
+/// so the fallback exists only to keep the signature total.
+fn parse_role(slug: &str) -> CoachableRole {
+    CoachableRole::parse(slug).unwrap_or(CoachableRole::Carry)
+}
+
 /// The stored row, before the role slug and JSONB columns are interpreted.
 #[derive(sqlx::FromRow)]
 struct Row {
@@ -215,11 +284,7 @@ struct Row {
 
 impl Row {
     fn into_domain(self) -> CoachingSession {
-        // A stored role that no longer parses would mean the enum changed
-        // under a historical row. Falling back to Carry would silently refile
-        // someone's Support history, so the raw slug decides and an unknown
-        // one is impossible by construction — `slug()` wrote it.
-        let role = CoachableRole::parse(&self.role).unwrap_or(CoachableRole::Carry);
+        let role = parse_role(&self.role);
 
         CoachingSession {
             id: self.id,
