@@ -15,6 +15,7 @@ import type {
   HeroIntelligenceResponse,
   HeroPoolResponse,
   MatchListResponse,
+  MatchComparisonResponse,
   MatchResponse,
   MeResponse,
   PlayerModelResponse,
@@ -243,6 +244,17 @@ export function getMatches(
 
 export function getMatch(id: string): Promise<MatchResponse> {
   return apiFetch<MatchResponse>(`/api/matches/${id}`);
+}
+
+/**
+ * This match against players in the same rank bracket on the same hero.
+ *
+ * Separate from `getMatch` on purpose: it reaches an external benchmark
+ * provider, so it is the slow half of the page and must not hold up the
+ * match's own figures.
+ */
+export function getMatchComparison(id: string): Promise<MatchComparisonResponse> {
+  return apiFetch<MatchComparisonResponse>(`/api/matches/${id}/comparison`);
 }
 
 export function logout(): Promise<unknown> {

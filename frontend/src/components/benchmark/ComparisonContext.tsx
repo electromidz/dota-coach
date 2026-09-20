@@ -10,10 +10,12 @@ import { cn } from "@/lib/utils";
  * What this comparison is, and what it is not.
  *
  * The product asks to benchmark against players of the same rank, role and
- * hero. Today's provider segments on hero alone — so the honest thing is to
- * show the gap rather than let the page imply a peer group it never had. A
- * percentile whose peer set is quietly wider than the one the heading suggests
- * is worse than no percentile: it looks like an answer.
+ * hero. The provider segments on hero and rank; role and patch it cannot do,
+ * and rank itself degrades to all-ranks for an unranked player or a hero it
+ * publishes no bracket data for. Showing the gap beats letting the page imply
+ * a peer group it never had: a percentile whose peer set is quietly wider than
+ * the heading suggests is worse than no percentile, because it looks like an
+ * answer. The server decides which caveats apply; this only renders them.
  *
  * The reasons are collapsed by default. A reader who trusts the number should
  * not have to wade through caveats to reach it; a reader who is about to act on

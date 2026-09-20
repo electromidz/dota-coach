@@ -1,10 +1,10 @@
 //! Benchmarking inside the coaching context.
 //!
 //! The product asks for a Top 20% comparison against the player's Rank, Role
-//! and Hero. Exactly one of those three is available from the current provider,
-//! and the tests here are mostly about saying so: a percentile whose peer group
-//! is quietly wider than the one implied is worse than no percentile, because
-//! it looks like an answer.
+//! and Hero. Two of those three are available from the current provider —
+//! hero, and rank via `/benchmarks?bracket=` — and the tests here are mostly
+//! about saying which: a percentile whose peer group is quietly wider than the
+//! one implied is worse than no percentile, because it looks like an answer.
 //!
 //! What *is* genuinely role-segmented is our own half of the comparison, and
 //! that is asserted too — a carry's figures must not carry a support's games
@@ -75,7 +75,7 @@ async fn the_comparison_states_which_dimensions_it_could_not_segment_on() {
     let body = app.get("/api/benchmark", Some(&session.token)).await.json();
     let context = &body["context"];
 
-    // All four are asked for; the provider delivers hero alone.
+    // All four are asked for; the provider delivers hero and rank.
     let requested: Vec<&str> = context["requested"]
         .as_array()
         .unwrap()
@@ -87,8 +87,14 @@ async fn the_comparison_states_which_dimensions_it_could_not_segment_on() {
         vec!["hero", "role", "rank_bracket", "patch"],
         "the spec's four dimensions are still what we ask for",
     );
-    assert_eq!(context["segmented_by"].as_array().unwrap().len(), 1);
-    assert_eq!(context["segmented_by"][0], "hero");
+
+    let segmented: Vec<&str> = context["segmented_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert_eq!(segmented, vec!["hero", "rank_bracket"]);
 
     // And each missing one is named, with a reason rather than a shrug.
     let unavailable: Vec<&str> = context["unavailable"]
@@ -97,7 +103,7 @@ async fn the_comparison_states_which_dimensions_it_could_not_segment_on() {
         .iter()
         .map(|u| u["segment"].as_str().unwrap())
         .collect();
-    assert_eq!(unavailable, vec!["role", "rank_bracket", "patch"]);
+    assert_eq!(unavailable, vec!["role", "patch"]);
 
     for entry in context["unavailable"].as_array().unwrap() {
         let reason = entry["reason"].as_str().unwrap();
@@ -108,8 +114,12 @@ async fn the_comparison_states_which_dimensions_it_could_not_segment_on() {
         );
     }
 
-    // The rank is known and still unusable, which is worth being explicit about.
+    // The provider reports rank_tier 55 — Legend — and the comparison says so
+    // rather than leaving the reader to infer which peers these are.
     assert!(!context["rank_tier"].is_null());
+    assert_eq!(context["bracket"]["used"], "legend");
+    assert_eq!(context["bracket"]["label"], "Legend");
+    assert_eq!(context["bracket"]["fell_back"], false);
 
     app.cleanup(&[]).await;
 }
@@ -126,13 +136,20 @@ async fn the_two_populations_are_never_claimed_to_match() {
     let body = app.get("/api/benchmark", Some(&session.token)).await.json();
     let population = &body["context"]["population"];
 
-    // The honest answer against a provider that does not publish what its
-    // distribution covers. Turning this true would need a source that says.
+    // Rank matches now, but the provider still does not publish which game
+    // modes or patch its distribution covers, so the two populations are not
+    // known to be the same one. Turning this true would need a source that says.
     assert_eq!(population["comparable"], false);
     assert!(population["peers"]
         .as_str()
         .unwrap()
         .contains("does not publish"));
+    // The bracket it *does* cover is named, so "peers" is not a black box.
+    assert!(
+        population["peers"].as_str().unwrap().contains("Legend"),
+        "{}",
+        population["peers"],
+    );
     assert!(!population["note"].as_str().unwrap().is_empty());
 
     app.cleanup(&[]).await;

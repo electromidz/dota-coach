@@ -15,6 +15,7 @@ pub mod eligibility;
 pub mod event;
 pub mod hero;
 pub mod r#match;
+pub mod match_comparison;
 pub mod metrics;
 pub mod player;
 pub mod player_model;

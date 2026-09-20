@@ -11,6 +11,7 @@ pub mod events;
 pub mod hero_meta;
 pub mod heroes;
 pub mod llm;
+pub mod match_comparison;
 pub mod metrics;
 pub mod payments;
 pub mod player_model;

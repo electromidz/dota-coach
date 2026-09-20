@@ -352,6 +352,22 @@ export interface UnavailableSegment {
 }
 
 /**
+ * Which bracket a comparison asked for, and which one it got.
+ *
+ * These differ more often than is comfortable: the provider publishes nothing
+ * for some hero/bracket pairs, and an unranked player has no bracket to ask
+ * for. Both fall back to all ranks, which is a different peer group — so the
+ * UI reads `fell_back` rather than assuming the request was honoured.
+ */
+export interface ResolvedBracket {
+  requested: RankBracket | null;
+  /** Null means the distribution covers every rank. */
+  used: RankBracket | null;
+  label: string;
+  fell_back: boolean;
+}
+
+/**
  * Which matches sit on each side of a comparison.
  *
  * `comparable` is false against the current provider and that is not a defect
@@ -371,6 +387,8 @@ export interface BenchmarkContextInfo {
   role: CoachableRole | null;
   role_label: string | null;
   rank_tier: number | null;
+  /** Which bracket the peer distribution actually covers. */
+  bracket: ResolvedBracket;
   /** The four dimensions the product asks to compare on. */
   requested: Segment[];
   /** The ones the peer distribution genuinely covers. */
@@ -385,6 +403,102 @@ export interface BenchmarkResponse {
   sample: number;
   results: BenchmarkResult[];
   segmented_by: Segment[];
+  context: BenchmarkContextInfo;
+  note: string | null;
+}
+
+/* --- Match comparison ----------------------------------------------------- */
+
+/**
+ * One figure and where it sits in the peer distribution.
+ *
+ * `percentile` is direction-corrected server-side, so 90 means "better than
+ * 90% of peers" for deaths exactly as it does for gold. Nothing on the client
+ * inverts anything.
+ */
+export interface Reading {
+  value: number;
+  percentile: number | null;
+}
+
+/** The same, for an average, which carries the sample it rests on. */
+export interface AverageReading {
+  value: number;
+  percentile: number | null;
+  sample: number;
+  /** Applies to this reading only — a single match is not an estimate. */
+  confidence: Confidence;
+}
+
+export interface MetricComparison {
+  metric: string;
+  label: string;
+  higher_is_better: boolean;
+  this_match: Reading | null;
+  hero_average: AverageReading | null;
+  peer_median: number | null;
+  top_20_value: number | null;
+}
+
+/** The one-number summary, and what it is a summary of. */
+export interface Standing {
+  /** Median of this match's per-metric percentiles. */
+  this_match: number | null;
+  hero_average: number | null;
+  metrics_counted: number;
+  peer_sample_size: number | null;
+}
+
+/** A metric worth naming, good or bad. */
+export interface Highlight {
+  metric: string;
+  label: string;
+  value: number;
+  percentile: number;
+  /** Already carries its numbers; the client never recomputes one. */
+  detail: string;
+}
+
+/** One past game on this hero, reduced to its standing. */
+export interface TrendPoint {
+  match_id: string;
+  dota_match_id: number;
+  started_at: string;
+  won: boolean;
+  standing: number;
+  is_current: boolean;
+}
+
+export interface Suggestion {
+  metric: string;
+  label: string;
+  percentile: number;
+  player_value: number;
+  peer_median: number;
+  /** Null for gold, XP and damage, which stay rates. */
+  whole_game_delta: number | null;
+  whole_game_unit: string | null;
+  text: string;
+}
+
+export interface MatchComparisonResponse {
+  hero_id: number;
+  hero_name: string;
+  bracket: ResolvedBracket;
+  /**
+   * False when this match's figures must not be compared at all — a Turbo
+   * game against a distribution drawn from ranked pubs, or a provider outage.
+   * The raw values are still present; the percentiles are not.
+   */
+  comparable: boolean;
+  standing: Standing;
+  metrics: MetricComparison[];
+  /** Newest first. */
+  trend: TrendPoint[];
+  delta_vs_previous: number | null;
+  pros: Highlight[];
+  cons: Highlight[];
+  suggestion: Suggestion | null;
   context: BenchmarkContextInfo;
   note: string | null;
 }

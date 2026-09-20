@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use sqlx::{AssertSqlSafe, PgPool};
 use uuid::Uuid;
 
+use crate::domain::benchmark::BenchmarkMetric;
 use crate::domain::eligibility::ModeCount;
 use crate::domain::metrics::{HeroStats, MatchMetrics, PlayerStats, RoleStats};
 use crate::domain::role::RoleTotals;
@@ -351,6 +354,90 @@ pub async fn stale_match_ids(
     .await
 }
 
+/// The eight benchmark-comparable metrics as SQL over `matches m` joined to
+/// `match_metrics mm`, in the per-minute units the provider's distribution
+/// uses.
+///
+/// One definition, two queries. A player's single game and their own average
+/// are placed on the *same* peer distribution, so a unit that drifted between
+/// the two would put them on different scales while both claimed to be
+/// percentiles of the same thing — and nothing in the output would look wrong.
+///
+/// Every expression is a compile-time literal, which is what makes the
+/// `AssertSqlSafe` wrappers below honest: nothing here is caller-supplied.
+const BENCHMARK_METRIC_SQL: [(&str, &str); 8] = [
+    ("gold_per_min", "m.gpm"),
+    ("xp_per_min", "m.xpm"),
+    ("last_hits_per_min", "mm.last_hits_per_min"),
+    // The metrics engine stores per-10; the provider speaks per-minute.
+    ("kills_per_min", "mm.kills_per_10 / 10.0"),
+    ("deaths_per_min", "mm.deaths_per_10 / 10.0"),
+    ("assists_per_min", "mm.assists_per_10 / 10.0"),
+    ("hero_damage_per_min", "mm.hero_damage_per_min"),
+    ("tower_damage", "m.tower_damage"),
+];
+
+/// The metrics as a per-match select list.
+fn metric_columns() -> String {
+    BENCHMARK_METRIC_SQL
+        .iter()
+        .map(|(alias, expr)| format!("({expr})::float8 AS {alias}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The same metrics, averaged.
+///
+/// `AVG(x / 10)` and `AVG(x) / 10` agree because averaging is linear, so the
+/// per-10 conversion can live inside the shared expression rather than being
+/// spelled a second way here.
+fn averaged_metric_columns() -> String {
+    BENCHMARK_METRIC_SQL
+        .iter()
+        .map(|(alias, expr)| format!("AVG({expr})::float8 AS {alias}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The eight figures, whether they came from one match or an average of many.
+///
+/// Shared rather than spelled twice: these are the values a percentile is
+/// taken of, and the single game and the player's own average are placed on
+/// the *same* peer distribution. Two copies of this list is two chances for a
+/// unit to drift, and nothing in the output would look wrong if it did.
+#[derive(Debug, Default, sqlx::FromRow)]
+pub struct BenchmarkFigures {
+    pub gold_per_min: Option<f64>,
+    pub xp_per_min: Option<f64>,
+    pub last_hits_per_min: Option<f64>,
+    pub kills_per_min: Option<f64>,
+    pub deaths_per_min: Option<f64>,
+    pub assists_per_min: Option<f64>,
+    pub hero_damage_per_min: Option<f64>,
+    pub tower_damage: Option<f64>,
+}
+
+impl BenchmarkFigures {
+    /// Map onto metric keys, dropping anything absent rather than sending a
+    /// zero — a match with no parsed replay has no hero-damage figure, which
+    /// is not the same as zero hero damage.
+    pub fn values(&self) -> HashMap<BenchmarkMetric, f32> {
+        [
+            (BenchmarkMetric::GoldPerMin, self.gold_per_min),
+            (BenchmarkMetric::XpPerMin, self.xp_per_min),
+            (BenchmarkMetric::LastHitsPerMin, self.last_hits_per_min),
+            (BenchmarkMetric::KillsPerMin, self.kills_per_min),
+            (BenchmarkMetric::DeathsPerMin, self.deaths_per_min),
+            (BenchmarkMetric::AssistsPerMin, self.assists_per_min),
+            (BenchmarkMetric::HeroDamagePerMin, self.hero_damage_per_min),
+            (BenchmarkMetric::TowerDamage, self.tower_damage),
+        ]
+        .into_iter()
+        .filter_map(|(metric, value)| value.map(|v| (metric, v as f32)))
+        .collect()
+    }
+}
+
 /// The player's averaged, benchmark-comparable figures for one hero, inside a
 /// scope.
 ///
@@ -364,14 +451,8 @@ pub async fn stale_match_ids(
 #[derive(Debug, sqlx::FromRow)]
 pub struct HeroAverages {
     pub sample: i64,
-    pub gold_per_min: Option<f64>,
-    pub xp_per_min: Option<f64>,
-    pub last_hits_per_min: Option<f64>,
-    pub kills_per_min: Option<f64>,
-    pub deaths_per_min: Option<f64>,
-    pub assists_per_min: Option<f64>,
-    pub hero_damage_per_min: Option<f64>,
-    pub tower_damage: Option<f64>,
+    #[sqlx(flatten)]
+    pub figures: BenchmarkFigures,
 }
 
 pub async fn hero_averages(
@@ -382,17 +463,7 @@ pub async fn hero_averages(
 ) -> Result<HeroAverages, sqlx::Error> {
     sqlx::query_as::<_, HeroAverages>(AssertSqlSafe(format!(
         "{cte}
-         SELECT
-             COUNT(*)                                  AS sample,
-             AVG(m.gpm)::float8                        AS gold_per_min,
-             AVG(m.xpm)::float8                        AS xp_per_min,
-             AVG(mm.last_hits_per_min)::float8         AS last_hits_per_min,
-             -- The metrics engine stores per-10; the provider speaks per-minute.
-             (AVG(mm.kills_per_10) / 10.0)::float8     AS kills_per_min,
-             (AVG(mm.deaths_per_10) / 10.0)::float8    AS deaths_per_min,
-             (AVG(mm.assists_per_10) / 10.0)::float8   AS assists_per_min,
-             AVG(mm.hero_damage_per_min)::float8       AS hero_damage_per_min,
-             AVG(m.tower_damage)::float8               AS tower_damage
+         SELECT COUNT(*) AS sample, {metrics}
            FROM matches m
            JOIN match_metrics mm ON mm.match_id = m.id
            {join}
@@ -400,9 +471,90 @@ pub async fn hero_averages(
             AND m.hero_id = $2",
         cte = scope.cte(),
         join = scope.join(),
+        metrics = averaged_metric_columns(),
     )))
     .bind(dota_player_id)
     .bind(hero_id)
     .fetch_one(pool)
+    .await
+}
+
+/// One match's benchmark-comparable figures, in the same units as
+/// [`HeroAverages`].
+///
+/// Carries enough identity to plot a trend — when it was played, whether it
+/// was won — without a second query back to `matches`.
+#[derive(Debug, sqlx::FromRow)]
+pub struct HeroMatchValues {
+    /// The internal match id, so a trend point can link to its own page.
+    pub match_id: Uuid,
+    /// Dota's own id, for anyone cross-referencing outside the app.
+    pub dota_match_id: i64,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub won: bool,
+    pub duration_seconds: i32,
+
+    #[sqlx(flatten)]
+    pub figures: BenchmarkFigures,
+}
+
+/// One match's figures, regardless of scope.
+///
+/// Deliberately unscoped: the match being viewed may be a Turbo game, or older
+/// than the analysis window, and a page about that match still has to show its
+/// numbers. Whether they may be *compared* is a separate decision, made above
+/// this layer.
+///
+/// `None` when the metrics have not been computed yet, which is a real state
+/// between a sync and the next metrics pass — not an error, and not zeroes.
+pub async fn match_figures(
+    pool: &PgPool,
+    match_id: Uuid,
+) -> Result<Option<BenchmarkFigures>, sqlx::Error> {
+    sqlx::query_as::<_, BenchmarkFigures>(AssertSqlSafe(format!(
+        "SELECT {metrics}
+           FROM matches m
+           JOIN match_metrics mm ON mm.match_id = m.id
+          WHERE m.id = $1",
+        metrics = metric_columns(),
+    )))
+    .bind(match_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Every match on one hero inside a scope, newest first.
+///
+/// The per-match counterpart to [`hero_averages`], and deliberately the same
+/// scope: a trend drawn over Turbo games and an average drawn over ranked ones
+/// would be two different players on one chart.
+pub async fn hero_match_values(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    hero_id: i32,
+    scope: &MatchScope,
+) -> Result<Vec<HeroMatchValues>, sqlx::Error> {
+    sqlx::query_as::<_, HeroMatchValues>(AssertSqlSafe(format!(
+        "{cte}
+         SELECT
+             m.id             AS match_id,
+             m.match_id       AS dota_match_id,
+             m.started_at,
+             m.won,
+             m.duration_seconds,
+             {metrics}
+           FROM matches m
+           JOIN match_metrics mm ON mm.match_id = m.id
+           {join}
+          WHERE m.dota_player_id = $1
+            AND m.hero_id = $2
+          ORDER BY m.started_at DESC",
+        cte = scope.cte(),
+        join = scope.join(),
+        metrics = metric_columns(),
+    )))
+    .bind(dota_player_id)
+    .bind(hero_id)
+    .fetch_all(pool)
     .await
 }
