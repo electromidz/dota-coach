@@ -7,8 +7,8 @@
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use uuid::Uuid;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 /// One row, as the admin panel's per-user timeline displays it.
 ///

@@ -139,7 +139,10 @@ pub async fn find_expiring(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().filter_map(ExpiringSubscriptionRow::into_domain).collect())
+    Ok(rows
+        .into_iter()
+        .filter_map(ExpiringSubscriptionRow::into_domain)
+        .collect())
 }
 
 /// A charge, reserved before the provider is called.

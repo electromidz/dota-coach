@@ -8,10 +8,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use dota_coach_backend::config::Config;
 use dota_coach_backend::services::auth::steam_openid::{self, SteamOpenId};
 use dota_coach_backend::services::benchmarks::opendota::OpenDotaBenchmarkProvider;
+use dota_coach_backend::services::billing;
 use dota_coach_backend::services::dota::opendota::OpenDotaProvider;
 use dota_coach_backend::services::hero_meta::opendota::OpenDotaHeroMetaProvider;
 use dota_coach_backend::services::llm::openai::OpenAiLlmProvider;
-use dota_coach_backend::services::billing;
 use dota_coach_backend::services::payments::nowpayments::NowPaymentsProvider;
 use dota_coach_backend::services::payments::{PaymentProvider, UnconfiguredPaymentProvider};
 use dota_coach_backend::state::{AppState, Providers};
@@ -208,7 +208,9 @@ fn spawn_expiry_sweep(db: sqlx::PgPool, interval_seconds: u64) {
             ticker.tick().await;
             match billing::sweep_expired(&db).await {
                 Ok(0) => {}
-                Ok(n) => tracing::info!(count = n, "trial/subscription sweep corrected expired rows"),
+                Ok(n) => {
+                    tracing::info!(count = n, "trial/subscription sweep corrected expired rows")
+                }
                 Err(e) => tracing::warn!(error = %e, "trial/subscription sweep failed"),
             }
         }

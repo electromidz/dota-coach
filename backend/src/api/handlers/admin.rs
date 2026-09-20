@@ -62,12 +62,19 @@ pub async fn stats(
 ) -> AppResult<Json<AdminStats>> {
     if let (Some(from), Some(to)) = (query.from, query.to) {
         if from > to {
-            return Err(AppError::BadRequest("`from` must not be after `to`.".into()));
+            return Err(AppError::BadRequest(
+                "`from` must not be after `to`.".into(),
+            ));
         }
     }
 
-    let stats = services::admin::stats(&state.db, &state.config.billing.currency, query.from, query.to)
-        .await?;
+    let stats = services::admin::stats(
+        &state.db,
+        &state.config.billing.currency,
+        query.from,
+        query.to,
+    )
+    .await?;
 
     Ok(Json(stats))
 }

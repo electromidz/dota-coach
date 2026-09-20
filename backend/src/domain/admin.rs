@@ -7,8 +7,8 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Serialize, Serializer};
-use uuid::Uuid;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 use super::event::EventRecord;
 

@@ -19,8 +19,8 @@ use uuid::Uuid;
 use crate::api::extract::{AppJson, AppPath, CurrentUser, EntitledUser};
 use crate::api::handlers::{benchmark, heroes, stats};
 use crate::domain::coaching::{AnalysisScope, CoachingAnalysis, Evidence};
-use crate::domain::event::EventType;
 use crate::domain::coaching_profile::CoachingProfile;
+use crate::domain::event::EventType;
 use crate::domain::player::DotaPlayer;
 use crate::domain::player_model::{PatternStatus, PlayerModel, RecurringPattern};
 use crate::domain::r#match::Match;
@@ -36,8 +36,8 @@ use crate::services::coaching::{
     evidence::{EvidenceInputs, EvidenceScope},
     CoachingError,
 };
-use crate::services::llm::LlmError;
 use crate::services::events;
+use crate::services::llm::LlmError;
 use crate::services::player_model::{self, patterns, ModelInputs};
 use crate::services::training::{self, SelectionInputs};
 use crate::state::AppState;

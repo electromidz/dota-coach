@@ -166,9 +166,12 @@ async fn complete_login(
     // way, so a hiccup here does not cost anyone a day of trial — it only
     // means the row is materialised on a later request instead of this one,
     // same as it was before this call existed.
-    if let Err(e) =
-        crate::services::billing::subscription_for(&state.db, &state.config.billing, logged_in.user.id)
-            .await
+    if let Err(e) = crate::services::billing::subscription_for(
+        &state.db,
+        &state.config.billing,
+        logged_in.user.id,
+    )
+    .await
     {
         tracing::warn!(
             error = %e,

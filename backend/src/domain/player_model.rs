@@ -195,7 +195,10 @@ impl TraitSource {
 }
 
 /// One thing the model believes about the player.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+///
+/// `PartialEq` because a coaching session snapshots these verbatim, and its
+/// tests compare a rebuilt draft against an expected one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct PlayerTrait {
     pub kind: TraitKind,
     pub source: TraitSource,

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Serializer};
-use uuid::Uuid;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 /// SteamID64 = 32-bit Dota account id + this constant.
 pub const STEAM_ID64_BASE: i64 = 76_561_197_960_265_728;

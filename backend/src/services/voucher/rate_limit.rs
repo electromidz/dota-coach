@@ -37,7 +37,10 @@ impl RateLimiter {
         let mut attempts = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
         let window = attempts.entry(user_id).or_default();
 
-        while window.front().is_some_and(|&t| now.duration_since(t) > WINDOW) {
+        while window
+            .front()
+            .is_some_and(|&t| now.duration_since(t) > WINDOW)
+        {
             window.pop_front();
         }
 
@@ -68,7 +71,10 @@ mod tests {
         for _ in 0..5 {
             assert!(limiter.check(user_id));
         }
-        assert!(!limiter.check(user_id), "the sixth attempt should be refused");
+        assert!(
+            !limiter.check(user_id),
+            "the sixth attempt should be refused"
+        );
     }
 
     #[test]
