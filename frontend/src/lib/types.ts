@@ -503,6 +503,194 @@ export interface MatchComparisonResponse {
   note: string | null;
 }
 
+/* --- Coaching sessions, progress and conversation --------------------------- */
+
+export type MetricUnit =
+  | "count"
+  | "per_minute"
+  | "per10"
+  | "percentile"
+  /** A bounded 0-1 share: win rate, kill participation, a pattern's rate. */
+  | "proportion"
+  /** An unbounded ratio such as KDA. */
+  | "ratio"
+  /** A 0-100 composite the backend defines, such as the role score. */
+  | "score";
+
+/** One measured number, in a form a later session can be compared against. */
+export interface MetricSnapshot {
+  key: string;
+  label: string;
+  value: number;
+  sample: number;
+  unit: MetricUnit;
+  higher_is_better: boolean;
+}
+
+export interface BenchmarkSnapshot {
+  metric: string;
+  label: string;
+  player_value: number;
+  peer_median: number | null;
+  percentile: number | null;
+  higher_is_better: boolean;
+}
+
+export interface HeroSnapshot {
+  hero_id: number;
+  hero_name: string;
+  matches: number;
+  wins: number;
+  win_rate: number;
+  avg_kda: number | null;
+}
+
+/** A session summary, as the history list serves it. */
+export interface SessionSummary {
+  id: string;
+  role: CoachableRole;
+  role_label: string;
+  sequence: number;
+  analyzed_match_count: number;
+  newest_match_at: string | null;
+  performance: number | null;
+  has_analysis: boolean;
+  created_at: string;
+}
+
+/** One immutable snapshot, served verbatim. */
+export interface CoachingSession {
+  id: string;
+  role: CoachableRole;
+  role_label: string;
+  sequence: number;
+  analyzed_match_count: number;
+  analyzed_match_ids: string[];
+  newest_match_at: string | null;
+  performance: number | null;
+  metrics: MetricSnapshot[];
+  strengths: PlayerTrait[];
+  weaknesses: PlayerTrait[];
+  benchmarks: BenchmarkSnapshot[];
+  heroes: HeroSnapshot[];
+  training_focus_id: string | null;
+  analysis_id: string | null;
+  created_at: string;
+}
+
+export interface SessionHistoryResponse {
+  sessions: SessionSummary[];
+  page: number;
+  limit: number;
+  total: number;
+  total_pages: number;
+  role: CoachableRole;
+  role_label: string;
+}
+
+export interface SessionResponse {
+  session: CoachingSession;
+}
+
+/**
+ * What happened to one metric between two sessions.
+ *
+ * Every one of these is the backend's judgement. The client renders it and
+ * never recomputes it — `improved` is a decision, not a subtraction.
+ */
+export type ProgressStatus =
+  | "improved"
+  | "declined"
+  | "stable"
+  | "new_issue"
+  | "resolved_issue"
+  | "insufficient_data";
+
+export interface MetricProgress {
+  key: string;
+  label: string;
+  unit: MetricUnit;
+  higher_is_better: boolean;
+  previous: number | null;
+  current: number | null;
+  delta: number | null;
+  /** Signed so positive always means better, including for deaths. */
+  direction_delta: number | null;
+  percent_change: number | null;
+  previous_sample: number | null;
+  current_sample: number | null;
+  status: ProgressStatus;
+  status_label: string;
+  note: string | null;
+}
+
+export interface SessionProgress {
+  role: CoachableRole;
+  role_label: string;
+  previous_session_id: string;
+  previous_sequence: number;
+  previous_at: string;
+  current_session_id: string;
+  current_sequence: number;
+  current_at: string;
+  performance: MetricProgress | null;
+  metrics: MetricProgress[];
+  headline: string | null;
+}
+
+export interface SeriesPoint {
+  session_id: string;
+  sequence: number;
+  at: string;
+  value: number;
+}
+
+export interface MetricSeries {
+  key: string;
+  label: string;
+  unit: MetricUnit;
+  higher_is_better: boolean;
+  /** Oldest first. */
+  points: SeriesPoint[];
+}
+
+export interface ProgressResponse {
+  role: CoachableRole;
+  role_label: string;
+  /** Null until there are two sessions to compare. */
+  comparison: SessionProgress | null;
+  series: MetricSeries[];
+  sessions: number;
+  note: string | null;
+}
+
+export type ConversationSpeaker = "player" | "coach";
+
+export interface ConversationMessage {
+  id: string;
+  speaker: ConversationSpeaker;
+  content: string;
+  /** Evidence ids the reply's figures came from. Empty for a player turn. */
+  evidence: string[];
+  model: string | null;
+  created_at: string;
+}
+
+export interface ConversationResponse {
+  role: CoachableRole;
+  role_label: string;
+  /** Oldest first. */
+  messages: ConversationMessage[];
+  llm_available: boolean;
+  note: string | null;
+}
+
+export interface AskResponse {
+  role: CoachableRole;
+  role_label: string;
+  message: ConversationMessage;
+}
+
 /* --- Hero Intelligence ---------------------------------------------------- */
 
 export type RankBracket =

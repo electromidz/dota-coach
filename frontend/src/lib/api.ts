@@ -15,8 +15,13 @@ import type {
   HeroIntelligenceResponse,
   HeroPoolResponse,
   MatchListResponse,
+  AskResponse,
+  ConversationResponse,
   MatchComparisonResponse,
   MatchResponse,
+  ProgressResponse,
+  SessionHistoryResponse,
+  SessionResponse,
   MeResponse,
   PlayerModelResponse,
   RedeemResponse,
@@ -255,6 +260,54 @@ export function getMatch(id: string): Promise<MatchResponse> {
  */
 export function getMatchComparison(id: string): Promise<MatchComparisonResponse> {
   return apiFetch<MatchComparisonResponse>(`/api/matches/${id}/comparison`);
+}
+
+/** One page of coaching history for a role. Newest first. */
+export function getCoachingSessions(
+  page = 1,
+  limit = 20,
+  role?: string,
+): Promise<SessionHistoryResponse> {
+  const query = `page=${page}&limit=${limit}${role ? `&role=${role}` : ""}`;
+  return apiFetch<SessionHistoryResponse>(`/api/coach/sessions?${query}`);
+}
+
+/** One stored snapshot, exactly as it was recorded. */
+export function getCoachingSession(id: string): Promise<SessionResponse> {
+  return apiFetch<SessionResponse>(`/api/coach/sessions/${id}`);
+}
+
+/**
+ * What changed since the previous session, plus the trend behind it.
+ *
+ * Every status is the backend's judgement. Nothing here is recomputed on the
+ * client — see `lib/stats.ts` for why that rule exists.
+ */
+export function getCoachingProgress(role?: string): Promise<ProgressResponse> {
+  return apiFetch<ProgressResponse>(
+    `/api/coach/progress${role ? `?role=${role}` : ""}`,
+  );
+}
+
+/** The coaching conversation for a role. Never calls a model. */
+export function getConversation(role?: string): Promise<ConversationResponse> {
+  return apiFetch<ConversationResponse>(
+    `/api/coach/conversation${role ? `?role=${role}` : ""}`,
+  );
+}
+
+/**
+ * Ask the coach a question.
+ *
+ * Spends a model call, so it is rate limited and entitlement-gated server
+ * side. A reply quoting a figure the player's data does not contain is
+ * discarded by the backend and answers 502 rather than being shown.
+ */
+export function askCoach(question: string): Promise<AskResponse> {
+  return apiFetch<AskResponse>("/api/coach/conversation", {
+    method: "POST",
+    body: JSON.stringify({ question }),
+  });
 }
 
 export function logout(): Promise<unknown> {

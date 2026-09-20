@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { Analysis } from "@/components/coach/Analysis";
+import { CoachChat } from "@/components/coach/CoachChat";
 import { CoachingFocusHeader } from "@/components/coach/CoachingFocusHeader";
+import { ProgressSummary } from "@/components/coach/ProgressSummary";
 import { PlayerModelPanel } from "@/components/coach/PlayerModelPanel";
 import { RoleBenchmark } from "@/components/coach/RoleBenchmark";
 import { RoleSelection } from "@/components/coach/RoleSelection";
@@ -129,6 +131,11 @@ export function Coach() {
       {/* Role-scoped: the focus, the benchmark, the evidence and the analysis
           below are all computed from this role's eligible matches and nothing
           else. */}
+      {/* Where the player has got to since last time. Above the current
+          figures deliberately: a returning player's first question is whether
+          anything moved, not what the numbers are. */}
+      <ProgressSummary />
+
       <TrainingFocusCard />
 
       <RoleBenchmark roleLabel={profile.selected_role_label} />
@@ -139,6 +146,11 @@ export function Coach() {
         generateLabel={`Analyse my ${profile.selected_role_label} games`}
         emptyHint="No analysis yet. The measured evidence below is ready; ask the coach to interpret it."
       />
+
+      {/* Last, because it is the only part that needs the rest read first:
+          a question about your farming is easier to ask once the evidence
+          above has said what your farming is. */}
+      <CoachChat roleLabel={profile.selected_role_label} />
 
       {/* The long-term model is deliberately *not* role-scoped: role affinity
           and "which roles do you actually play" are questions about the player
