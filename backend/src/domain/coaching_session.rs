@@ -29,6 +29,10 @@ use crate::domain::role::CoachableRole;
 /// Carried so a comparison can refuse to subtract a percentile from a per-10
 /// rate. Two metrics with different units are not two readings of the same
 /// thing, however similar their keys look.
+/// The unit also decides **how** two readings are compared, which is the other
+/// half of its job: a bounded scale moves in points, an unbounded one moves in
+/// percentages. Going from the 2nd to the 4th percentile is two points and a
+/// doubling; only one of those descriptions is useful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricUnit {
@@ -40,10 +44,30 @@ pub enum MetricUnit {
     Per10,
     /// 0-100, already direction-corrected.
     Percentile,
-    /// A ratio, typically 0-1.
+    /// A 0-1 proportion — a win rate, a kill-participation share, the rate at
+    /// which a pattern fires. Distinct from [`MetricUnit::Ratio`] because these
+    /// are bounded and compare in percentage *points*: a win rate moving .50 →
+    /// .55 is five points, not "ten percent better".
+    Proportion,
+    /// An unbounded ratio, such as KDA. Compares relatively — 3.0 → 3.3 is a
+    /// tenth better, and there is no ceiling for it to be a fraction of.
     Ratio,
     /// A 0-100 composite the backend defines, such as the role score.
     Score,
+}
+
+impl MetricUnit {
+    /// Whether a change in this unit is read as points rather than a percentage.
+    ///
+    /// True for the bounded scales, where a relative change is meaningless near
+    /// either end. False for rates and counts, where "ten percent more gold per
+    /// minute" is exactly what a player means.
+    pub fn compares_absolutely(self) -> bool {
+        matches!(
+            self,
+            MetricUnit::Percentile | MetricUnit::Proportion | MetricUnit::Score
+        )
+    }
 }
 
 /// One measured number, in a form a later session can be compared against.

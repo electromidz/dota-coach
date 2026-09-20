@@ -104,7 +104,7 @@ fn metrics(inputs: &SessionInputs<'_>) -> Vec<MetricSnapshot> {
             "Win rate",
             role.win_rate,
             role.matches,
-            MetricUnit::Ratio,
+            MetricUnit::Proportion,
             true,
         ));
     }
@@ -170,7 +170,7 @@ fn metrics(inputs: &SessionInputs<'_>) -> Vec<MetricSnapshot> {
             "Kill participation",
             value,
             inputs.stats.kill_participation_sample,
-            MetricUnit::Ratio,
+            MetricUnit::Proportion,
             true,
         ));
     }
@@ -200,7 +200,7 @@ fn metrics(inputs: &SessionInputs<'_>) -> Vec<MetricSnapshot> {
             &pattern.label,
             pattern.rate,
             pattern.measured,
-            MetricUnit::Ratio,
+            MetricUnit::Proportion,
             false,
         ));
     }

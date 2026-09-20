@@ -57,6 +57,7 @@ pub fn build(state: AppState, config: &Config) -> Router {
         .route("/coach/role", post(coach::select_role))
         .route("/coach/sessions", get(sessions::list))
         .route("/coach/sessions/{id}", get(sessions::get))
+        .route("/coach/progress", get(sessions::progress))
         .route("/coach/player-model", get(coach::player_model))
         .route("/coach/training-focus", get(coach::training_focus))
         // Billing. Reading is always allowed — an expired account still needs

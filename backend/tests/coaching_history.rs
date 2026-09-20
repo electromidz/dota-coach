@@ -429,3 +429,178 @@ async fn public_all_pick_counts_towards_a_session() {
 
     app.cleanup(&[]).await;
 }
+
+#[tokio::test]
+async fn progress_says_so_rather_than_comparing_a_first_session_with_nothing() {
+    let Some(db) = support::pool().await else {
+        return skip("progress_says_so_rather_than_comparing_a_first_session_with_nothing");
+    };
+
+    let (app, session) = seed_app(db, mixed_history(20, 0, 0), 100).await;
+    app.choose_role(&session, "carry").await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app
+        .get("/api/coach/progress", Some(&session.token))
+        .await
+        .json();
+
+    assert_eq!(body["sessions"], 1);
+    // A first session has nothing to have improved from. That is a real state,
+    // not an error, and not an excuse to invent a baseline.
+    assert!(body["comparison"].is_null());
+    assert!(body["note"]
+        .as_str()
+        .unwrap()
+        .contains("first coaching session"));
+
+    // The trend still exists — one point is a start.
+    let series = body["series"].as_array().unwrap();
+    assert!(!series.is_empty());
+    assert_eq!(series[0]["points"].as_array().unwrap().len(), 1);
+
+    app.cleanup(&[]).await;
+}
+
+#[tokio::test]
+async fn progress_with_no_sessions_at_all_is_empty_rather_than_an_error() {
+    let Some(db) = support::pool().await else {
+        return skip("progress_with_no_sessions_at_all_is_empty_rather_than_an_error");
+    };
+
+    let (app, session) = seed_app(db, mixed_history(20, 0, 0), 100).await;
+    app.choose_role(&session, "carry").await;
+    // No sync since choosing, so no session was ever recorded.
+
+    let response = app.get("/api/coach/progress", Some(&session.token)).await;
+    assert_eq!(response.status, axum::http::StatusCode::OK);
+
+    let body = response.json();
+    assert_eq!(body["sessions"], 0);
+    assert!(body["comparison"].is_null());
+    assert_eq!(body["series"].as_array().unwrap().len(), 0);
+    assert!(body["note"]
+        .as_str()
+        .unwrap()
+        .contains("No coaching sessions"));
+
+    app.cleanup(&[]).await;
+}
+
+#[tokio::test]
+async fn progress_compares_two_sessions_and_keeps_the_older_one_intact() {
+    let Some(db) = support::pool().await else {
+        return skip("progress_compares_two_sessions_and_keeps_the_older_one_intact");
+    };
+
+    let dota = MockDota::with_matches(mixed_history(20, 0, 0));
+    let mut config = test_config();
+    config.dota.sync_match_limit = 500;
+    config.roles.analysis_match_limit = 100;
+
+    let app = app_with(
+        db,
+        dota.clone(),
+        StubVerifier::rejecting(),
+        StubBenchmarks::serving(),
+        config,
+    );
+    let steam_id = unique_steam_id();
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+    app.choose_role(&session, "carry").await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    // Twelve more Carry games — past the ten-match threshold.
+    let mut grown = mixed_history(20, 0, 0);
+    let mut extra = batch(9_000, 12, RANKED_ALL_PICK, Lane::Carry, 11);
+    for m in extra.iter_mut() {
+        m.hero_id = 35;
+    }
+    grown.extend(extra);
+    dota.set_matches(grown);
+
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app
+        .get("/api/coach/progress", Some(&session.token))
+        .await
+        .json();
+
+    assert_eq!(body["sessions"], 2, "a second session was recorded");
+
+    let comparison = &body["comparison"];
+    assert!(!comparison.is_null());
+    assert_eq!(comparison["previous_sequence"], 1);
+    assert_eq!(comparison["current_sequence"], 2);
+
+    // Every metric carries a decided status — the backend's judgement, not two
+    // numbers for a model to subtract.
+    let metrics = comparison["metrics"].as_array().unwrap();
+    assert!(!metrics.is_empty());
+    for metric in metrics {
+        let status = metric["status"].as_str().unwrap();
+        assert!(
+            [
+                "improved",
+                "declined",
+                "stable",
+                "new_issue",
+                "resolved_issue",
+                "insufficient_data",
+            ]
+            .contains(&status),
+            "unexpected status {status}",
+        );
+        assert!(!metric["status_label"].as_str().unwrap().is_empty());
+    }
+
+    // The first session still reads as it was written.
+    let history = app
+        .get("/api/coach/sessions", Some(&session.token))
+        .await
+        .json();
+    let first_id = history["sessions"][1]["id"].as_str().unwrap().to_string();
+    let first = app
+        .get(
+            &format!("/api/coach/sessions/{first_id}"),
+            Some(&session.token),
+        )
+        .await
+        .json();
+    assert_eq!(first["session"]["sequence"], 1);
+    assert_eq!(first["session"]["analyzed_match_count"], 20);
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn progress_is_scoped_to_the_role_and_the_player() {
+    let Some(db) = support::pool().await else {
+        return skip("progress_is_scoped_to_the_role_and_the_player");
+    };
+
+    let bob_steam = unique_steam_id();
+    let (app, alice) = seed_app(db, mixed_history(20, 15, 0), 100).await;
+    app.choose_role(&alice, "carry").await;
+    app.post("/api/players/me/sync", Some(&alice.token)).await;
+
+    // A role Alice has games in but no sessions for.
+    let body = app
+        .get("/api/coach/progress?role=soft_support", Some(&alice.token))
+        .await
+        .json();
+    assert_eq!(body["role"], "soft_support");
+    assert_eq!(body["sessions"], 0);
+
+    // Bob sees none of Alice's history.
+    let bob = app.login_as(bob_steam).await;
+    let body = app
+        .get("/api/coach/progress?role=carry", Some(&bob.token))
+        .await
+        .json();
+    assert_eq!(body["sessions"], 0);
+    assert!(body["comparison"].is_null());
+
+    app.cleanup(&[bob_steam]).await;
+}

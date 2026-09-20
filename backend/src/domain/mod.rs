@@ -20,6 +20,7 @@ pub mod match_comparison;
 pub mod metrics;
 pub mod player;
 pub mod player_model;
+pub mod progress;
 pub mod role;
 pub mod scope;
 pub mod session;

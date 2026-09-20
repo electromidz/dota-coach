@@ -20,10 +20,12 @@ use crate::api::extract::{AppPath, AppQuery, CurrentUser};
 use crate::api::handlers::coach;
 use crate::domain::coaching_session::{CoachingSession, SessionSummary};
 use crate::domain::player::DotaPlayer;
+use crate::domain::progress::{MetricSeries, SessionProgress};
 use crate::domain::role::CoachableRole;
 use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
+use crate::services::progress as progress_engine;
 use crate::state::AppState;
 use utoipa::ToSchema;
 
@@ -146,6 +148,107 @@ pub async fn get(
         .ok_or_else(|| AppError::NotFound("Coaching session not found.".into()))?;
 
     Ok(Json(SessionResponse { session }))
+}
+
+/// How many sessions a progress trend reads.
+///
+/// Ten is a chart a player can take in, and far enough back to show a run
+/// rather than a blip. Older sessions stay readable through the history API.
+const SERIES_SESSIONS: i64 = 10;
+
+#[derive(Deserialize)]
+pub struct ProgressQuery {
+    /// Role slug. Omit to read the role currently being coached.
+    pub role: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ProgressResponse {
+    pub role: CoachableRole,
+    pub role_label: &'static str,
+    /// The newest session against the one before it. `null` until a player has
+    /// two — a first session has nothing to have improved from, which is a
+    /// real state and not an error.
+    pub comparison: Option<SessionProgress>,
+    /// Each metric's readings across the recent sessions, oldest first. The
+    /// shape behind "54 → 57 → 61".
+    pub series: Vec<MetricSeries>,
+    /// How many sessions the series was drawn from.
+    pub sessions: usize,
+    /// Set when there is nothing to compare yet, with the reason.
+    pub note: Option<String>,
+}
+
+/// `GET /api/coach/progress`
+#[utoipa::path(
+    get, path = "/api/coach/progress", tag = "coaching",
+    summary = "What changed since the last coaching session",
+    description = "Every judgement here is computed in Rust — `improved`, `declined`, \
+`stable`, `new_issue`, `resolved_issue` and `insufficient_data` are decisions the backend \
+makes and the model is told, never arithmetic the model is asked to do.\n\n\
+Two readings are compared only when they share a key, a unit and a direction; a metric \
+measured differently in the earlier session is reported as uncomparable rather than \
+subtracted. A change has to clear a documented band before it is called a change: five \
+points on the bounded scales (percentile, score, proportion) and five percent on the rest.\n\n\
+A player with one session gets `comparison: null` and a note. That is a first session, not \
+a failure.",
+    security(("session" = [])),
+    params(
+        ("role" = Option<String>, Query,
+            description = "Role slug. Omit to read the role currently being coached.",
+            example = "carry"),
+    ),
+    responses(
+        (status = 200, description = "The comparison and the trend behind it", body = ProgressResponse),
+        (status = 400, description = "Unknown role slug", body = crate::error::ErrorBody),
+        (status = 409, description = "No Dota account linked, or no role chosen yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
+pub async fn progress(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    AppQuery(query): AppQuery<ProgressQuery>,
+) -> AppResult<Json<ProgressResponse>> {
+    let player = load_linked_player(&state, &user).await?;
+    let role = resolve_role(&state, &player, query.role.as_deref()).await?;
+
+    // Newest first, which is what `series` expects and what the comparison
+    // below indexes into.
+    let sessions =
+        repositories::coaching_session::list(&state.db, player.id, role, SERIES_SESSIONS, 0)
+            .await?;
+
+    // Adjacent by sequence, not by position in this page: the pair being
+    // compared has to be two consecutive sessions.
+    let comparison = match sessions.as_slice() {
+        [current, previous, ..] => Some(progress_engine::compare(previous, current)),
+        _ => None,
+    };
+
+    let note = match sessions.len() {
+        0 => Some(
+            "No coaching sessions yet. One is recorded once you have played enough new \
+             matches in this role."
+                .to_string(),
+        ),
+        1 => Some(
+            "This is your first coaching session, so there is nothing to compare it with \
+             yet. The next one will show what changed."
+                .to_string(),
+        ),
+        _ => None,
+    };
+
+    Ok(Json(ProgressResponse {
+        role,
+        role_label: role.label(),
+        comparison,
+        series: progress_engine::all_series(&sessions),
+        sessions: sessions.len(),
+        note,
+    }))
 }
 
 /// Which role's history to read.
