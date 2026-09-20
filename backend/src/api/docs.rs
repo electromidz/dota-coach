@@ -83,6 +83,8 @@ stable and worth branching on; `message` is safe to show a user.",
         crate::api::handlers::sessions::list,
         crate::api::handlers::sessions::get,
         crate::api::handlers::sessions::progress,
+        crate::api::handlers::conversation::get,
+        crate::api::handlers::conversation::ask,
         crate::api::handlers::coach::match_analysis,
         crate::api::handlers::coach::analyze_match,
         crate::api::handlers::billing::overview,
@@ -174,10 +176,11 @@ mod tests {
         let spec = spec();
         let paths = spec["paths"].as_object().expect("paths object");
 
-        // 47 handlers; `health` is mounted at two URLs but documented once,
+        // 49 handlers; `health` is mounted at two URLs but documented once,
         // and `/admin/vouchers` carries two handlers (GET and POST) under
-        // one path — 46 unique path strings.
-        assert_eq!(paths.len(), 46, "every routed handler is documented");
+        // one path — and `/coach/conversation` carries a GET and a POST — 47
+        // unique path strings.
+        assert_eq!(paths.len(), 47, "every routed handler is documented");
     }
 
     #[test]
@@ -315,7 +318,7 @@ mod tests {
             }
         }
 
-        assert_eq!(seen, 37, "every documented parameter was checked");
+        assert_eq!(seen, 38, "every documented parameter was checked");
     }
 
     /// A path parameter the server requires must be required in the document,

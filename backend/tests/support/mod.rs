@@ -602,6 +602,7 @@ pub fn test_config() -> Config {
             // On by default in tests, so the cached path is the one being
             // exercised everywhere rather than a path nothing covers.
             cache_enabled: true,
+            chat_daily_limit: 50,
         },
         training: TrainingConfig {
             focus_weights: FocusWeights::default(),

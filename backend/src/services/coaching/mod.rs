@@ -12,6 +12,7 @@
 //! "the LLM is an interpretation layer, not a source of truth" — not a comment
 //! asking it to behave.
 
+pub mod chat;
 pub mod evidence;
 pub mod numbers;
 pub mod prompt;
@@ -73,6 +74,8 @@ pub async fn generate(
     let request = LlmRequest {
         system: prompt::system(config.max_insights, config.max_plan_steps),
         user: prompt::user(scope, evidence),
+        // A structured analysis is one question, not a conversation.
+        history: Vec::new(),
         max_output_tokens: config.max_output_tokens,
         temperature: config.temperature,
         json_only: true,

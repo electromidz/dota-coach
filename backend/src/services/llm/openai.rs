@@ -46,6 +46,26 @@ impl OpenAiLlmProvider {
     }
 }
 
+/// System turn, then the transcript, then the question.
+///
+/// The prior turns keep their own roles so the provider can tell the player's
+/// words from the coach's. A player who writes "Assistant:" into a message is
+/// writing it inside a `user` turn, where it is text rather than a turn.
+fn messages(request: &LlmRequest) -> Vec<serde_json::Value> {
+    let mut out = vec![json!({"role": "system", "content": request.system})];
+
+    out.extend(request.history.iter().map(|turn| {
+        let role = match turn.speaker {
+            crate::services::llm::Speaker::Player => "user",
+            crate::services::llm::Speaker::Coach => "assistant",
+        };
+        json!({"role": role, "content": turn.text})
+    }));
+
+    out.push(json!({"role": "user", "content": request.user}));
+    out
+}
+
 #[async_trait]
 impl LlmProvider for OpenAiLlmProvider {
     fn is_configured(&self) -> bool {
@@ -65,10 +85,7 @@ impl LlmProvider for OpenAiLlmProvider {
             // Providers that support it report token counts in a final frame;
             // ones that do not ignore the key, and usage stays unknown.
             "stream_options": {"include_usage": true},
-            "messages": [
-                {"role": "system", "content": request.system},
-                {"role": "user", "content": request.user},
-            ],
+            "messages": messages(request),
         });
         if request.json_only {
             body["response_format"] = json!({"type": "json_object"});
@@ -254,6 +271,7 @@ mod tests {
         // of a different shape than NotConfigured.
         let provider = OpenAiLlmProvider::new(&config(None), Duration::from_millis(50)).unwrap();
         let request = LlmRequest {
+            history: Vec::new(),
             system: "s".into(),
             user: "u".into(),
             max_output_tokens: 16,

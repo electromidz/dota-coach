@@ -266,7 +266,10 @@ pub(crate) struct CoachingScope {
 /// only honest defaults are both wrong: every role mixes evidence the product
 /// exists to keep apart, and the recommended role silently overrides a decision
 /// that belongs to the player. So this is a precondition, not a fallback.
-async fn require_scope(state: &AppState, player: &DotaPlayer) -> AppResult<CoachingScope> {
+pub(crate) async fn require_scope(
+    state: &AppState,
+    player: &DotaPlayer,
+) -> AppResult<CoachingScope> {
     let window = state.config.roles.analysis_match_limit;
 
     let Some(profile) = repositories::coaching_profile::find(&state.db, player.id).await? else {
@@ -913,7 +916,7 @@ async fn enforce_limits(state: &AppState, player: &DotaPlayer) -> AppResult<()> 
 /// `scope.matches`, so a Support match cannot reach a Carry analysis by any
 /// path — not because the prompt asks the model to ignore it, but because it
 /// was never fetched.
-async fn role_evidence(
+pub(crate) async fn role_evidence(
     state: &AppState,
     user: &User,
     player: &DotaPlayer,

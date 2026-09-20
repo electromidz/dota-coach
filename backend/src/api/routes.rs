@@ -9,8 +9,8 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::api::handlers::{
-    admin, auth, benchmark, billing, coach, events, health, heroes, matches, players, sessions,
-    stats, subscribe,
+    admin, auth, benchmark, billing, coach, conversation, events, health, heroes, matches, players,
+    sessions, stats, subscribe,
 };
 use crate::api::{docs, observability};
 use crate::config::Config;
@@ -58,6 +58,7 @@ pub fn build(state: AppState, config: &Config) -> Router {
         .route("/coach/sessions", get(sessions::list))
         .route("/coach/sessions/{id}", get(sessions::get))
         .route("/coach/progress", get(sessions::progress))
+        .route("/coach/conversation", get(conversation::get))
         .route("/coach/player-model", get(coach::player_model))
         .route("/coach/training-focus", get(coach::training_focus))
         // Billing. Reading is always allowed — an expired account still needs
@@ -103,6 +104,7 @@ pub fn build(state: AppState, config: &Config) -> Router {
     // the right to hold a connection open for three minutes.
     let generation = Router::new()
         .route("/coach/analyze", post(coach::analyze))
+        .route("/coach/conversation", post(conversation::ask))
         .route("/matches/{id}/analyze", post(coach::analyze_match));
 
     // Above the LLM client's own timeout, never below it: the inner deadline

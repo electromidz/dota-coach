@@ -159,6 +159,12 @@ pub struct CoachConfig {
     /// Whether the coaching context is cached at all. Off switches the
     /// service to a no-op implementation with no second code path.
     pub cache_enabled: bool,
+    /// Questions a player may ask the coach in a rolling 24 hours.
+    ///
+    /// Higher than the analysis limit and with no cooldown: a conversation is
+    /// several short exchanges, and a thirty-second gap between messages
+    /// would make it unusable. 0 disables the limit.
+    pub chat_daily_limit: i64,
 }
 
 impl CoachConfig {
@@ -185,6 +191,7 @@ impl CoachConfig {
             // go stale for a day.
             cache_ttl_minutes: parsed::<i64>("COACH_CACHE_TTL_MINUTES", 60)?.clamp(1, 1_440),
             cache_enabled: parsed::<bool>("COACH_CACHE_ENABLED", true)?,
+            chat_daily_limit: parsed::<i64>("COACH_CHAT_DAILY_LIMIT", 50)?.max(0),
         })
     }
 }

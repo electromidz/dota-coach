@@ -3,6 +3,7 @@ pub mod auth;
 pub mod benchmark;
 pub mod billing;
 pub mod coach;
+pub mod conversation;
 pub mod events;
 pub mod health;
 pub mod heroes;
