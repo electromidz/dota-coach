@@ -446,14 +446,54 @@ export interface BracketOption {
   is_player_rank: boolean;
 }
 
+/**
+ * One metric against a bracket the player is *aiming at* rather than in.
+ *
+ * Deliberately slim: the player's own value, sample and confidence live on the
+ * matching `BenchmarkResult` and do not change with the target. Two copies
+ * would be two things to keep true.
+ */
+export interface TargetMetric {
+  metric: string;
+  label: string;
+  higher_is_better: boolean;
+  peer_median: number | null;
+  top_20_value: number | null;
+  /** Where the player's figure would place in *this* bracket. */
+  percentile: number | null;
+  /** Signed so positive always means "work to do". Never derived here. */
+  gap_to_median: number | null;
+  /** Already meets or beats that median, direction honoured. */
+  cleared: boolean;
+}
+
+/**
+ * The bracket being aimed at, beside the one the player is in.
+ *
+ * `null` on the response when there is nothing to aim at (Immortal, unranked),
+ * when the reader opted out, or when the provider publishes nothing for that
+ * bracket — in which case it is absent rather than quietly filled with
+ * all-ranks numbers under a bracket's name.
+ */
+export interface TargetComparison {
+  bracket: ResolvedBracket;
+  label: string;
+  metrics: TargetMetric[];
+  /** Counted by the backend, never recomputed here. */
+  metrics_cleared: number;
+  metrics_compared: number;
+}
+
 export interface BenchmarkResponse {
   hero_id: number;
   hero_name: string;
   sample: number;
+  /** Always the player's own bracket. A target never displaces these. */
   results: BenchmarkResult[];
   segmented_by: Segment[];
   context: BenchmarkContextInfo;
-  /** Every bracket that can be compared against, in rank order. */
+  target: TargetComparison | null;
+  /** Every bracket that can be aimed at, in rank order. */
   brackets: BracketOption[];
   note: string | null;
 }

@@ -105,7 +105,9 @@ export async function apiFetch<T>(
   }
 
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as ApiErrorBody | null;
+    const body = (await response
+      .json()
+      .catch(() => null)) as ApiErrorBody | null;
     throw new ApiError(
       body?.error?.code ?? "UNKNOWN_ERROR",
       body?.error?.message ?? `Request failed with status ${response.status}.`,
@@ -140,21 +142,24 @@ export function getStats(): Promise<StatsResponse> {
  * being coached — pass `"all"` to compare across every role. Game-mode
  * eligibility is never a preference: Turbo is excluded either way.
  *
- * `bracket` asks for a peer group other than the player's own rank. It is a
- * request, not a guarantee: where the provider publishes nothing for that hero
- * in that bracket the response says so via `context.bracket.fell_back`, and the
- * numbers are the all-ranks ones rather than an estimate.
+ * `bracket` names the rank to hold up *beside* the player's own — it never
+ * replaces it, so `results` and their percentiles always describe the peers the
+ * player actually plays against. Omit it for the next bracket up, which is what
+ * the page shows by default; pass `"none"` to drop the target entirely.
+ *
+ * Where the provider publishes nothing for that hero in that bracket, `target`
+ * comes back `null` rather than all-ranks numbers wearing a bracket's name.
  */
 export function getBenchmark(
   heroId?: number,
   role?: CoachableRole | "all",
-  bracket?: RankBracket,
+  bracket?: RankBracket | "none",
 ): Promise<BenchmarkResponse> {
   const params = new URLSearchParams();
   if (heroId !== undefined) params.set("hero_id", String(heroId));
   if (role !== undefined) params.set("role", role);
-  // Omitted rather than sent as a sentinel: absent means "my own bracket",
-  // which is a different request from any named one.
+  // Absent is meaningful — it asks the server for the next bracket up — so
+  // "none" has to be sent explicitly to mean the opposite.
   if (bracket !== undefined) params.set("bracket", bracket);
 
   const query = params.toString();
@@ -173,7 +178,9 @@ export function getHeroPool(): Promise<HeroPoolResponse> {
 }
 
 /** Pool, meta and scored recommendations in one payload. */
-export function getHeroIntelligence(limit?: number): Promise<HeroIntelligenceResponse> {
+export function getHeroIntelligence(
+  limit?: number,
+): Promise<HeroIntelligenceResponse> {
   const query = limit === undefined ? "" : `?limit=${limit}`;
   return apiFetch<HeroIntelligenceResponse>(`/api/hero-intelligence${query}`);
 }
@@ -301,7 +308,9 @@ export function getMatch(id: string): Promise<MatchResponse> {
  * provider, so it is the slow half of the page and must not hold up the
  * match's own figures.
  */
-export function getMatchComparison(id: string): Promise<MatchComparisonResponse> {
+export function getMatchComparison(
+  id: string,
+): Promise<MatchComparisonResponse> {
   return apiFetch<MatchComparisonResponse>(`/api/matches/${id}/comparison`);
 }
 
@@ -421,7 +430,9 @@ export function getAdminUsers(
   if (params.search) query.set("search", params.search);
 
   const qs = query.toString();
-  return apiFetch<AdminUserListResponse>(`/api/admin/users${qs ? `?${qs}` : ""}`);
+  return apiFetch<AdminUserListResponse>(
+    `/api/admin/users${qs ? `?${qs}` : ""}`,
+  );
 }
 
 export function getAdminUser(id: string): Promise<AdminUserDetail> {

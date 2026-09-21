@@ -196,6 +196,7 @@ mod tests {
             steam_openid_url: "https://steamcommunity.com/openid/login".into(),
             session_ttl_hours: 720,
             cookie_secure: false,
+            cookie_cross_site: false,
         }
     }
 

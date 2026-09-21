@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::extract::{AppPath, AppQuery, CurrentUser};
 use crate::domain::benchmark::{
     BenchmarkContext, BenchmarkContextInfo, BenchmarkMetric, BenchmarkResult, Confidence,
-    PopulationScope, ResolvedBracket, Segment, UnavailableSegment,
+    PopulationScope, ResolvedBracket, Segment, TargetComparison, TargetMetric, UnavailableSegment,
 };
 use crate::domain::hero::RankBracket;
 use crate::domain::player::DotaPlayer;
@@ -23,7 +23,7 @@ use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
 use crate::repositories::metrics::HeroAverages;
-use crate::services::benchmarks::{self, BenchmarkError, PlayerValues};
+use crate::services::benchmarks::{self, percentile, BenchmarkError, PlayerValues};
 use crate::state::AppState;
 use utoipa::ToSchema;
 
@@ -33,33 +33,58 @@ pub struct BenchmarkQuery {
     /// Role slug. Omit to follow the coaching profile, `all` to compare across
     /// every role.
     pub role: Option<String>,
-    /// Rank bracket slug. Omit to compare against the player's own bracket.
+    /// Rank bracket to aim at. Omit for the next one up, `none` for no target.
     pub bracket: Option<String>,
 }
 
+/// Which bracket a request wants held up beside the player's own.
+///
+/// Three states rather than an `Option`, because "I did not say" and "I said
+/// no" want different answers: the first gets the progression the page exists
+/// to show, the second gets the plain single-bracket comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetChoice {
+    /// Nothing asked for: the server picks the next bracket up.
+    Default,
+    /// Explicitly none — just my own rank.
+    None,
+    Named(RankBracket),
+}
+
 impl BenchmarkQuery {
-    /// The bracket this request asks the peer distribution to cover.
+    /// The bracket this request wants to be measured *against*.
     ///
-    /// `None` means "whatever the player's rank implies", which is the
-    /// behaviour every caller had before brackets were selectable. An
-    /// unrecognised slug is rejected rather than ignored: silently serving the
-    /// player's own bracket to someone who asked for Divine would put a number
+    /// An unrecognised slug is rejected rather than ignored: silently serving
+    /// the next bracket up to someone who asked for Divine would put a number
     /// on screen under the wrong heading.
-    fn bracket(&self) -> AppResult<Option<RankBracket>> {
+    fn target(&self) -> AppResult<TargetChoice> {
         match self.bracket.as_deref().map(str::trim) {
-            None | Some("") => Ok(None),
-            Some(slug) => RankBracket::parse(slug).map(Some).ok_or_else(|| {
-                AppError::BadRequest(format!(
-                    "'{slug}' is not a rank bracket. Use one of: {}.",
-                    RankBracket::ALL
-                        .iter()
-                        .map(|b| b.slug())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                ))
-            }),
+            None | Some("") => Ok(TargetChoice::Default),
+            Some("none") => Ok(TargetChoice::None),
+            Some(slug) => RankBracket::parse(slug)
+                .map(TargetChoice::Named)
+                .ok_or_else(|| {
+                    AppError::BadRequest(format!(
+                        "'{slug}' is not a rank bracket. Use one of: {}, or 'none'.",
+                        RankBracket::ALL
+                            .iter()
+                            .map(|b| b.slug())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ))
+                }),
         }
     }
+}
+
+/// The bracket a player is climbing towards: the next one above their own.
+///
+/// `None` for an Immortal player, who has nothing above them, and for an
+/// unranked one, whose own bracket is not known — an honest absence in both
+/// cases rather than a guess at where they belong.
+fn default_target(rank_tier: Option<i32>) -> Option<RankBracket> {
+    let own = rank_tier.and_then(RankBracket::from_rank_tier)?;
+    RankBracket::from_index(own.index() + 1)
 }
 
 /// A bracket the peer distribution can be asked for.
@@ -89,9 +114,13 @@ pub struct BenchmarkResponse {
     /// level so a client can caveat the whole page at once.
     pub segmented_by: Vec<Segment>,
     /// What was asked for, what was delivered, and what each side of the
-    /// comparison actually covers.
+    /// comparison actually covers. Always describes the player's **own**
+    /// bracket — `target` is what they are aiming at.
     pub context: BenchmarkContextInfo,
-    /// Every bracket the peer distribution can be asked for, in rank order.
+    /// The bracket being aimed at, when there is one and the provider has data
+    /// for it. Never a substitute for `results`.
+    pub target: Option<TargetComparison>,
+    /// Every bracket that can be aimed at, in rank order.
     pub brackets: Vec<BracketOption>,
     /// Set when the whole comparison is unavailable rather than any one metric.
     pub note: Option<String>,
@@ -199,10 +228,12 @@ profile, or pass `all` for every role. The peer distribution is hero-segmented e
 `context.unavailable`.",
             example = "carry"),
         ("bracket" = Option<String>, Query,
-            description = "Compare against another rank bracket — `herald` … `immortal`. Omit for \
-your own. The value is a *request*: where the provider publishes no distribution for that hero in \
-that bracket, `context.bracket.fell_back` is true and the peer values cover every rank instead. \
-Nothing is ever estimated from a neighbouring bracket.",
+            description = "The rank bracket to hold up *beside* your own — `herald` … `immortal`, \
+or `none` for no target. Omitted means the next bracket up, which is what the page shows by \
+default. It never replaces your own bracket: `results` and every percentile in them always \
+describe the peers you actually play against, and the target arrives separately in `target`. \
+Where the provider publishes no distribution for that hero in that bracket, `target` is `null` \
+rather than the all-ranks numbers under a bracket's name.",
             example = "ancient"),
     ),
     responses(
@@ -228,7 +259,7 @@ pub async fn overview(
         None,
         &scope,
         role,
-        query.bracket()?,
+        query.target()?,
     )
     .await
     .map(Json)
@@ -290,8 +321,9 @@ async fn resolve_scope(
 profile, or pass `all` for every role.",
             example = "carry"),
         ("bracket" = Option<String>, Query,
-            description = "Compare against another rank bracket — `herald` … `immortal`. Omit for \
-your own. See `context.bracket` for which bracket the returned values actually cover.",
+            description = "The rank bracket to hold up beside your own — `herald` … `immortal`, \
+or `none`. Omitted means the next bracket up. `results` always describe your own bracket; the \
+target arrives in `target`, narrowed to this same metric.",
             example = "ancient"),
     ),
     responses(
@@ -322,7 +354,7 @@ pub async fn metric(
         Some(wanted),
         &scope,
         role,
-        query.bracket()?,
+        query.target()?,
     )
     .await
     .map(Json)
@@ -335,9 +367,11 @@ pub async fn metric(
 /// honestly by `segmented_by`; this parameter is about our side of the
 /// comparison, and getting it wrong means benchmarking a player against a
 /// percentile their average does not belong to.
-/// `bracket` overrides the peer group the player's rank would imply. `None` is
-/// the coaching default: a player is judged against their own bracket unless
-/// they asked otherwise.
+/// `target` is the bracket held up *beside* the player's own, never instead of
+/// it: `results` always describe their own bracket, so a percentile does not
+/// move because the reader got curious about Divine. [`TargetChoice::None`] is
+/// the coaching default — an insight is about where a player stands, not where
+/// they would like to.
 pub(crate) async fn build(
     state: &AppState,
     player: &DotaPlayer,
@@ -345,8 +379,13 @@ pub(crate) async fn build(
     only: Option<BenchmarkMetric>,
     scope: &MatchScope,
     role: Option<CoachableRole>,
-    bracket: Option<RankBracket>,
+    target: TargetChoice,
 ) -> AppResult<BenchmarkResponse> {
+    let wanted_target = match target {
+        TargetChoice::None => None,
+        TargetChoice::Default => default_target(player.rank_tier),
+        TargetChoice::Named(bracket) => Some(bracket),
+    };
     // Default to the hero with the most matches: the only one likely to clear
     // the sample floor.
     let heroes = repositories::metrics::hero_stats_scoped(&state.db, player.id, scope, 1).await?;
@@ -383,8 +422,10 @@ pub(crate) async fn build(
                         player,
                         scope,
                         &[],
-                        requested_bracket(bracket, player.rank_tier),
+                        ResolvedBracket::requested_for(player.rank_tier),
                     ),
+                    // Nothing of the player's to compare, so nothing to aim at.
+                    target: None,
                     brackets: bracket_options(player.rank_tier),
                     note: Some(note),
                 });
@@ -402,11 +443,15 @@ pub(crate) async fn build(
     // What we *ask* the provider for. It honours hero and rank bracket; role
     // and patch are a statement of intent a future provider can fill in, and
     // the response reports which dimensions actually came back.
+    // The player's own bracket, resolved from their rank exactly as it always
+    // was. The target below is a *second* lookup; it never displaces this one,
+    // which is what keeps `results` and every percentile in them a statement
+    // about where the player actually stands.
     let context = BenchmarkContext {
         hero_id,
         role: role.map(|r| r.slug().to_string()),
         rank_tier: player.rank_tier,
-        bracket,
+        bracket: None,
         patch: None,
     };
 
@@ -435,13 +480,16 @@ pub(crate) async fn build(
                     // Nothing came back, so nothing was resolved. Reporting the
                     // requested bracket keeps the caveat about *which* peers
                     // are missing accurate.
-                    requested_bracket(bracket, player.rank_tier),
+                    ResolvedBracket::requested_for(player.rank_tier),
                 ),
                 hero_id,
                 hero_name,
                 sample: averages.sample,
                 results: bare_results(&values, only),
                 segmented_by: Vec::new(),
+                // The provider is down for this hero in every bracket, not just
+                // the player's. There is no target to show either.
+                target: None,
                 brackets: bracket_options(player.rank_tier),
                 note: Some(note.to_string()),
             });
@@ -454,6 +502,14 @@ pub(crate) async fn build(
     if let Some(wanted) = only {
         results.retain(|r| r.metric == wanted);
     }
+
+    let target = match wanted_target {
+        // Already the player's own bracket. A second identical column would be
+        // noise dressed as a comparison.
+        Some(aim) if bracket.used == Some(aim) => None,
+        Some(aim) => target_comparison(state, &context, &values, aim, only).await,
+        None => None,
+    };
 
     Ok(BenchmarkResponse {
         context: context_info(
@@ -470,21 +526,85 @@ pub(crate) async fn build(
         sample: averages.sample,
         results,
         segmented_by,
+        target,
         brackets: bracket_options(player.rank_tier),
         note: None,
     })
 }
 
-/// What was asked for, before the provider has had a say.
+/// The bracket the player is aiming at, measured with the same arithmetic.
 ///
-/// An explicitly requested bracket is reported as requested even on the paths
-/// where no distribution arrived — that is what makes the caveat name the
-/// bracket the reader actually chose rather than the one their medal implies.
-fn requested_bracket(bracket: Option<RankBracket>, rank_tier: Option<i32>) -> ResolvedBracket {
-    match bracket {
-        Some(bracket) => ResolvedBracket::exact(bracket),
-        None => ResolvedBracket::requested_for(rank_tier),
+/// Returns `None` rather than an error on three paths, because a target is an
+/// extra and must never cost the comparison the player came for:
+///
+///   - the provider is unavailable for that bracket;
+///   - it publishes nothing there, so the lookup fell back to all ranks. An
+///     all-ranks median displayed under the heading "Ancient" would be exactly
+///     the fabrication the rest of this engine refuses, and a fallback is not
+///     an answer to "what does Ancient look like";
+///   - it has no median for any metric, leaving nothing to be short of.
+///
+/// Every figure comes from [`benchmarks::compare`] — the same function that
+/// produced `results` — so the two columns cannot disagree about a percentile.
+async fn target_comparison(
+    state: &AppState,
+    context: &BenchmarkContext,
+    values: &PlayerValues,
+    aim: RankBracket,
+    only: Option<BenchmarkMetric>,
+) -> Option<TargetComparison> {
+    let context = BenchmarkContext {
+        bracket: Some(aim),
+        ..context.clone()
+    };
+
+    let distribution = match state.benchmarks.get_distribution(&context).await {
+        Ok(distribution) => distribution,
+        Err(e) => {
+            tracing::debug!(error = %e, bracket = aim.slug(), "no target distribution");
+            return None;
+        }
+    };
+
+    if distribution.bracket.fell_back {
+        return None;
     }
+
+    let metrics: Vec<TargetMetric> = benchmarks::compare(values, &distribution)
+        .into_iter()
+        .filter(|result| only.is_none_or(|wanted| result.metric == wanted))
+        .map(|result| {
+            // The same signed, direction-aware distance the top-20% gap uses,
+            // pointed at the median instead. Positive is always work to do.
+            let gap = result.peer_median.map(|median| {
+                percentile::gap_to_top(result.player_value, median, result.higher_is_better)
+            });
+
+            TargetMetric {
+                metric: result.metric,
+                label: result.label,
+                higher_is_better: result.higher_is_better,
+                peer_median: result.peer_median,
+                top_20_value: result.top_20_value,
+                percentile: result.percentile,
+                gap_to_median: gap,
+                cleared: gap.is_some_and(|gap| gap <= 0.0),
+            }
+        })
+        .collect();
+
+    let compared = metrics.iter().filter(|m| m.gap_to_median.is_some()).count();
+    if compared == 0 {
+        return None;
+    }
+
+    Some(TargetComparison {
+        bracket: distribution.bracket,
+        label: aim.label(),
+        metrics_cleared: metrics.iter().filter(|m| m.cleared).count() as i64,
+        metrics_compared: compared as i64,
+        metrics,
+    })
 }
 
 /// Every bracket, in rank order, with the player's own marked.
@@ -578,4 +698,75 @@ async fn load_linked_player(state: &AppState, user: &User) -> AppResult<DotaPlay
     repositories::dota_player::find_by_user_id(&state.db, user.id)
         .await?
         .ok_or(AppError::DotaAccountNotLinked)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a query with only the bracket set, the way a client would.
+    fn query(bracket: Option<&str>) -> BenchmarkQuery {
+        BenchmarkQuery {
+            hero_id: None,
+            role: None,
+            bracket: bracket.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn the_default_target_is_the_next_bracket_up() {
+        // rank_tier is medal * 10 + stars, so 55 is Legend 5.
+        assert_eq!(default_target(Some(55)), Some(RankBracket::Ancient));
+        assert_eq!(default_target(Some(11)), Some(RankBracket::Guardian));
+        assert_eq!(default_target(Some(71)), Some(RankBracket::Immortal));
+    }
+
+    #[test]
+    fn nobody_is_given_a_target_that_does_not_exist() {
+        // Immortal has nothing above it.
+        assert_eq!(default_target(Some(80)), None);
+        // And an unranked player has no rung to climb from. Defaulting them to
+        // Herald would invent a starting point the provider never reported.
+        assert_eq!(default_target(None), None);
+        assert_eq!(default_target(Some(0)), None);
+    }
+
+    #[test]
+    fn an_absent_bracket_means_the_default_and_none_means_none() {
+        // The distinction the whole three-state exists for: saying nothing gets
+        // the progression, saying "none" opts out of it.
+        assert_eq!(query(None).target().unwrap(), TargetChoice::Default);
+        assert_eq!(query(Some("")).target().unwrap(), TargetChoice::Default);
+        assert_eq!(query(Some("none")).target().unwrap(), TargetChoice::None);
+        assert_eq!(
+            query(Some("ancient")).target().unwrap(),
+            TargetChoice::Named(RankBracket::Ancient),
+        );
+    }
+
+    #[test]
+    fn an_unusable_bracket_is_rejected_rather_than_defaulted() {
+        for slug in ["titan", "all", "9", "ancien"] {
+            assert!(
+                query(Some(slug)).target().is_err(),
+                "'{slug}' must not quietly become the default target",
+            );
+        }
+    }
+
+    #[test]
+    fn every_bracket_is_offered_and_exactly_one_is_the_players_own() {
+        let options = bracket_options(Some(55));
+
+        assert_eq!(options.len(), RankBracket::ALL.len());
+        let own: Vec<&str> = options
+            .iter()
+            .filter(|o| o.is_player_rank)
+            .map(|o| o.value)
+            .collect();
+        assert_eq!(own, vec!["legend"]);
+
+        // An unranked player's own bracket is not guessed at.
+        assert!(bracket_options(None).iter().all(|o| !o.is_player_rank));
+    }
 }

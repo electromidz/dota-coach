@@ -619,6 +619,7 @@ pub fn test_config() -> Config {
             steam_openid_url: "https://steamcommunity.example/openid/login".into(),
             session_ttl_hours: 720,
             cookie_secure: false,
+            cookie_cross_site: false,
         },
         dota: DotaConfig {
             base_url: "https://dota.example/api".into(),

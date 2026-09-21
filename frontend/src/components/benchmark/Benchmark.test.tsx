@@ -1,7 +1,11 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { BenchmarkResponse, ResolvedBracket } from "@/lib/types";
+import type {
+  BenchmarkResponse,
+  ResolvedBracket,
+  TargetComparison,
+} from "@/lib/types";
 
 import { Benchmark } from "./Benchmark";
 
@@ -31,6 +35,44 @@ const BRACKETS = [
   "immortal",
 ] as const;
 
+/** Ancient's numbers, sitting above the player on gold and below on deaths. */
+function target(overrides: Partial<TargetComparison> = {}): TargetComparison {
+  return {
+    bracket: {
+      requested: "ancient",
+      used: "ancient",
+      label: "Ancient",
+      fell_back: false,
+    },
+    label: "Ancient",
+    metrics: [
+      {
+        metric: "gold_per_min",
+        label: "Gold per minute",
+        higher_is_better: true,
+        peer_median: 612,
+        top_20_value: 700,
+        percentile: 21,
+        gap_to_median: 100,
+        cleared: false,
+      },
+      {
+        metric: "deaths_per_min",
+        label: "Deaths per minute",
+        higher_is_better: false,
+        peer_median: 0.2,
+        top_20_value: 0.14,
+        percentile: 62,
+        gap_to_median: -0.02,
+        cleared: true,
+      },
+    ],
+    metrics_cleared: 1,
+    metrics_compared: 2,
+    ...overrides,
+  };
+}
+
 function response(
   overrides: Partial<BenchmarkResponse> = {},
   bracket: Partial<ResolvedBracket> = {},
@@ -55,6 +97,21 @@ function response(
         segmented_by: ["hero", "rank_bracket"],
         note: null,
       },
+      {
+        metric: "deaths_per_min",
+        label: "Deaths per minute",
+        higher_is_better: false,
+        player_value: 0.18,
+        player_sample: 20,
+        peer_median: 0.19,
+        top_20_value: 0.13,
+        percentile: 55,
+        gap_to_top_20: 0.05,
+        peer_sample_size: null,
+        confidence: "adequate",
+        segmented_by: ["hero", "rank_bracket"],
+        note: null,
+      },
     ],
     segmented_by: ["hero", "rank_bracket"],
     context: {
@@ -62,11 +119,11 @@ function response(
       hero_name: "Luna",
       role: null,
       role_label: null,
-      rank_tier: 41,
+      rank_tier: 55,
       bracket: {
-        requested: "archon",
-        used: "archon",
-        label: "Archon",
+        requested: "legend",
+        used: "legend",
+        label: "Legend",
         fell_back: false,
         ...bracket,
       },
@@ -75,15 +132,16 @@ function response(
       unavailable: [],
       population: {
         player: "Your eligible matches on Luna.",
-        peers: "Public matches on Luna in the Archon bracket.",
+        peers: "Public matches on Luna in the Legend bracket.",
         comparable: false,
         note: "Read these percentiles as a close placement.",
       },
     },
+    target: target(),
     brackets: BRACKETS.map((value) => ({
       value,
       label: value[0].toUpperCase() + value.slice(1),
-      is_player_rank: value === "archon",
+      is_player_rank: value === "legend",
     })),
     note: null,
     ...overrides,
@@ -100,88 +158,160 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("Benchmark rank selection", () => {
-  it("offers every bracket the backend listed, marking the player's own", async () => {
+describe("Benchmark rank comparison", () => {
+  it("shows the next rank up with no interaction", async () => {
+    render(<Benchmark />);
+    await screen.findByLabelText("Aiming at");
+
+    // Absent, not "legend": asking for nothing is what asks the server for the
+    // next rung, and the client never derives the rank order itself.
+    expect(getBenchmark).toHaveBeenCalledWith(undefined, undefined, undefined);
+    expect(screen.getByText("Next rank up (Ancient)")).toBeTruthy();
+  });
+
+  it("leads with how many metrics already clear the target", async () => {
     render(<Benchmark />);
 
-    expect(await screen.findByLabelText("Compare against")).toBeTruthy();
-    expect(screen.getByText("Your rank (Archon)")).toBeTruthy();
-    expect(screen.getByText("Archon — your rank")).toBeTruthy();
-    expect(screen.getByText("Ancient")).toBeTruthy();
+    expect(
+      await screen.findByText(/You already clear Ancient.s median on/),
+    ).toBeTruthy();
+    // The backend's count, rendered rather than recomputed from the rows.
+    const headline = screen.getByText(/already clear Ancient/).textContent ?? "";
+    expect(headline).toContain("1");
+    expect(headline).toContain("2");
+  });
+
+  it("carries both rank marks and the shortfall on every row", async () => {
+    render(<Benchmark />);
+    await screen.findByLabelText("Aiming at");
+
+    // Own bracket and target named with their values, so the marks are never
+    // read by position and colour alone.
+    expect(screen.getByText(/Legend 540/)).toBeTruthy();
+    expect(screen.getByText(/Ancient 612/)).toBeTruthy();
+    expect(screen.getByText("100 short of Ancient")).toBeTruthy();
+
+    // Direction is honoured: fewer deaths than Ancient's median is ahead.
+    expect(screen.getByText("already past Ancient")).toBeTruthy();
+
+    // The top-20% line steps aside so three marks never share one bar.
+    expect(screen.queryByText(/top 20%/)).toBeNull();
+  });
+
+  it("offers every bracket, plus the default and the opt-out", async () => {
+    render(<Benchmark />);
+    await screen.findByLabelText("Aiming at");
+
+    expect(screen.getByText("Next rank up (Ancient)")).toBeTruthy();
+    expect(screen.getByText("Your rank only (Legend)")).toBeTruthy();
+    expect(screen.getByText("Legend — your rank")).toBeTruthy();
     expect(screen.getByText("Immortal")).toBeTruthy();
   });
 
-  it("defaults to the player's own rank without naming a bracket", async () => {
+  it("asks for a chosen bracket and for none when opted out", async () => {
     render(<Benchmark />);
-    await screen.findByLabelText("Compare against");
+    await screen.findByLabelText("Aiming at");
 
-    // `undefined`, not "archon": "my rank" is a different request from any
-    // named bracket, and the backend resolves it.
-    expect(getBenchmark).toHaveBeenCalledWith(undefined, undefined, undefined);
-  });
-
-  it("asks for the chosen bracket and keeps the hero", async () => {
-    render(<Benchmark />);
-    await screen.findByLabelText("Compare against");
-
-    fireEvent.change(screen.getByLabelText("Compare against"), {
-      target: { value: "ancient" },
+    fireEvent.change(screen.getByLabelText("Aiming at"), {
+      target: { value: "divine" },
     });
-
     await waitFor(() =>
       expect(getBenchmark).toHaveBeenLastCalledWith(
         undefined,
         undefined,
-        "ancient",
+        "divine",
+      ),
+    );
+
+    fireEvent.change(screen.getByLabelText("Aiming at"), {
+      target: { value: "none" },
+    });
+    await waitFor(() =>
+      expect(getBenchmark).toHaveBeenLastCalledWith(
+        undefined,
+        undefined,
+        "none",
       ),
     );
   });
 
-  it("remembers the bracket for the session", async () => {
-    const { unmount } = render(<Benchmark />);
-    await screen.findByLabelText("Compare against");
+  it("never moves the player's own standing when the target changes", async () => {
+    render(<Benchmark />);
+    await screen.findByLabelText("Aiming at");
 
-    fireEvent.change(screen.getByLabelText("Compare against"), {
+    // p44 is where they sit in Legend. Aiming at Divine is a question about
+    // Divine, and must not restate where the player stands.
+    expect(screen.getByText("p44")).toBeTruthy();
+    expect(screen.getByText(/vs Legend/)).toBeTruthy();
+
+    getBenchmark.mockResolvedValue(
+      response({
+        target: target({
+          label: "Divine",
+          bracket: {
+            requested: "divine",
+            used: "divine",
+            label: "Divine",
+            fell_back: false,
+          },
+        }),
+      }),
+    );
+    fireEvent.change(screen.getByLabelText("Aiming at"), {
       target: { value: "divine" },
     });
-    await waitFor(() => expect(sessionStorage.getItem("benchmark.bracket")).toBe("divine"));
+
+    await screen.findByText(/already clear Divine/);
+    expect(screen.getByText("p44")).toBeTruthy();
+    expect(screen.getByText(/vs Legend/)).toBeTruthy();
+  });
+
+  it("falls silent about a rank the provider has no data for", async () => {
+    render(<Benchmark />);
+    await screen.findByLabelText("Aiming at");
+
+    getBenchmark.mockResolvedValue(response({ target: null }));
+    fireEvent.change(screen.getByLabelText("Aiming at"), {
+      target: { value: "immortal" },
+    });
+
+    expect(await screen.findByText("No data for that rank")).toBeTruthy();
+    expect(screen.getByText(/nothing has been estimated/i)).toBeTruthy();
+    // The player's own comparison survives, with its top-20% line back on
+    // every row now that nothing is competing for the space.
+    expect(screen.getByText("p44")).toBeTruthy();
+    expect(screen.getAllByText(/top 20%/)).toHaveLength(2);
+  });
+
+  it("says nothing when the server itself chose no target", async () => {
+    // An Immortal player has no rank above them. That is not a failed request
+    // and must not be reported as one.
+    getBenchmark.mockResolvedValue(response({ target: null }));
+    render(<Benchmark />);
+
+    await screen.findByLabelText("Aiming at");
+    expect(screen.queryByText("No data for that rank")).toBeNull();
+    expect(screen.queryByText(/already clear/)).toBeNull();
+  });
+
+  it("remembers the chosen rank for the session", async () => {
+    const { unmount } = render(<Benchmark />);
+    await screen.findByLabelText("Aiming at");
+
+    fireEvent.change(screen.getByLabelText("Aiming at"), {
+      target: { value: "divine" },
+    });
+    await waitFor(() =>
+      expect(sessionStorage.getItem("benchmark.bracket")).toBe("divine"),
+    );
 
     unmount();
     vi.clearAllMocks();
     getBenchmark.mockResolvedValue(response());
     render(<Benchmark />);
 
-    // Restored in the *first* request rather than after an extra round trip.
+    // Restored in the first request rather than after an extra round trip.
     await waitFor(() => expect(getBenchmark).toHaveBeenCalledTimes(1));
     expect(getBenchmark).toHaveBeenCalledWith(undefined, undefined, "divine");
-  });
-
-  it("says so outright when the chosen bracket had no data", async () => {
-    render(<Benchmark />);
-    await screen.findByLabelText("Compare against");
-
-    getBenchmark.mockResolvedValue(
-      response({}, { requested: "immortal", used: null, label: "All ranks", fell_back: true }),
-    );
-    fireEvent.change(screen.getByLabelText("Compare against"), {
-      target: { value: "immortal" },
-    });
-
-    expect(await screen.findByText("No data for that bracket")).toBeTruthy();
-    expect(screen.getByText(/cover every rank instead/)).toBeTruthy();
-    // And the page reports the bracket it actually used, not the one asked for.
-    expect(screen.getByText(/vs All ranks/)).toBeTruthy();
-  });
-
-  it("keeps the fallback quiet on the default path", async () => {
-    // An unranked player falls back with nothing requested. That is not a
-    // failed choice, so it must not raise an alert.
-    getBenchmark.mockResolvedValue(
-      response({}, { requested: null, used: null, label: "All ranks", fell_back: false }),
-    );
-    render(<Benchmark />);
-
-    await screen.findByLabelText("Compare against");
-    expect(screen.queryByText("No data for that bracket")).toBeNull();
   });
 });

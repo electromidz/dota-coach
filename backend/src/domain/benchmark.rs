@@ -320,6 +320,53 @@ pub struct BenchmarkResult {
     pub note: Option<String>,
 }
 
+/// One metric against a bracket the player is *aiming at* rather than in.
+///
+/// Slim on purpose: everything about the player — their value, their sample,
+/// their confidence — belongs to [`BenchmarkResult`] and is the same whichever
+/// bracket is being aimed at. Repeating it here would invite the two copies to
+/// disagree. What is genuinely per-target is the peer side and the distance.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct TargetMetric {
+    pub metric: BenchmarkMetric,
+    pub label: &'static str,
+    pub higher_is_better: bool,
+
+    /// The target bracket's 50th percentile.
+    pub peer_median: Option<f32>,
+    /// Its 80th percentile.
+    pub top_20_value: Option<f32>,
+    /// Where the player's own figure would place *in this bracket*. Withheld on
+    /// the same terms as anywhere else — a thin sample is not rankable however
+    /// interesting the question is.
+    pub percentile: Option<f32>,
+    /// Distance to `peer_median`, signed so positive always means "work to do".
+    /// `None` when the provider published no median.
+    pub gap_to_median: Option<f32>,
+    /// True when the player already meets or beats that median. Direction is
+    /// honoured, so clearing a deaths-per-minute median means being *under* it.
+    pub cleared: bool,
+}
+
+/// The bracket a player is aiming at, beside the one they are in.
+///
+/// Additive, never a replacement: the primary comparison stays the player's own
+/// bracket, because "where do I actually stand" has one answer and it is not
+/// supposed to move when the reader gets curious about Divine.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct TargetComparison {
+    pub bracket: ResolvedBracket,
+    pub label: &'static str,
+    pub metrics: Vec<TargetMetric>,
+    /// How many of `metrics_compared` the player already clears. Counted here
+    /// rather than in the browser: it is a number, and numbers are the
+    /// backend's.
+    pub metrics_cleared: i64,
+    /// Metrics with a median on both sides — the only ones that can be cleared
+    /// or missed.
+    pub metrics_compared: i64,
+}
+
 /// A percentile bucket from the provider: "p80 = 684".
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Bucket {

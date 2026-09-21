@@ -256,6 +256,7 @@ Copy `.env.example` to `.env`. Never commit the real file.
 | `STEAM_OPENID_URL`       | backend  | Valve's endpoint. Override only in tests.                           |
 | `SESSION_TTL_HOURS`      | backend  | Session lifetime. Default 720 (30 days).                            |
 | `COOKIE_SECURE`          | backend  | **Set `true` on HTTPS.** `false` only for plain-HTTP localhost.     |
+| `COOKIE_CROSS_SITE`      | backend  | `true` when the frontend is on another site: `SameSite=None`. Needs `COOKIE_SECURE`. |
 | `RUST_LOG`               | backend  | Tracing filter.                                                     |
 | `DOTA_API_BASE_URL`      | backend  | Defaults to OpenDota.                                               |
 | `DOTA_API_KEY`           | backend  | Optional. Raises OpenDota's rate limit.                             |
@@ -1527,6 +1528,7 @@ with the scheme in either direction, an empty `CORS_ORIGINS`, or a
 | Setting                              | Why                                                     |
 | ------------------------------------ | ------------------------------------------------------- |
 | `COOKIE_SECURE=true`                 | Sessions over HTTPS only. False outside localhost is a warning at boot. |
+| `COOKIE_CROSS_SITE=true` *only if the frontend is on another site* | `SameSite=Lax` is never returned cross-site, so the session silently never arrives. Refused unless `COOKIE_SECURE=true`. |
 | `PUBLIC_BASE_URL` on HTTPS           | Steam signs `return_to`; it must match what the browser reaches. |
 | `CORS_ORIGINS` = the real frontend origin | Credentials are allowed, so a wildcard is impossible.  |
 | `NEXT_PUBLIC_API_URL` = public API URL | Baked into the bundle *and* into the CSP `connect-src`; rebuild the image to change it. |
