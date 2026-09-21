@@ -15,6 +15,8 @@ import type {
   HeroIntelligenceResponse,
   HeroPoolResponse,
   MatchListResponse,
+  MatchResultFilter,
+  MatchSort,
   AskResponse,
   ConversationResponse,
   MatchComparisonResponse,
@@ -24,6 +26,7 @@ import type {
   SessionResponse,
   MeResponse,
   PlayerModelResponse,
+  RankBracket,
   RedeemResponse,
   RoleSelectionResponse,
   StatsResponse,
@@ -136,14 +139,23 @@ export function getStats(): Promise<StatsResponse> {
  * Defaults to the most-played hero in scope, and the scope defaults to the role
  * being coached — pass `"all"` to compare across every role. Game-mode
  * eligibility is never a preference: Turbo is excluded either way.
+ *
+ * `bracket` asks for a peer group other than the player's own rank. It is a
+ * request, not a guarantee: where the provider publishes nothing for that hero
+ * in that bracket the response says so via `context.bracket.fell_back`, and the
+ * numbers are the all-ranks ones rather than an estimate.
  */
 export function getBenchmark(
   heroId?: number,
   role?: CoachableRole | "all",
+  bracket?: RankBracket,
 ): Promise<BenchmarkResponse> {
   const params = new URLSearchParams();
   if (heroId !== undefined) params.set("hero_id", String(heroId));
   if (role !== undefined) params.set("role", role);
+  // Omitted rather than sent as a sentinel: absent means "my own bracket",
+  // which is a different request from any named one.
+  if (bracket !== undefined) params.set("bracket", bracket);
 
   const query = params.toString();
   return apiFetch<BenchmarkResponse>(
@@ -231,20 +243,51 @@ export function analyzeMatch(id: string): Promise<CoachResponse> {
 }
 
 /**
+ * Which rows of a population to list, and in what order.
+ *
+ * Every field is optional and an absent one means "do not filter on this",
+ * matching the backend. `heroId` is a hero id rather than a name because that
+ * is what the match rows key on.
+ */
+export interface MatchListParams {
+  heroId?: number;
+  role?: CoachableRole;
+  result?: MatchResultFilter;
+  sort?: MatchSort;
+}
+
+/**
  * One page of matches.
  *
  * `scope` defaults to the player's whole history, which is what the match list
  * shows. Pass `"competitive"` for anything that is *analysing* — the dashboard's
  * trend line and form strip read the same games its statistics do, so a chart
  * and the number above it cannot disagree.
+ *
+ * Filtering and sorting happen in SQL, not here: the list is server-paginated,
+ * so a client-side filter could only ever narrow the twenty rows it happens to
+ * hold and would report a page count for a different list than the one on
+ * screen.
  */
 export function getMatches(
   page = 1,
   limit = 20,
   scope: "all" | "competitive" = "all",
+  params: MatchListParams = {},
 ): Promise<MatchListResponse> {
-  const query = `page=${page}&limit=${limit}${scope === "all" ? "" : `&scope=${scope}`}`;
-  return apiFetch<MatchListResponse>(`/api/matches?${query}`);
+  const query = new URLSearchParams({
+    page: String(page),
+    limit: String(limit),
+  });
+  if (scope !== "all") query.set("scope", scope);
+  if (params.heroId !== undefined) query.set("hero_id", String(params.heroId));
+  if (params.role) query.set("role", params.role);
+  if (params.result && params.result !== "all") {
+    query.set("result", params.result);
+  }
+  if (params.sort && params.sort !== "newest") query.set("sort", params.sort);
+
+  return apiFetch<MatchListResponse>(`/api/matches?${query.toString()}`);
 }
 
 export function getMatch(id: string): Promise<MatchResponse> {

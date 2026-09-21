@@ -264,6 +264,15 @@ pub struct BenchmarkContext {
     pub hero_id: i32,
     pub role: Option<String>,
     pub rank_tier: Option<i32>,
+    /// A bracket the *caller* asked for, overriding the one `rank_tier`
+    /// implies.
+    ///
+    /// Separate from `rank_tier` rather than derived from it because they are
+    /// different facts: the rank is who the player is, this is who they asked
+    /// to be measured against. A player looking at the bracket above their own
+    /// is asking a progression question, and flattening the two would lose the
+    /// ability to say which bracket the numbers on screen actually describe.
+    pub bracket: Option<crate::domain::hero::RankBracket>,
     pub patch: Option<String>,
 }
 

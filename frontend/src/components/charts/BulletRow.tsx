@@ -33,7 +33,7 @@ export function BulletRow({ result }: { result: BenchmarkResult }) {
         <span className="text-sm text-ink">{result.label}</span>
         <span className="flex items-baseline gap-2">
           <span className="font-mono text-sm tabular-nums text-number">
-            {format(player_value)}
+            {formatMetricValue(player_value)}
           </span>
           {percentile !== null ? (
             <span
@@ -68,7 +68,7 @@ export function BulletRow({ result }: { result: BenchmarkResult }) {
         {peer_median !== null ? (
           <span
             aria-hidden
-            title={`Peer median ${format(peer_median)}`}
+            title={`Peer median ${formatMetricValue(peer_median)}`}
             className="absolute inset-y-[-3px] w-px bg-ink-faint"
             style={{ left: pct(peer_median) }}
           />
@@ -78,7 +78,7 @@ export function BulletRow({ result }: { result: BenchmarkResult }) {
         {top_20_value !== null ? (
           <span
             aria-hidden
-            title={`Top 20% ${format(top_20_value)}`}
+            title={`Top 20% ${formatMetricValue(top_20_value)}`}
             className="absolute inset-y-[-4px] w-0.5 rounded bg-number"
             style={{ left: pct(top_20_value) }}
           />
@@ -89,20 +89,20 @@ export function BulletRow({ result }: { result: BenchmarkResult }) {
         {peer_median !== null ? (
           <span className="inline-flex items-center gap-1.5">
             <span aria-hidden className="h-2.5 w-px bg-ink-faint" />
-            median {format(peer_median)}
+            median {formatMetricValue(peer_median)}
           </span>
         ) : null}
         {top_20_value !== null ? (
           <span className="inline-flex items-center gap-1.5">
             <span aria-hidden className="h-2.5 w-0.5 rounded bg-number" />
-            top 20% {format(top_20_value)}
+            top 20% {formatMetricValue(top_20_value)}
           </span>
         ) : null}
         {result.gap_to_top_20 !== null ? (
           <span className={ahead ? "text-string" : undefined}>
             {ahead
-              ? `${format(Math.abs(result.gap_to_top_20))} ahead`
-              : `${format(result.gap_to_top_20)} to go`}
+              ? `${formatMetricValue(Math.abs(result.gap_to_top_20))} ahead`
+              : `${formatMetricValue(result.gap_to_top_20)} to go`}
           </span>
         ) : null}
       </div>
@@ -116,8 +116,17 @@ export function BulletRow({ result }: { result: BenchmarkResult }) {
   );
 }
 
-/** Large figures read better whole; small rates need their decimals. */
-function format(value: number): string {
+/**
+ * A benchmark value in the units a player reads it in.
+ *
+ * Large figures read better whole; small rates need their decimals.
+ *
+ * Exported so anything else showing a figure from `BenchmarkResult` — the
+ * preliminary training focus, for one — writes it the same way. Precision
+ * scales with magnitude: 2 decimals on a deaths-per-minute rate, none on tower
+ * damage.
+ */
+export function formatMetricValue(value: number): string {
   if (Math.abs(value) >= 100) return Math.round(value).toLocaleString();
   if (Math.abs(value) >= 10) return value.toFixed(1);
   return value.toFixed(2);

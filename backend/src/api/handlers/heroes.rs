@@ -391,6 +391,9 @@ async fn benchmark_percentiles(
             hero_id: entry.hero_id,
             role: None,
             rank_tier: player.rank_tier,
+            // Hero fit is scored against the player's own bracket: a hero that
+            // suits them is a hero that suits them *where they play*.
+            bracket: None,
             patch: None,
         };
         let distribution = match state.benchmarks.get_distribution(&context).await {

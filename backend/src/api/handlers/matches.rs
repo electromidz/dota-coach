@@ -17,10 +17,12 @@ use crate::domain::eligibility;
 use crate::domain::match_comparison::{MatchComparison, Standing};
 use crate::domain::player::DotaPlayer;
 use crate::domain::r#match::Match;
+use crate::domain::role::CoachableRole;
 use crate::domain::scope::MatchScope;
 use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
+use crate::repositories::r#match::{MatchFilter, MatchSort};
 use crate::services::match_comparison;
 use crate::state::AppState;
 use utoipa::ToSchema;
@@ -33,6 +35,95 @@ pub struct PageQuery {
     pub page: Option<i64>,
     pub limit: Option<i64>,
     pub scope: Option<String>,
+    /// Dota hero id. Omit for every hero.
+    pub hero_id: Option<i32>,
+    /// Role slug, or `all`. Omit for every role.
+    pub role: Option<String>,
+    /// `win`, `loss`, or `all`.
+    pub result: Option<String>,
+    /// One of the [`MatchSort`] slugs. Defaults to `newest`.
+    pub sort: Option<String>,
+}
+
+impl PageQuery {
+    /// The display filter this request asks for.
+    ///
+    /// Every unrecognised value is rejected rather than ignored, for the same
+    /// reason [`ListScope::parse`] rejects one: a client that misspells a filter
+    /// would otherwise be handed a page that quietly does not match what it
+    /// asked for, and would have no way to tell.
+    fn filter(&self) -> AppResult<MatchFilter> {
+        let role = match self.role.as_deref().map(str::trim) {
+            None | Some("") | Some("all") => None,
+            Some(slug) => Some(CoachableRole::parse(slug).ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "'{slug}' is not a role. Use one of: {}, or 'all'.",
+                    CoachableRole::ALL
+                        .iter()
+                        .map(|r| r.slug())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ))
+            })?),
+        };
+
+        let won = match self.result.as_deref().map(str::trim) {
+            None | Some("") | Some("all") => None,
+            Some("win") | Some("wins") => Some(true),
+            Some("loss") | Some("losses") => Some(false),
+            Some(other) => {
+                return Err(AppError::BadRequest(format!(
+                    "Unknown result '{other}'. Use 'win', 'loss' or 'all'."
+                )))
+            }
+        };
+
+        let sort = match self.sort.as_deref().map(str::trim) {
+            None | Some("") => MatchSort::default(),
+            Some(slug) => MatchSort::parse(slug).ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "Unknown sort '{slug}'. Use one of: newest, oldest, gpm_desc, gpm_asc, \
+                     kda_desc."
+                ))
+            })?,
+        };
+
+        // A hero id is a foreign identifier, not a code path: an id the player
+        // has never played is an empty page, which is a legitimate answer.
+        if self.hero_id.is_some_and(|id| id < 1) {
+            return Err(AppError::BadRequest("hero_id must be positive.".into()));
+        }
+
+        Ok(MatchFilter {
+            hero_id: self.hero_id,
+            won,
+            role,
+            sort,
+        })
+    }
+}
+
+/// One value a filter can take, with how many matches it would leave.
+///
+/// Counted over the population the page is browsing and *not* over the current
+/// filters, so the options never collapse to whatever is already selected.
+#[derive(Serialize, ToSchema)]
+pub struct FilterOption {
+    /// The value to send back: a hero id as a string, or a role slug.
+    pub value: String,
+    pub label: String,
+    pub matches: i64,
+}
+
+/// What this population can be filtered by.
+#[derive(Serialize, ToSchema)]
+pub struct FilterOptions {
+    /// Heroes the player has actually played in this scope, most-played first.
+    pub heroes: Vec<FilterOption>,
+    /// Coachable roles present in this scope, in position order. A match the
+    /// estimator could not attribute to one of the five is absent here rather
+    /// than filed under a guess — see `domain::role`.
+    pub roles: Vec<FilterOption>,
 }
 
 /// Which population a caller wants listed.
@@ -108,6 +199,12 @@ pub struct MatchListResponse {
     pub total_pages: i64,
     /// Which population this page was drawn from.
     pub scope: &'static str,
+    /// How this page was filtered and ordered — echoed back so a client can
+    /// tell a page it asked for from one it inherited.
+    pub filtered: bool,
+    pub sort: &'static str,
+    /// What this population *can* be filtered by, from the player's own rows.
+    pub filters: FilterOptions,
 }
 
 /// `GET /api/matches?page=1&limit=20`
@@ -126,9 +223,25 @@ pub struct MatchListResponse {
             description = "`all` (default) lists every stored match. `competitive` lists only the \
 latest eligible Ranked and public All Pick matches — the same population `/api/stats` reads.",
             example = "competitive"),
+        ("hero_id" = Option<i32>, Query,
+            description = "Show only matches on this hero. Omit for every hero.",
+            example = 26, minimum = 1),
+        ("role" = Option<String>, Query,
+            description = "Show only matches in this role — `carry`, `mid`, `offlane`, \
+`soft_support`, `hard_support` — or `all`. Matches the estimator could not attribute to one of \
+the five are excluded by any role filter rather than guessed at.",
+            example = "carry"),
+        ("result" = Option<String>, Query,
+            description = "`win`, `loss`, or `all` (default).",
+            example = "loss"),
+        ("sort" = Option<String>, Query,
+            description = "`newest` (default), `oldest`, `gpm_desc`, `gpm_asc` or `kda_desc`. \
+Matches with no computed metrics sort last under `kda_desc` rather than counting as zero.",
+            example = "gpm_desc"),
     ),
     responses(
-        (status = 200, description = "One page of matches, newest first", body = MatchListResponse),
+        (status = 200, description = "One page of matches, newest first unless sorted otherwise", body = MatchListResponse),
+        (status = 400, description = "An unknown scope, role, result or sort value", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
@@ -142,24 +255,33 @@ pub async fn list(
     let player = load_linked_player(&state, &user).await?;
     let (page, limit) = validate_pagination(query.page, query.limit)?;
     let scope = ListScope::parse(query.scope.as_deref())?;
+    let filter = query.filter()?;
     let offset = (page - 1) * limit;
 
-    let (matches, total) = match scope {
-        ListScope::All => (
-            repositories::r#match::list_by_player(&state.db, player.id, limit, offset).await?,
-            repositories::r#match::count_by_player(&state.db, player.id).await?,
-        ),
-        ListScope::Competitive => {
-            let window = MatchScope::competitive(state.config.roles.analysis_match_limit);
-            (
-                repositories::r#match::list_by_player_scoped(
-                    &state.db, player.id, &window, limit, offset,
-                )
+    // The scope is the population; the filter is a view of it. Both are pushed
+    // into SQL rather than trimmed afterwards, so `total` and `total_pages`
+    // describe the filtered list and the client never has to hold a page it
+    // was not shown.
+    let window = match scope {
+        ListScope::All => MatchScope::career(),
+        ListScope::Competitive => MatchScope::competitive(state.config.roles.analysis_match_limit),
+    };
+
+    let (matches, total) = if window.is_career() {
+        (
+            repositories::r#match::list_by_player(&state.db, player.id, &filter, limit, offset)
                 .await?,
-                repositories::r#match::count_by_player_scoped(&state.db, player.id, &window)
-                    .await?,
+            repositories::r#match::count_by_player(&state.db, player.id, &filter).await?,
+        )
+    } else {
+        (
+            repositories::r#match::list_by_player_scoped(
+                &state.db, player.id, &window, &filter, limit, offset,
             )
-        }
+            .await?,
+            repositories::r#match::count_by_player_scoped(&state.db, player.id, &window, &filter)
+                .await?,
+        )
     };
 
     Ok(Json(MatchListResponse {
@@ -169,7 +291,59 @@ pub async fn list(
         total,
         total_pages: total_pages(total, limit),
         scope: scope.slug(),
+        filtered: !filter.is_empty(),
+        sort: filter.sort.slug(),
+        filters: filter_options(&state, player.id, &window).await?,
     }))
+}
+
+/// The values the filters can take in this population.
+///
+/// Two grouped counts over the player's own rows. Nothing about heroes or roles
+/// is hard-coded here or shipped to the client as a list: a filter that offers
+/// a hero the player has never played leads to a guaranteed empty page, and the
+/// counts are what let someone see that before they click.
+async fn filter_options(
+    state: &AppState,
+    dota_player_id: Uuid,
+    window: &MatchScope,
+) -> AppResult<FilterOptions> {
+    let heroes = repositories::r#match::hero_facets(&state.db, dota_player_id, window).await?;
+    let roles = repositories::r#match::role_facets(&state.db, dota_player_id, window).await?;
+
+    // Several stored labels can map onto one coachable role, so they are summed
+    // rather than listed — and a label that maps to none of the five is dropped,
+    // which is the same rule the role scope applies.
+    let mut by_role: HashMap<CoachableRole, i64> = HashMap::new();
+    for facet in roles {
+        if let Some(role) = CoachableRole::from_stored(&facet.role) {
+            *by_role.entry(role).or_default() += facet.matches;
+        }
+    }
+
+    Ok(FilterOptions {
+        heroes: heroes
+            .into_iter()
+            .map(|hero| FilterOption {
+                value: hero.hero_id.to_string(),
+                label: hero.hero_name,
+                matches: hero.matches,
+            })
+            .collect(),
+        // Position order, not count order: a list of roles that reshuffles as
+        // the player's history changes is harder to use than a fixed one.
+        roles: CoachableRole::ALL
+            .into_iter()
+            .filter_map(|role| {
+                let matches = *by_role.get(&role)?;
+                Some(FilterOption {
+                    value: role.slug().to_string(),
+                    label: role.label().to_string(),
+                    matches,
+                })
+            })
+            .collect(),
+    })
 }
 
 /// `GET /api/matches/:id`
@@ -290,6 +464,9 @@ pub async fn comparison(
         hero_id: match_.hero_id,
         role: None,
         rank_tier: player.rank_tier,
+        // A single match is compared against the player's own bracket. "How
+        // did this game go against my peers" has one right peer group.
+        bracket: None,
         patch: None,
     };
 

@@ -4,12 +4,14 @@ import { useEffect, useState } from "react";
 
 import Link from "next/link";
 
+import { formatMetricValue } from "@/components/charts/BulletRow";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
 import { ApiError, getTrainingFocus } from "@/lib/api";
+import { CONFIDENCE_LABEL, CONFIDENCE_NOTE } from "@/lib/confidence";
 import { formatFocusValue } from "@/lib/training";
-import type { TrainingFocusResponse } from "@/lib/types";
+import type { PreliminaryFocus, TrainingFocusResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -86,6 +88,9 @@ export function TrainingFocusCard({ compact = false }: { compact?: boolean }) {
   const { focus, progress } = data;
 
   if (!focus) {
+    // Nothing clears the bar for a goal. That is not the same as nothing being
+    // known, and the backend says which of the two this is.
+    if (data.preliminary) return <PreliminaryCard reading={data.preliminary} />;
     return data.note ? <Alert tone="info">{data.note}</Alert> : null;
   }
 
@@ -173,6 +178,99 @@ export function TrainingFocusCard({ compact = false }: { compact?: boolean }) {
         )}
 
         {!compact ? <WhyThisOne data={data} /> : null}
+      </Card>
+    </section>
+  );
+}
+
+/**
+ * The early-signal variant: something measurable to look at, labelled as what
+ * it is.
+ *
+ * Three things keep it from reading as a conclusion, and all three are
+ * deliberate rather than decorative:
+ *
+ *   - a different heading and no `glow`, so it does not occupy the same visual
+ *     slot as an actual focus;
+ *   - the confidence badge and sample size sit *above* the number rather than
+ *     in a footnote under it;
+ *   - no progress meter and no target, because there is no goal here — a
+ *     progress bar would imply the system had committed to this.
+ *
+ * The percentile renders only when the backend supplied one. When it did not,
+ * the peer median is shown instead and plainly named as a comparison of
+ * averages; nothing on this card is derived here.
+ */
+function PreliminaryCard({ reading }: { reading: PreliminaryFocus }) {
+  const ranked = reading.percentile !== null;
+
+  return (
+    <section className="flex flex-col gap-4">
+      <header className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="font-display text-sm uppercase tracking-[0.2em] text-ink-faint">
+          Potential training focus
+        </h2>
+        <span className="rounded-full border border-glass-edge bg-mark-track px-2 py-0.5 text-[0.625rem] uppercase tracking-wider text-ink-muted">
+          {CONFIDENCE_LABEL[reading.confidence]}
+        </span>
+      </header>
+
+      <Card className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+          <h3 className="font-display text-lg text-ink">{reading.label}</h3>
+          <span className="flex items-baseline gap-2">
+            <span className="font-mono text-lg tabular-nums text-number">
+              {formatMetricValue(reading.player_value)}
+            </span>
+            {ranked ? (
+              <span className="rounded bg-mark-track px-1.5 py-0.5 font-mono text-[0.625rem] tabular-nums text-ink-muted">
+                p{Math.round(reading.percentile as number)}
+              </span>
+            ) : (
+              <span className="rounded bg-mark-track px-1.5 py-0.5 text-[0.625rem] text-ink-faint">
+                unranked
+              </span>
+            )}
+          </span>
+        </div>
+
+        <p className="text-sm leading-relaxed text-ink-muted">{reading.why}</p>
+
+        {reading.peer_median !== null ? (
+          <dl className="grid grid-cols-2 gap-3">
+            <Figure
+              label="You"
+              value={formatMetricValue(reading.player_value)}
+              emphasis
+            />
+            <Figure
+              label="Peer median"
+              value={formatMetricValue(reading.peer_median)}
+            />
+          </dl>
+        ) : null}
+
+        {/* The whole point of the card: say why this is not yet a conclusion,
+            and what would make it one. */}
+        <div className="flex flex-col gap-1.5 rounded-xl border border-glass-edge bg-mark-track/40 p-3">
+          <p className="text-xs leading-relaxed text-ink-muted">
+            This is an early signal, not a reliable conclusion — no target has
+            been set against it and no progress is being tracked yet.
+          </p>
+          <p className="text-xs leading-relaxed text-ink-faint">
+            {reading.to_confirm}
+          </p>
+          {CONFIDENCE_NOTE[reading.confidence] ? (
+            <p className="text-xs leading-relaxed text-ink-faint">
+              {CONFIDENCE_NOTE[reading.confidence]}
+            </p>
+          ) : null}
+        </div>
+
+        <p className="text-xs text-ink-faint">
+          Keep playing in this role and it will either firm up into a focus or
+          drop away.
+        </p>
       </Card>
     </section>
   );
