@@ -51,6 +51,15 @@ pub struct AuthConfig {
     /// Set the `Secure` flag on cookies. Must be true in production; false
     /// allows plain-HTTP local development.
     pub cookie_secure: bool,
+    /// Whether the frontend lives on a different site than this API — a
+    /// separate deployment, or a local dev server against a hosted backend.
+    ///
+    /// `SameSite=Lax` is right when both share a site and is fatal when they
+    /// do not: the browser accepts the session cookie and then withholds it
+    /// from every `fetch`, so login appears to work and each call afterwards
+    /// answers `UNAUTHENTICATED`. Turning this on relaxes the cookie to
+    /// `SameSite=None`, which browsers only honour alongside `Secure`.
+    pub cookie_cross_site: bool,
 }
 
 #[allow(dead_code)]
@@ -463,6 +472,21 @@ fn checked_price(cents: i64) -> Result<i64, ConfigError> {
     Ok(cents)
 }
 
+/// `SameSite=None` without `Secure` is rejected by every current browser, so
+/// the pair would produce a deployment that drops its own session cookie and
+/// blames the network. Refuse it at startup, where it is still a typo.
+fn checked_cookie_pairing(auth: &AuthConfig) -> Result<(), ConfigError> {
+    if auth.cookie_cross_site && !auth.cookie_secure {
+        return Err(ConfigError::Invalid(
+            "COOKIE_CROSS_SITE",
+            "requires COOKIE_SECURE=true: browsers reject SameSite=None on a non-Secure cookie"
+                .into(),
+        ));
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("missing required environment variable: {0}")]
@@ -491,7 +515,9 @@ impl Config {
             ),
             session_ttl_hours: parsed("SESSION_TTL_HOURS", 720)?,
             cookie_secure: parsed("COOKIE_SECURE", false)?,
+            cookie_cross_site: parsed("COOKIE_CROSS_SITE", false)?,
         };
+        checked_cookie_pairing(&auth)?;
 
         Ok(Self {
             docs_enabled: docs_enabled(&auth)?,
@@ -627,7 +653,22 @@ mod tests {
             steam_openid_url: "https://steamcommunity.com/openid/login".into(),
             session_ttl_hours: 720,
             cookie_secure,
+            cookie_cross_site: false,
         }
+    }
+
+    #[test]
+    fn a_cross_site_cookie_that_no_browser_would_keep_is_refused_at_startup() {
+        let mut auth = auth_at("https://api.dota-coach.example", false);
+        auth.cookie_cross_site = true;
+
+        assert!(matches!(
+            checked_cookie_pairing(&auth),
+            Err(ConfigError::Invalid("COOKIE_CROSS_SITE", _))
+        ));
+
+        auth.cookie_secure = true;
+        assert!(checked_cookie_pairing(&auth).is_ok());
     }
 
     /// One test rather than four, because `DOCS_ENABLED` is process-global and
@@ -691,6 +732,7 @@ mod tests {
                 steam_openid_url: "https://steamcommunity.com/openid/login".into(),
                 session_ttl_hours: 720,
                 cookie_secure: false,
+                cookie_cross_site: false,
             },
             dota: DotaConfig {
                 base_url: "https://api.opendota.com/api".into(),

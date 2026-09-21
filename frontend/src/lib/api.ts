@@ -65,7 +65,6 @@ export class ApiError extends Error {
 }
 
 export function baseUrl(): string {
-  console.log("ENV\n", process.env.NEXT_PUBLIC_API_URL);
   return (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080").replace(
     /\/+$/,
     "",

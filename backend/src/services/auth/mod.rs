@@ -63,15 +63,29 @@ pub async fn establish_session(
     })
 }
 
+/// The `SameSite` policy this deployment's cookies carry.
+///
+/// `Lax` blocks cross-site POSTs while still surviving the top-level redirect
+/// back from Steam, and is the right answer whenever the frontend shares a
+/// site with the API. A frontend on another site never gets the cookie back
+/// under `Lax`, so such a deployment declares itself and takes `None` — which
+/// gives up the cookie's own CSRF protection, leaving that to CORS.
+fn same_site(config: &AuthConfig) -> SameSite {
+    if config.cookie_cross_site {
+        SameSite::None
+    } else {
+        SameSite::Lax
+    }
+}
+
 /// Build the session cookie.
 ///
-/// `HttpOnly` keeps it away from scripts, `SameSite=Lax` blocks cross-site
-/// POSTs while still surviving the top-level redirect back from Steam, and
-/// `Secure` is on wherever the deployment is HTTPS.
+/// `HttpOnly` keeps it away from scripts, `SameSite` follows the deployment
+/// (see [`same_site`]), and `Secure` is on wherever the deployment is HTTPS.
 pub fn session_cookie<'a>(token: String, config: &AuthConfig) -> Cookie<'a> {
     let mut cookie = Cookie::new(SESSION_COOKIE, token);
     cookie.set_http_only(true);
-    cookie.set_same_site(SameSite::Lax);
+    cookie.set_same_site(same_site(config));
     cookie.set_secure(config.cookie_secure);
     cookie.set_path("/");
     cookie.set_max_age(time::Duration::hours(config.session_ttl_hours));
@@ -83,7 +97,7 @@ pub fn session_cookie<'a>(token: String, config: &AuthConfig) -> Cookie<'a> {
 pub fn expired_session_cookie<'a>(config: &AuthConfig) -> Cookie<'a> {
     let mut cookie = Cookie::new(SESSION_COOKIE, "");
     cookie.set_http_only(true);
-    cookie.set_same_site(SameSite::Lax);
+    cookie.set_same_site(same_site(config));
     cookie.set_secure(config.cookie_secure);
     cookie.set_path("/");
     cookie.set_max_age(time::Duration::seconds(0));
@@ -95,7 +109,7 @@ pub fn expired_session_cookie<'a>(config: &AuthConfig) -> Cookie<'a> {
 pub fn login_state_cookie<'a>(state: String, config: &AuthConfig) -> Cookie<'a> {
     let mut cookie = Cookie::new(LOGIN_STATE_COOKIE, state);
     cookie.set_http_only(true);
-    cookie.set_same_site(SameSite::Lax);
+    cookie.set_same_site(same_site(config));
     cookie.set_secure(config.cookie_secure);
     cookie.set_path("/");
     cookie.set_max_age(time::Duration::minutes(10));
@@ -105,7 +119,7 @@ pub fn login_state_cookie<'a>(state: String, config: &AuthConfig) -> Cookie<'a> 
 pub fn expired_login_state_cookie<'a>(config: &AuthConfig) -> Cookie<'a> {
     let mut cookie = Cookie::new(LOGIN_STATE_COOKIE, "");
     cookie.set_http_only(true);
-    cookie.set_same_site(SameSite::Lax);
+    cookie.set_same_site(same_site(config));
     cookie.set_secure(config.cookie_secure);
     cookie.set_path("/");
     cookie.set_max_age(time::Duration::seconds(0));
@@ -135,6 +149,7 @@ mod tests {
             steam_openid_url: "https://steamcommunity.com/openid/login".into(),
             session_ttl_hours: 720,
             cookie_secure: secure,
+            cookie_cross_site: false,
         }
     }
 
@@ -154,6 +169,26 @@ mod tests {
             session_cookie("t".into(), &config(false)).secure(),
             Some(false)
         );
+    }
+
+    /// A frontend on another origin only ever receives the cookie back under
+    /// `SameSite=None`; under `Lax` the session exists and is never sent.
+    #[test]
+    fn a_cross_site_frontend_gets_a_cookie_the_browser_will_actually_send() {
+        let config = AuthConfig {
+            cookie_cross_site: true,
+            ..config(true)
+        };
+
+        for cookie in [
+            session_cookie("t".into(), &config),
+            expired_session_cookie(&config),
+            login_state_cookie("s".into(), &config),
+            expired_login_state_cookie(&config),
+        ] {
+            assert_eq!(cookie.same_site(), Some(SameSite::None));
+            assert_eq!(cookie.secure(), Some(true));
+        }
     }
 
     #[test]
