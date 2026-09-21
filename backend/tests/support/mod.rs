@@ -28,7 +28,7 @@ use dota_coach_backend::domain::benchmark::{
 };
 use dota_coach_backend::domain::billing::PaymentStatus;
 use dota_coach_backend::domain::hero::FitWeights;
-use dota_coach_backend::domain::hero::{HeroMeta, HeroMetaContext};
+use dota_coach_backend::domain::hero::{HeroMeta, HeroMetaContext, RankBracket};
 use dota_coach_backend::domain::r#match::NormalizedMatch;
 use dota_coach_backend::domain::role::RoleScoreWeights;
 use dota_coach_backend::domain::session::{hash_token, NewToken};
@@ -226,17 +226,37 @@ impl SteamVerifier for StubVerifier {
 /// refuses, so the engine's honesty rules can be tested without a network.
 pub struct StubBenchmarks {
     failure: Option<&'static str>,
+    /// Brackets this stub publishes nothing for.
+    ///
+    /// The real provider answers a thin bracket with a full bucket list of
+    /// nulls, which the parser turns into an empty distribution and the caller
+    /// retries at all ranks. This reproduces the *outcome* of that — a request
+    /// for a bracket with no data coming back as a recorded fallback — without
+    /// reproducing OpenDota's payload shape, which has its own unit tests.
+    empty_brackets: Vec<RankBracket>,
 }
 
 impl StubBenchmarks {
     /// A distribution whose gold-per-minute median is 500 and top-20% is 800.
     pub fn serving() -> Arc<Self> {
-        Arc::new(Self { failure: None })
+        Arc::new(Self {
+            failure: None,
+            empty_brackets: Vec::new(),
+        })
+    }
+
+    /// Serving, except for one bracket it has no data for.
+    pub fn without_bracket(bracket: RankBracket) -> Arc<Self> {
+        Arc::new(Self {
+            failure: None,
+            empty_brackets: vec![bracket],
+        })
     }
 
     pub fn unavailable() -> Arc<Self> {
         Arc::new(Self {
             failure: Some("offline"),
+            empty_brackets: Vec::new(),
         })
     }
 }
@@ -274,13 +294,39 @@ impl BenchmarkProvider for StubBenchmarks {
 
         // Resolved the same way the real provider does, so the integration
         // tests exercise the rank-segmentation path rather than a stub that
-        // quietly always says "hero only".
-        let bracket = ResolvedBracket::requested_for(context.rank_tier);
+        // quietly always says "hero only" — including an explicitly requested
+        // bracket winning over the one the player's rank implies.
+        let requested = match context.bracket {
+            Some(bracket) => ResolvedBracket::exact(bracket),
+            None => ResolvedBracket::requested_for(context.rank_tier),
+        };
+
+        let bracket = match requested.used {
+            Some(asked) if self.empty_brackets.contains(&asked) => {
+                ResolvedBracket::fell_back_from(asked)
+            }
+            _ => requested,
+        };
+
+        // Higher brackets farm faster. Applied only to an *explicitly asked
+        // for* bracket, so every existing expectation about the rank-derived
+        // path — median 500, top-20% 800 — still holds exactly, while a test
+        // that switches bracket can prove the numbers moved with it.
+        let shift = match (context.bracket, bracket.used) {
+            (Some(_), Some(used)) => used.index() as f32 * 20.0,
+            _ => 0.0,
+        };
 
         Ok(Distribution {
             buckets: HashMap::from([
-                (BenchmarkMetric::GoldPerMin, buckets(200.0, 500.0, 800.0)),
-                (BenchmarkMetric::XpPerMin, buckets(250.0, 550.0, 850.0)),
+                (
+                    BenchmarkMetric::GoldPerMin,
+                    buckets(200.0 + shift, 500.0 + shift, 800.0 + shift),
+                ),
+                (
+                    BenchmarkMetric::XpPerMin,
+                    buckets(250.0 + shift, 550.0 + shift, 850.0 + shift),
+                ),
                 (BenchmarkMetric::DeathsPerMin, buckets(0.05, 0.15, 0.30)),
             ]),
             segmented_by: if bracket.is_rank_segmented() {

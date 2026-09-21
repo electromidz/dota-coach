@@ -15,6 +15,7 @@ use crate::domain::benchmark::{
     BenchmarkContext, BenchmarkContextInfo, BenchmarkMetric, BenchmarkResult, Confidence,
     PopulationScope, ResolvedBracket, Segment, UnavailableSegment,
 };
+use crate::domain::hero::RankBracket;
 use crate::domain::player::DotaPlayer;
 use crate::domain::role::CoachableRole;
 use crate::domain::scope::MatchScope;
@@ -32,6 +33,48 @@ pub struct BenchmarkQuery {
     /// Role slug. Omit to follow the coaching profile, `all` to compare across
     /// every role.
     pub role: Option<String>,
+    /// Rank bracket slug. Omit to compare against the player's own bracket.
+    pub bracket: Option<String>,
+}
+
+impl BenchmarkQuery {
+    /// The bracket this request asks the peer distribution to cover.
+    ///
+    /// `None` means "whatever the player's rank implies", which is the
+    /// behaviour every caller had before brackets were selectable. An
+    /// unrecognised slug is rejected rather than ignored: silently serving the
+    /// player's own bracket to someone who asked for Divine would put a number
+    /// on screen under the wrong heading.
+    fn bracket(&self) -> AppResult<Option<RankBracket>> {
+        match self.bracket.as_deref().map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(slug) => RankBracket::parse(slug).map(Some).ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "'{slug}' is not a rank bracket. Use one of: {}.",
+                    RankBracket::ALL
+                        .iter()
+                        .map(|b| b.slug())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ))
+            }),
+        }
+    }
+}
+
+/// A bracket the peer distribution can be asked for.
+///
+/// Served rather than hardcoded in the client for the same reason roles and
+/// heroes are: there is one list of Dota ranks in this system, it lives in
+/// `domain::hero`, and a second copy in TypeScript would be a second thing to
+/// keep in step.
+#[derive(Serialize, ToSchema)]
+pub struct BracketOption {
+    pub value: &'static str,
+    pub label: &'static str,
+    /// True for the bracket the player's own rank falls in, so a client can
+    /// mark it without re-deriving `rank_tier / 10`.
+    pub is_player_rank: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -48,6 +91,8 @@ pub struct BenchmarkResponse {
     /// What was asked for, what was delivered, and what each side of the
     /// comparison actually covers.
     pub context: BenchmarkContextInfo,
+    /// Every bracket the peer distribution can be asked for, in rank order.
+    pub brackets: Vec<BracketOption>,
     /// Set when the whole comparison is unavailable rather than any one metric.
     pub note: Option<String>,
 }
@@ -153,9 +198,16 @@ pub(crate) fn population_scope(
 profile, or pass `all` for every role. The peer distribution is hero-segmented either way — see \
 `context.unavailable`.",
             example = "carry"),
+        ("bracket" = Option<String>, Query,
+            description = "Compare against another rank bracket — `herald` … `immortal`. Omit for \
+your own. The value is a *request*: where the provider publishes no distribution for that hero in \
+that bracket, `context.bracket.fell_back` is true and the peer values cover every rank instead. \
+Nothing is ever estimated from a neighbouring bracket.",
+            example = "ancient"),
     ),
     responses(
         (status = 200, description = "Player values beside peer medians, with the context each side covers", body = BenchmarkResponse),
+        (status = 400, description = "An unknown role or rank bracket", body = crate::error::ErrorBody),
         (status = 502, description = "The benchmark provider is unavailable", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
@@ -169,9 +221,17 @@ pub async fn overview(
 ) -> AppResult<Json<BenchmarkResponse>> {
     let player = load_linked_player(&state, &user).await?;
     let (scope, role) = resolve_scope(&state, &player, query.role.as_deref()).await?;
-    build(&state, &player, query.hero_id, None, &scope, role)
-        .await
-        .map(Json)
+    build(
+        &state,
+        &player,
+        query.hero_id,
+        None,
+        &scope,
+        role,
+        query.bracket()?,
+    )
+    .await
+    .map(Json)
 }
 
 /// Which matches of the player's own the comparison reads.
@@ -229,9 +289,14 @@ async fn resolve_scope(
             description = "Restrict your own figures to one role. Omit to follow the coaching \
 profile, or pass `all` for every role.",
             example = "carry"),
+        ("bracket" = Option<String>, Query,
+            description = "Compare against another rank bracket — `herald` … `immortal`. Omit for \
+your own. See `context.bracket` for which bracket the returned values actually cover.",
+            example = "ancient"),
     ),
     responses(
         (status = 200, description = "That metric only", body = BenchmarkResponse),
+        (status = 400, description = "An unknown role or rank bracket", body = crate::error::ErrorBody),
         (status = 404, description = "No such metric slug", body = crate::error::ErrorBody),
         (status = 502, description = "The benchmark provider is unavailable", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
@@ -250,9 +315,17 @@ pub async fn metric(
 
     let player = load_linked_player(&state, &user).await?;
     let (scope, role) = resolve_scope(&state, &player, query.role.as_deref()).await?;
-    build(&state, &player, query.hero_id, Some(wanted), &scope, role)
-        .await
-        .map(Json)
+    build(
+        &state,
+        &player,
+        query.hero_id,
+        Some(wanted),
+        &scope,
+        role,
+        query.bracket()?,
+    )
+    .await
+    .map(Json)
 }
 
 /// The comparison itself, shared with the coaching layer so an insight and the
@@ -262,6 +335,9 @@ pub async fn metric(
 /// honestly by `segmented_by`; this parameter is about our side of the
 /// comparison, and getting it wrong means benchmarking a player against a
 /// percentile their average does not belong to.
+/// `bracket` overrides the peer group the player's rank would imply. `None` is
+/// the coaching default: a player is judged against their own bracket unless
+/// they asked otherwise.
 pub(crate) async fn build(
     state: &AppState,
     player: &DotaPlayer,
@@ -269,6 +345,7 @@ pub(crate) async fn build(
     only: Option<BenchmarkMetric>,
     scope: &MatchScope,
     role: Option<CoachableRole>,
+    bracket: Option<RankBracket>,
 ) -> AppResult<BenchmarkResponse> {
     // Default to the hero with the most matches: the only one likely to clear
     // the sample floor.
@@ -306,8 +383,9 @@ pub(crate) async fn build(
                         player,
                         scope,
                         &[],
-                        ResolvedBracket::requested_for(player.rank_tier),
+                        requested_bracket(bracket, player.rank_tier),
                     ),
+                    brackets: bracket_options(player.rank_tier),
                     note: Some(note),
                 });
             }
@@ -328,6 +406,7 @@ pub(crate) async fn build(
         hero_id,
         role: role.map(|r| r.slug().to_string()),
         rank_tier: player.rank_tier,
+        bracket,
         patch: None,
     };
 
@@ -356,13 +435,14 @@ pub(crate) async fn build(
                     // Nothing came back, so nothing was resolved. Reporting the
                     // requested bracket keeps the caveat about *which* peers
                     // are missing accurate.
-                    ResolvedBracket::requested_for(player.rank_tier),
+                    requested_bracket(bracket, player.rank_tier),
                 ),
                 hero_id,
                 hero_name,
                 sample: averages.sample,
                 results: bare_results(&values, only),
                 segmented_by: Vec::new(),
+                brackets: bracket_options(player.rank_tier),
                 note: Some(note.to_string()),
             });
         }
@@ -390,8 +470,35 @@ pub(crate) async fn build(
         sample: averages.sample,
         results,
         segmented_by,
+        brackets: bracket_options(player.rank_tier),
         note: None,
     })
+}
+
+/// What was asked for, before the provider has had a say.
+///
+/// An explicitly requested bracket is reported as requested even on the paths
+/// where no distribution arrived — that is what makes the caveat name the
+/// bracket the reader actually chose rather than the one their medal implies.
+fn requested_bracket(bracket: Option<RankBracket>, rank_tier: Option<i32>) -> ResolvedBracket {
+    match bracket {
+        Some(bracket) => ResolvedBracket::exact(bracket),
+        None => ResolvedBracket::requested_for(rank_tier),
+    }
+}
+
+/// Every bracket, in rank order, with the player's own marked.
+fn bracket_options(rank_tier: Option<i32>) -> Vec<BracketOption> {
+    let own = rank_tier.and_then(RankBracket::from_rank_tier);
+
+    RankBracket::ALL
+        .into_iter()
+        .map(|bracket| BracketOption {
+            value: bracket.slug(),
+            label: bracket.label(),
+            is_player_rank: own == Some(bracket),
+        })
+        .collect()
 }
 
 /// What was asked for, what arrived, and what each side covers.

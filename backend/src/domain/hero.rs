@@ -62,6 +62,29 @@ impl RankBracket {
         Self::ALL.iter().position(|b| *b == self).unwrap() as i32 + 1
     }
 
+    /// URL-safe identifier. Matches the serde representation, so a bracket
+    /// named in a query string and one serialized into a response are the same
+    /// string.
+    pub fn slug(self) -> &'static str {
+        match self {
+            RankBracket::Herald => "herald",
+            RankBracket::Guardian => "guardian",
+            RankBracket::Crusader => "crusader",
+            RankBracket::Archon => "archon",
+            RankBracket::Legend => "legend",
+            RankBracket::Ancient => "ancient",
+            RankBracket::Divine => "divine",
+            RankBracket::Immortal => "immortal",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let normalized = value.trim().to_ascii_lowercase();
+        Self::ALL
+            .into_iter()
+            .find(|bracket| bracket.slug() == normalized)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             RankBracket::Herald => "Herald",
@@ -331,6 +354,24 @@ mod tests {
         // Legend 1 is the same bracket.
         assert_eq!(RankBracket::from_rank_tier(51), Some(RankBracket::Legend));
         assert_eq!(RankBracket::from_rank_tier(80), Some(RankBracket::Immortal));
+    }
+
+    #[test]
+    fn bracket_slugs_round_trip_and_match_the_serde_name() {
+        for bracket in RankBracket::ALL {
+            assert_eq!(RankBracket::parse(bracket.slug()), Some(bracket));
+            // The query-string spelling and the JSON spelling have to agree,
+            // or a client cannot send back what it was given.
+            assert_eq!(
+                serde_json::to_string(&bracket).unwrap(),
+                format!("\"{}\"", bracket.slug()),
+            );
+        }
+
+        assert_eq!(RankBracket::parse("Ancient"), Some(RankBracket::Ancient));
+        assert_eq!(RankBracket::parse(" divine "), Some(RankBracket::Divine));
+        assert_eq!(RankBracket::parse("titan"), None);
+        assert_eq!(RankBracket::parse(""), None);
     }
 
     #[test]

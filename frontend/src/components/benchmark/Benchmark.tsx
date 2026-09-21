@@ -9,17 +9,39 @@ import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
 import { ApiError, getBenchmark, getStats } from "@/lib/api";
+import { CONFIDENCE_NOTE } from "@/lib/confidence";
 import { useSession } from "@/lib/session-context";
-import type { BenchmarkResponse, CoachableRole, HeroStats } from "@/lib/types";
+import type {
+  BenchmarkResponse,
+  CoachableRole,
+  HeroStats,
+  RankBracket,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-/** How a `Confidence` reads to someone who has not read the spec. */
-const CONFIDENCE_NOTE: Record<string, string> = {
-  insufficient:
-    "Too few matches on this hero to place you in the distribution. Percentiles appear once you have five.",
-  low: "Based on a small number of matches, so treat the percentiles as indicative.",
-  adequate: "",
-};
+/**
+ * Where the chosen bracket lives between page views.
+ *
+ * `sessionStorage`, not the database: which peer group someone is curious about
+ * right now is a browsing state, and the product has no user-preference table
+ * to put it in. It also dies with the tab, which is the right lifetime — the
+ * bracket a player wants to see defaults back to their own rank tomorrow.
+ */
+const BRACKET_KEY = "benchmark.bracket";
+
+function savedBracket(): RankBracket | undefined {
+  // Absent during server rendering, and can be disabled outright in the
+  // browser. Not being able to remember the choice is not a reason to fail the
+  // page, and the server's answer — "no bracket" — is also the initial markup,
+  // so there is nothing for hydration to disagree about.
+  if (typeof window === "undefined") return undefined;
+
+  try {
+    return (sessionStorage.getItem(BRACKET_KEY) as RankBracket | null) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export function Benchmark() {
   const { session } = useSession();
@@ -30,12 +52,23 @@ export function Benchmark() {
   const [loading, setLoading] = useState(false);
   /** `undefined` follows the coaching role; `"all"` opts out of role scoping. */
   const [roleScope, setRoleScope] = useState<CoachableRole | "all" | undefined>();
+  /** `undefined` compares against the player's own rank. Restored on the first
+   *  render rather than in an effect, so the picker never shows "your rank"
+   *  over another bracket's numbers for a frame. */
+  const [bracket, setBracket] = useState<RankBracket | undefined>(savedBracket);
 
   const load = useCallback(
-    async (heroId?: number, role?: CoachableRole | "all") => {
+    async (
+      heroId?: number,
+      role?: CoachableRole | "all",
+      target?: RankBracket,
+    ) => {
       setLoading(true);
       try {
-        setData(await getBenchmark(heroId, role));
+        // Replaced wholesale rather than merged: a bracket switch changes every
+        // peer number on the page, and a half-updated response would show one
+        // bracket's medians under another's heading.
+        setData(await getBenchmark(heroId, role, target));
         setError(null);
       } catch (e) {
         setError(
@@ -56,7 +89,11 @@ export function Benchmark() {
     getStats()
       .then((stats) => setHeroes(stats.heroes))
       .catch(() => setHeroes([]));
-    void load();
+
+    // Read again rather than carried over from the initializer: the state
+    // above already holds it, and passing it here keeps the restore to a
+    // single request instead of a default one followed by a correction.
+    void load(undefined, undefined, savedBracket());
   }, [session.kind, load]);
 
   if (session.kind === "loading") return <BenchmarkSkeleton />;
@@ -70,7 +107,7 @@ export function Benchmark() {
 
   async function pick(heroId: number) {
     setSelected(heroId);
-    await load(heroId, roleScope);
+    await load(heroId, roleScope, bracket);
   }
 
   async function setScope(role: CoachableRole | "all" | undefined) {
@@ -79,11 +116,28 @@ export function Benchmark() {
     // frequently not the most-played in another, and keeping a stale pick would
     // silently benchmark a hero the new scope barely contains.
     setSelected(undefined);
-    await load(undefined, role);
+    await load(undefined, role, bracket);
+  }
+
+  /** The hero and role stay put: only the peer group changes. */
+  async function setTargetBracket(next: RankBracket | undefined) {
+    setBracket(next);
+    try {
+      if (next) sessionStorage.setItem(BRACKET_KEY, next);
+      else sessionStorage.removeItem(BRACKET_KEY);
+    } catch {
+      // See `savedBracket` — remembering is a nicety, not a requirement.
+    }
+    await load(selected, roleScope, next);
   }
 
   const confidence = data.results[0]?.confidence;
   const caveat = confidence ? CONFIDENCE_NOTE[confidence] : "";
+  /** The bracket the peer values on screen actually describe. */
+  const resolved = data.context.bracket;
+  /** Asked for a bracket, got a wider cohort. Never silent when it was chosen. */
+  const fellBack = bracket !== undefined && resolved.fell_back;
+  const ownRank = data.brackets.find((option) => option.is_player_rank);
 
   return (
     <div className="flex flex-col gap-5 pb-4">
@@ -144,6 +198,58 @@ export function Benchmark() {
         </nav>
       ) : null}
 
+      {/* Which peers to measure against. Separate from the scope chips above
+          because it changes the *other* side of the comparison: those narrow
+          the player's own matches, this changes who they are held up to. */}
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1 text-xs text-ink-faint">
+          Compare against
+          <select
+            value={bracket ?? ""}
+            onChange={(e) =>
+              void setTargetBracket(
+                e.target.value === ""
+                  ? undefined
+                  : (e.target.value as RankBracket),
+              )
+            }
+            className="focus-neon min-h-11 cursor-pointer rounded-xl border border-glass-edge bg-surface-2/60 px-3 text-sm text-ink outline-none"
+          >
+            {/* Not a bracket of its own: it is "whatever my rank is", which is
+                the all-ranks distribution for an unranked player. */}
+            <option value="">
+              {ownRank ? `Your rank (${ownRank.label})` : "Your rank (unranked)"}
+            </option>
+            {data.brackets.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+                {option.is_player_rank ? " — your rank" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <p className="pb-3 text-xs text-ink-faint">
+          Peer values below cover{" "}
+          <span className="text-ink-muted">{resolved.label}</span>.
+        </p>
+      </div>
+
+      {/* A bracket the provider has no data for falls back to all ranks. That
+          is a real answer to a different question, so it is stated outright
+          rather than left to the collapsed caveats — the reader picked this
+          bracket, and has to know they are not looking at it. */}
+      {fellBack ? (
+        <Alert tone="info" title="No data for that bracket">
+          The benchmark provider publishes no distribution for {data.hero_name}{" "}
+          in{" "}
+          {data.brackets.find((option) => option.value === bracket)?.label ??
+            "that bracket"}
+          , so the peer values below cover every rank instead. Nothing has been
+          estimated from a neighbouring bracket.
+        </Alert>
+      ) : null}
+
       {data.note ? <Alert tone="info">{data.note}</Alert> : null}
 
       {data.results.length > 0 ? (
@@ -155,6 +261,7 @@ export function Benchmark() {
                 {data.sample}
               </span>{" "}
               {data.sample === 1 ? "match" : "matches"}
+              <span className="text-ink-faint"> vs {resolved.label}</span>
             </p>
             {caveat ? (
               <p className="text-xs leading-relaxed text-ink-faint">{caveat}</p>

@@ -156,7 +156,15 @@ impl BenchmarkProvider for OpenDotaBenchmarkProvider {
         &self,
         context: &BenchmarkContext,
     ) -> Result<Distribution, BenchmarkError> {
-        let requested = ResolvedBracket::requested_for(context.rank_tier);
+        // An explicit request wins over the player's own rank. It is still a
+        // *request*: if the provider publishes nothing there, the fallback
+        // below records that it fell back, exactly as it does for a rank-derived
+        // bracket. A bracket the caller named is never quietly served from
+        // another one's numbers.
+        let requested = match context.bracket {
+            Some(bracket) => ResolvedBracket::exact(bracket),
+            None => ResolvedBracket::requested_for(context.rank_tier),
+        };
 
         // The optimistic attempt. `used` is `None` for an unranked player, in
         // which case this is already the all-ranks call and there is nothing
@@ -373,5 +381,31 @@ mod tests {
             Some(RankBracket::Legend),
             "rank_tier is medal * 10 + stars"
         );
+    }
+
+    #[test]
+    fn an_explicitly_asked_for_bracket_outranks_the_players_own() {
+        // The resolution `get_distribution` performs before any network call.
+        // An Archon player looking at Ancient must be asking the provider for
+        // Ancient, not for Archon with a different label on it.
+        let context = BenchmarkContext {
+            hero_id: 35,
+            role: None,
+            rank_tier: Some(41), // Archon 1
+            bracket: Some(RankBracket::Ancient),
+            patch: None,
+        };
+
+        let requested = match context.bracket {
+            Some(bracket) => ResolvedBracket::exact(bracket),
+            None => ResolvedBracket::requested_for(context.rank_tier),
+        };
+
+        assert_eq!(requested.used, Some(RankBracket::Ancient));
+        assert_eq!(requested.label, "Ancient");
+        // And the fallback still names what was asked for, not the medal.
+        let fallback = ResolvedBracket::fell_back_from(requested.used.unwrap());
+        assert_eq!(fallback.requested, Some(RankBracket::Ancient));
+        assert!(!fallback.is_rank_segmented());
     }
 }

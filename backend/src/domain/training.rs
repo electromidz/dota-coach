@@ -203,6 +203,43 @@ pub struct TrainingFocus {
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// The best available signal when nothing clears the bar for a real focus.
+///
+/// Not a [`TrainingFocus`] and deliberately not shaped like one: it has no
+/// target, no baseline and no progress series, because the evidence behind it
+/// cannot support any of those. It is the weakest thing the benchmark engine
+/// *did* measure, reported with exactly the confidence that engine assigned it
+/// and no more.
+///
+/// The distinction the UI has to preserve: a focus is a conclusion, this is an
+/// early reading. Nothing here is computed differently from the benchmark page
+/// — it is the same [`BenchmarkResult`](crate::domain::benchmark::BenchmarkResult)
+/// values, selected rather than recalculated.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PreliminaryFocus {
+    /// The benchmark metric this reads, by its own slug.
+    pub metric: crate::domain::benchmark::BenchmarkMetric,
+    pub label: &'static str,
+    pub higher_is_better: bool,
+
+    /// The player's own figure, in the metric's units.
+    pub player_value: f32,
+    /// Matches behind it. The number the caveat quotes.
+    pub player_sample: i64,
+    /// The peer 50th percentile, when the provider published one.
+    pub peer_median: Option<f32>,
+    /// Direction-corrected, 0-100. `None` when the sample was too thin for the
+    /// engine to claim one — never filled in from something else.
+    pub percentile: Option<f32>,
+    /// Straight from the benchmark result. Never upgraded.
+    pub confidence: Confidence,
+
+    /// Why this metric and not another, in the player's terms.
+    pub why: String,
+    /// What would turn this into a real focus.
+    pub to_confirm: String,
+}
+
 /// One weighted input to the selection score.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct FocusScorePart {

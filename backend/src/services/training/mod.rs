@@ -17,8 +17,8 @@
 use crate::domain::benchmark::{BenchmarkMetric, BenchmarkResult, Confidence};
 use crate::domain::player_model::{AnalyzedMatch, PatternStatus, RecurringPattern};
 use crate::domain::training::{
-    FocusMeasure, FocusScorePart, FocusSource, FocusStatus, FocusWeights, ProgressPoint,
-    ProgressSeries, TrainingFocus,
+    FocusMeasure, FocusScorePart, FocusSource, FocusStatus, FocusWeights, PreliminaryFocus,
+    ProgressPoint, ProgressSeries, TrainingFocus,
 };
 use crate::services::benchmarks::percentile;
 use crate::services::player_model::patterns::{self, Baselines};
@@ -215,6 +215,177 @@ pub fn select(inputs: &SelectionInputs<'_>, weights: FocusWeights) -> Option<Tra
     rank(inputs, weights).into_iter().next()
 }
 
+/// The best available signal when [`select`] found nothing.
+///
+/// A real focus needs three things at once: a measure that can be read back out
+/// of a single match, a percentile the engine was willing to claim, and a gap
+/// worth training. A new player frequently has none of them and an experienced
+/// one often has only two — the benchmark engine ranks eight metrics, and just
+/// two of them are per-match reconstructible, so a player whose weakest area is
+/// XP per minute gets silence rather than advice.
+///
+/// This answers that case without answering it dishonestly. Everything here is
+/// *selected* from figures the benchmark engine already produced; no percentile,
+/// confidence or peer value is computed, adjusted or inferred, and the result is
+/// typed as a [`PreliminaryFocus`] precisely so it cannot be mistaken for a
+/// [`TrainingFocus`] downstream.
+///
+/// Two tiers, in order:
+///
+///   1. **Ranked.** Metrics the engine placed in the distribution — which means
+///      the player cleared the sample floor. The weakest percentile wins, and
+///      it still has to be below [`GAP_PERCENTILE`]: a player sitting mid-pack
+///      everywhere has nothing to work on, and saying otherwise would invent a
+///      weakness. Direction is already baked into the percentile, so no metric
+///      needs special-casing here.
+///   2. **Unranked.** Nothing was ranked at all — too few matches for any
+///      percentile. The peer *median* is still real and still published, so the
+///      largest shortfall against it is reported, direction-aware, with
+///      `percentile: None`. A thin sample is a reason to say "we cannot rank
+///      you yet", not a reason to say nothing.
+///
+/// The tiers never mix: one ranked metric in the set means the ranked tier is
+/// the answer, including the answer "nothing is below the bar".
+pub fn preliminary(benchmarks: &[BenchmarkResult]) -> Option<PreliminaryFocus> {
+    let ranked: Vec<&BenchmarkResult> = benchmarks
+        .iter()
+        .filter(|r| r.percentile.is_some())
+        .collect();
+
+    if !ranked.is_empty() {
+        let weakest = ranked
+            .into_iter()
+            .filter(|r| r.percentile.is_some_and(|p| p <= GAP_PERCENTILE))
+            // Ties broken by slug so the same data always names the same metric.
+            .min_by(|a, b| {
+                a.percentile
+                    .unwrap()
+                    .partial_cmp(&b.percentile.unwrap())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.metric.slug().cmp(b.metric.slug()))
+            })?;
+
+        let percentile = weakest.percentile.unwrap();
+        return Some(PreliminaryFocus {
+            why: format!(
+                "Of everything measured on your most-played hero, {} is where you place lowest \
+                 against your peers — the {} percentile.",
+                weakest.label.to_lowercase(),
+                ordinal(percentile),
+            ),
+            to_confirm: to_confirm(weakest),
+            ..from_result(weakest)
+        });
+    }
+
+    // Nothing ranked. Fall back to the published median, which exists whatever
+    // the player's sample is, and report the biggest relative shortfall.
+    let behind = benchmarks.iter().filter_map(|result| {
+        let median = result.peer_median.filter(|m| *m > 0.0)?;
+        let shortfall = if result.higher_is_better {
+            (median - result.player_value) / median
+        } else {
+            (result.player_value - median) / median
+        };
+        (shortfall > 0.0).then_some((result, shortfall))
+    });
+
+    let (weakest, _) = behind.max_by(|(a, x), (b, y)| {
+        x.partial_cmp(y)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.metric.slug().cmp(a.metric.slug()))
+    })?;
+
+    Some(PreliminaryFocus {
+        why: format!(
+            "Your {} sits at {} against a peer median of {} on your most-played hero. That is a \
+             comparison of averages, not a ranking — there are too few matches to place you in \
+             the distribution.",
+            weakest.label.to_lowercase(),
+            format_metric(weakest.player_value),
+            format_metric(weakest.peer_median.unwrap()),
+        ),
+        to_confirm: to_confirm(weakest),
+        ..from_result(weakest)
+    })
+}
+
+/// Copy the measured half of a benchmark result across unchanged.
+fn from_result(result: &BenchmarkResult) -> PreliminaryFocus {
+    PreliminaryFocus {
+        metric: result.metric,
+        label: result.label,
+        higher_is_better: result.higher_is_better,
+        player_value: result.player_value,
+        player_sample: result.player_sample,
+        peer_median: result.peer_median,
+        percentile: result.percentile,
+        confidence: result.confidence,
+        why: String::new(),
+        to_confirm: String::new(),
+    }
+}
+
+/// What would turn this reading into a conclusion, in matches.
+///
+/// Quotes the same two thresholds the confidence model itself uses, so the
+/// sentence cannot drift away from the rule it is describing.
+fn to_confirm(result: &BenchmarkResult) -> String {
+    let have = result.player_sample;
+    match result.confidence {
+        Confidence::Insufficient => format!(
+            "{} matches on this hero are needed before you can be placed in the distribution at \
+             all; you have {have}.",
+            percentile::MIN_SAMPLE,
+        ),
+        Confidence::Low => format!(
+            "This rests on {have} {}. At {} it becomes a firm reading rather than an early one.",
+            if have == 1 { "match" } else { "matches" },
+            percentile::LOW_SAMPLE,
+        ),
+        // A well-sampled metric that is still only preliminary got here because
+        // it cannot be tracked per match, not because the evidence is thin.
+        Confidence::Adequate => format!(
+            "The sample is solid — {have} matches — but this metric cannot be read out of a \
+             single match, so there is no progress target to set against it yet.",
+        ),
+    }
+}
+
+/// A percentile as an ordinal: `22` -> `"22nd"`, `11` -> `"11th"`.
+///
+/// The teens are the trap — 11, 12 and 13 take `th` despite ending in 1, 2 and
+/// 3 — and percentiles land there often enough to matter.
+fn ordinal(value: f32) -> String {
+    let n = value.round().max(0.0) as i64;
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+/// A metric's value as a player reads it.
+///
+/// Precision scales with magnitude rather than being listed per metric: gold
+/// per minute is a whole number to anyone reading it, deaths per minute needs
+/// two decimals to say anything at all, and the rule holds for a metric added
+/// tomorrow without a table to update. The client formats the same figures the
+/// same way — see `formatMetricValue` in `charts/BulletRow.tsx`.
+fn format_metric(value: f32) -> String {
+    let magnitude = value.abs();
+    if magnitude >= 100.0 {
+        format!("{value:.0}")
+    } else if magnitude >= 10.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
 fn candidates(inputs: &SelectionInputs<'_>) -> Vec<Candidate> {
     let baselines = Baselines::from(inputs.history);
     let mut found = Vec::new();
@@ -292,7 +463,8 @@ fn candidates(inputs: &SelectionInputs<'_>) -> Vec<Candidate> {
             key: format!("benchmark.{}", metric.slug()),
             title: format!("Improve your {}", measure.label().to_lowercase()),
             why: format!(
-                "You sit at the {percentile_value:.0}th percentile for {} on your most-played hero.",
+                "You sit at the {} percentile for {} on your most-played hero.",
+                ordinal(percentile_value),
                 result.label.to_lowercase(),
             ),
             source: FocusSource::Benchmark,
@@ -928,6 +1100,126 @@ mod tests {
         assert!(focus.target_value < patterns::MIN_RATE);
         assert_eq!(focus.baseline_value, 0.7);
         assert!(!focus.higher_is_better);
+    }
+
+    // --- Preliminary ------------------------------------------------------
+
+    /// A result with no percentile, the shape a thin sample produces.
+    fn unranked(metric: BenchmarkMetric, player_value: f32, median: f32) -> BenchmarkResult {
+        BenchmarkResult {
+            player_value,
+            player_sample: 4,
+            peer_median: Some(median),
+            top_20_value: None,
+            percentile: None,
+            gap_to_top_20: None,
+            confidence: Confidence::Insufficient,
+            note: Some("Not enough matches yet".into()),
+            ..benchmark(metric, 0.0, median)
+        }
+    }
+
+    #[test]
+    fn the_weakest_ranked_metric_is_the_preliminary_reading() {
+        let results = [
+            benchmark(BenchmarkMetric::GoldPerMin, 40.0, 500.0),
+            benchmark(BenchmarkMetric::XpPerMin, 22.0, 600.0),
+            benchmark(BenchmarkMetric::TowerDamage, 70.0, 2_000.0),
+        ];
+
+        let reading = preliminary(&results).expect("a preliminary reading");
+
+        assert_eq!(reading.metric, BenchmarkMetric::XpPerMin);
+        assert_eq!(reading.percentile, Some(22.0));
+        assert!(reading.why.contains("22nd percentile"));
+    }
+
+    #[test]
+    fn a_mid_pack_player_gets_nothing_rather_than_an_invented_weakness() {
+        // Everything measured sits above the gap threshold. The existing rule
+        // for a real focus; it has to hold for the preliminary one too, or the
+        // feature becomes "always find something to complain about".
+        let results = [
+            benchmark(BenchmarkMetric::GoldPerMin, 55.0, 500.0),
+            benchmark(BenchmarkMetric::XpPerMin, 62.0, 600.0),
+        ];
+
+        assert!(preliminary(&results).is_none());
+    }
+
+    #[test]
+    fn a_percentile_is_never_manufactured_for_a_thin_sample() {
+        // Four matches: the engine withheld every percentile. A median
+        // comparison is still honest; a percentile would not be.
+        let results = [
+            unranked(BenchmarkMetric::GoldPerMin, 480.0, 500.0),
+            unranked(BenchmarkMetric::XpPerMin, 300.0, 600.0),
+        ];
+
+        let reading = preliminary(&results).expect("a preliminary reading");
+
+        assert_eq!(reading.metric, BenchmarkMetric::XpPerMin, "the larger gap");
+        assert_eq!(reading.percentile, None);
+        assert_eq!(reading.confidence, Confidence::Insufficient);
+        assert_eq!(reading.player_sample, 4);
+        assert!(reading.why.contains("not a ranking"));
+        assert!(reading.to_confirm.contains("5 matches"));
+    }
+
+    #[test]
+    fn direction_decides_which_side_of_the_median_is_behind() {
+        // Deaths: above the median is worse. Gold: above the median is better,
+        // so it must not be offered as the weakness here.
+        let results = [
+            unranked(BenchmarkMetric::DeathsPerMin, 0.30, 0.20),
+            unranked(BenchmarkMetric::GoldPerMin, 600.0, 500.0),
+        ];
+
+        let reading = preliminary(&results).expect("a preliminary reading");
+        assert_eq!(reading.metric, BenchmarkMetric::DeathsPerMin);
+        assert!(!reading.higher_is_better);
+    }
+
+    #[test]
+    fn a_player_ahead_on_everything_unranked_gets_nothing() {
+        let results = [
+            unranked(BenchmarkMetric::GoldPerMin, 700.0, 500.0),
+            unranked(BenchmarkMetric::DeathsPerMin, 0.10, 0.20),
+        ];
+
+        assert!(preliminary(&results).is_none());
+    }
+
+    #[test]
+    fn one_ranked_metric_keeps_the_unranked_ones_out_of_the_running() {
+        // Mixing the tiers would let a median comparison outrank a real
+        // percentile, which is exactly backwards.
+        let results = [
+            benchmark(BenchmarkMetric::GoldPerMin, 30.0, 500.0),
+            unranked(BenchmarkMetric::XpPerMin, 100.0, 600.0),
+        ];
+
+        let reading = preliminary(&results).unwrap();
+        assert_eq!(reading.metric, BenchmarkMetric::GoldPerMin);
+        assert!(reading.percentile.is_some());
+    }
+
+    #[test]
+    fn confidence_travels_across_untouched() {
+        let mut thin = benchmark(BenchmarkMetric::GoldPerMin, 20.0, 500.0);
+        thin.confidence = Confidence::Low;
+        thin.player_sample = 7;
+
+        let reading = preliminary(&[thin]).unwrap();
+
+        assert_eq!(reading.confidence, Confidence::Low);
+        assert_eq!(reading.player_sample, 7);
+        assert!(reading.to_confirm.contains('7') && reading.to_confirm.contains("15"));
+    }
+
+    #[test]
+    fn nothing_measured_is_nothing_reported() {
+        assert!(preliminary(&[]).is_none());
     }
 
     // --- Progress ---------------------------------------------------------

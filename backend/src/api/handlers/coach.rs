@@ -28,7 +28,7 @@ use crate::domain::player_model::{PatternStatus, PlayerModel, RecurringPattern};
 use crate::domain::r#match::Match;
 use crate::domain::role::CoachableRole;
 use crate::domain::scope::{MatchScope, SampleConfidence};
-use crate::domain::training::{ProgressSeries, TrainingFocus};
+use crate::domain::training::{PreliminaryFocus, ProgressSeries, TrainingFocus};
 use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
@@ -79,6 +79,13 @@ pub struct CoachResponse {
 pub struct TrainingFocusResponse {
     /// The one thing to work on, or `null` when nothing clears the bar.
     pub focus: Option<TrainingFocus>,
+    /// The weakest thing that *was* measured, when no focus clears the bar.
+    ///
+    /// Only ever set alongside `focus: null`, and never a substitute for one: it
+    /// carries no target and no progress, and its `confidence` is whatever the
+    /// benchmark engine assigned — frequently `low`, sometimes `insufficient`,
+    /// in which case `percentile` is `null` because none was ever claimed.
+    pub preliminary: Option<PreliminaryFocus>,
     /// The focus measure over time, oldest bucket first.
     pub progress: Option<ProgressSeries>,
     /// What would be next, so "why this one" has a comparison.
@@ -376,6 +383,9 @@ pub async fn player_model(
         None,
         &MatchScope::competitive(window),
         None,
+        // Coaching always compares a player against their own bracket; the
+        // selectable one is a question the Benchmark page asks, not this one.
+        None,
     )
     .await?;
     let heroes = heroes::build(
@@ -529,8 +539,19 @@ pub async fn training_focus(
     )
     .await?;
 
+    // Only consulted when nothing cleared the bar, and it changes no part of
+    // the decision above — it reports what the benchmark engine already
+    // measured so that "keep playing" is not the whole answer.
+    let preliminary = focus
+        .is_none()
+        .then(|| training::preliminary(&benchmark.results))
+        .flatten();
+
     Ok(Json(TrainingFocusResponse {
-        note: focus.is_none().then(|| {
+        // Suppressed when there is a preliminary reading: the card says its own
+        // caveat, and a second "nothing stands out" beside it would contradict
+        // the thing it sits next to.
+        note: (focus.is_none() && preliminary.is_none()).then(|| {
             if refreshed.history.is_empty() {
                 format!(
                     "No eligible {} matches yet — there is nothing to train on in this role.",
@@ -542,6 +563,7 @@ pub async fn training_focus(
             }
         }),
         focus,
+        preliminary,
         progress,
         next_up,
         history,
@@ -1146,10 +1168,13 @@ pub(crate) async fn role_inputs(
     let refreshed = player_model::analyze_scope(&state.db, player.id, &scope.matches).await?;
     let patterns = refreshed.patterns;
 
+    // The analysis window itself: no display filter, newest first, exactly the
+    // games the scope defines.
     let window = repositories::r#match::list_by_player_scoped(
         &state.db,
         player.id,
         &scope.matches,
+        &repositories::r#match::MatchFilter::default(),
         state.config.roles.analysis_match_limit,
         0,
     )
@@ -1396,7 +1421,16 @@ async fn role_benchmark(
     // The scope is passed either way: the player's own averages have to come
     // from the role's matches, or the percentile would describe a figure the
     // coaching set does not contain.
-    benchmark::build(state, player, top, None, &scope.matches, Some(scope.role)).await
+    benchmark::build(
+        state,
+        player,
+        top,
+        None,
+        &scope.matches,
+        Some(scope.role),
+        None,
+    )
+    .await
 }
 
 /// One match, read against the same career evidence.
@@ -1435,6 +1469,7 @@ async fn match_evidence(
         None,
         &match_scope,
         role,
+        None,
     )
     .await?;
     let heroes = heroes::build(

@@ -4,6 +4,7 @@ use sqlx::{AssertSqlSafe, PgPool};
 use uuid::Uuid;
 
 use crate::domain::r#match::{Match, NewMatch};
+use crate::domain::role::CoachableRole;
 use crate::domain::scope::MatchScope;
 
 /// A macro rather than a `const` because sqlx only accepts `&'static str`
@@ -19,6 +20,113 @@ macro_rules! columns {
          m.xp_at_10, m.xp_at_15, m.bkb_seconds, m.blink_seconds, m.midas_seconds, \
          m.teamfight_participation, m.created_at, m.updated_at"
     };
+}
+
+/// How a listed page is ordered.
+///
+/// Short on purpose. Every variant answers a question a player actually asks of
+/// their history — "what did I just play", "how did this start", "where did it
+/// go well", "where did it go badly" — and a sort that answers none of those is
+/// a control to scroll past rather than a feature. Win/loss is a *filter*, not
+/// an ordering: sorting by it would only group rows that the filter removes
+/// outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MatchSort {
+    #[default]
+    Newest,
+    Oldest,
+    HighestGpm,
+    LowestGpm,
+    HighestKda,
+}
+
+impl MatchSort {
+    pub fn slug(self) -> &'static str {
+        match self {
+            MatchSort::Newest => "newest",
+            MatchSort::Oldest => "oldest",
+            MatchSort::HighestGpm => "gpm_desc",
+            MatchSort::LowestGpm => "gpm_asc",
+            MatchSort::HighestKda => "kda_desc",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        [
+            MatchSort::Newest,
+            MatchSort::Oldest,
+            MatchSort::HighestGpm,
+            MatchSort::LowestGpm,
+            MatchSort::HighestKda,
+        ]
+        .into_iter()
+        .find(|sort| sort.slug() == value)
+    }
+
+    /// The `ORDER BY` body. A compile-time constant in every arm — nothing a
+    /// caller supplies reaches the SQL.
+    ///
+    /// Recency is the tiebreaker everywhere, so equal values keep a stable,
+    /// meaningful order rather than whatever the planner returns. A match with
+    /// no computed metrics has no KDA to sort on and sorts last rather than
+    /// being treated as zero.
+    fn order_by(self) -> &'static str {
+        match self {
+            MatchSort::Newest => "m.started_at DESC",
+            MatchSort::Oldest => "m.started_at ASC",
+            MatchSort::HighestGpm => "m.gpm DESC, m.started_at DESC",
+            MatchSort::LowestGpm => "m.gpm ASC, m.started_at DESC",
+            MatchSort::HighestKda => "mm.kda DESC NULLS LAST, m.started_at DESC",
+        }
+    }
+}
+
+/// Which of a player's matches a listed page shows, and in what order.
+///
+/// Applied *on top of* whatever [`MatchScope`] the caller chose, never instead
+/// of it: the scope decides which population is being browsed, and these decide
+/// which rows of it are interesting right now. Filtering after the scope's
+/// window is what makes "my losses as Carry" mean "among the games the coach
+/// reads" rather than quietly widening the population to find more of them.
+///
+/// Every field is `None` by default, which is the unfiltered list the page has
+/// always shown.
+#[derive(Debug, Clone, Default)]
+pub struct MatchFilter {
+    pub hero_id: Option<i32>,
+    /// `Some(true)` for wins, `Some(false)` for losses.
+    pub won: Option<bool>,
+    pub role: Option<CoachableRole>,
+    pub sort: MatchSort,
+}
+
+impl MatchFilter {
+    /// The stored `matches.role` labels this filter accepts, if any.
+    ///
+    /// Bound as an array rather than interpolated — these are constants today,
+    /// but a bound parameter cannot become an injection tomorrow.
+    fn role_labels(&self) -> Option<Vec<String>> {
+        self.role
+            .map(|role| role.stored_labels().iter().map(|l| l.to_string()).collect())
+    }
+
+    /// The predicate over `m`, using three bind slots starting at `first`.
+    ///
+    /// Each clause is a no-op when its parameter is `NULL`, so one SQL string
+    /// serves every combination of filters and the bind positions never shift.
+    fn predicate(&self, first: usize) -> String {
+        let (hero, won, roles) = (first, first + 1, first + 2);
+        format!(
+            "AND (${hero}::int IS NULL OR m.hero_id = ${hero})
+             AND (${won}::bool IS NULL OR m.won = ${won})
+             AND (${roles}::text[] IS NULL OR m.role = ANY(${roles}))"
+        )
+    }
+
+    /// True when this would list exactly what an unfiltered query would.
+    pub fn is_empty(&self) -> bool {
+        self.hero_id.is_none() && self.won.is_none() && self.role.is_none()
+    }
 }
 
 /// Match ids already stored for this player. The sync planner diffs against
@@ -117,22 +225,28 @@ pub async fn insert_new(pool: &PgPool, matches: &[NewMatch]) -> Result<u64, sqlx
 pub async fn list_by_player(
     pool: &PgPool,
     dota_player_id: Uuid,
+    filter: &MatchFilter,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Match>, sqlx::Error> {
-    sqlx::query_as::<_, Match>(concat!(
-        "SELECT ",
-        columns!(),
-        ", mm.kda AS metrics_kda
+    sqlx::query_as::<_, Match>(AssertSqlSafe(format!(
+        "SELECT {cols}, mm.kda AS metrics_kda
            FROM matches m
            LEFT JOIN match_metrics mm ON mm.match_id = m.id
           WHERE m.dota_player_id = $1
-          ORDER BY m.started_at DESC
-          LIMIT $2 OFFSET $3"
-    ))
+                {predicate}
+          ORDER BY {order}
+          LIMIT $2 OFFSET $3",
+        cols = columns!(),
+        predicate = filter.predicate(4),
+        order = filter.sort.order_by(),
+    )))
     .bind(dota_player_id)
     .bind(limit)
     .bind(offset)
+    .bind(filter.hero_id)
+    .bind(filter.won)
+    .bind(filter.role_labels())
     .fetch_all(pool)
     .await
 }
@@ -146,6 +260,7 @@ pub async fn list_by_player_scoped(
     pool: &PgPool,
     dota_player_id: Uuid,
     scope: &MatchScope,
+    filter: &MatchFilter,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Match>, sqlx::Error> {
@@ -156,24 +271,43 @@ pub async fn list_by_player_scoped(
            JOIN match_metrics mm ON mm.match_id = m.id
            {join}
           WHERE m.dota_player_id = $1
-          ORDER BY m.started_at DESC
+                {predicate}
+          ORDER BY {order}
           LIMIT $2 OFFSET $3",
         cte = scope.cte(),
         cols = columns!(),
         join = scope.join(),
+        predicate = filter.predicate(4),
+        order = filter.sort.order_by(),
     )))
     .bind(dota_player_id)
     .bind(limit)
     .bind(offset)
+    .bind(filter.hero_id)
+    .bind(filter.won)
+    .bind(filter.role_labels())
     .fetch_all(pool)
     .await
 }
 
-pub async fn count_by_player(pool: &PgPool, dota_player_id: Uuid) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT COUNT(*) FROM matches WHERE dota_player_id = $1")
-        .bind(dota_player_id)
-        .fetch_one(pool)
-        .await
+pub async fn count_by_player(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    filter: &MatchFilter,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT COUNT(*)
+           FROM matches m
+          WHERE m.dota_player_id = $1
+                {predicate}",
+        predicate = filter.predicate(2),
+    )))
+    .bind(dota_player_id)
+    .bind(filter.hero_id)
+    .bind(filter.won)
+    .bind(filter.role_labels())
+    .fetch_one(pool)
+    .await
 }
 
 /// How many matches the scope contains, which is what the pagination of a
@@ -182,19 +316,101 @@ pub async fn count_by_player_scoped(
     pool: &PgPool,
     dota_player_id: Uuid,
     scope: &MatchScope,
+    filter: &MatchFilter,
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(AssertSqlSafe(format!(
         "{cte}
          SELECT COUNT(*)
            FROM matches m
            {join}
-          WHERE m.dota_player_id = $1",
+          WHERE m.dota_player_id = $1
+                {predicate}",
         cte = scope.cte(),
         join = scope.join(),
+        predicate = filter.predicate(2),
     )))
     .bind(dota_player_id)
+    .bind(filter.hero_id)
+    .bind(filter.won)
+    .bind(filter.role_labels())
     .fetch_one(pool)
     .await
+}
+
+/// Which heroes and roles appear in a population, with how often.
+///
+/// Computed over the *scope alone*, never over the current filters: a hero
+/// dropdown that shrinks to the hero already selected is a dropdown a user
+/// cannot get back out of. It is also why these are real counts from the
+/// player's own rows rather than a hero list shipped to the client — a filter
+/// that offers a hero the player has never touched is offering an empty page.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct HeroFacet {
+    pub hero_id: i32,
+    pub hero_name: String,
+    pub matches: i64,
+}
+
+/// The estimator's stored label and its count. Mapped to a coachable role by
+/// the caller, which is where that mapping already lives.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RoleFacet {
+    pub role: String,
+    pub matches: i64,
+}
+
+pub async fn hero_facets(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    scope: &MatchScope,
+) -> Result<Vec<HeroFacet>, sqlx::Error> {
+    sqlx::query_as::<_, HeroFacet>(AssertSqlSafe(facet_sql(
+        scope,
+        "m.hero_id, m.hero_name, COUNT(*) AS matches",
+        "m.hero_id, m.hero_name",
+        "matches DESC, m.hero_name ASC",
+    )))
+    .bind(dota_player_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn role_facets(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    scope: &MatchScope,
+) -> Result<Vec<RoleFacet>, sqlx::Error> {
+    sqlx::query_as::<_, RoleFacet>(AssertSqlSafe(facet_sql(
+        scope,
+        "m.role, COUNT(*) AS matches",
+        "m.role",
+        "matches DESC, m.role ASC",
+    )))
+    .bind(dota_player_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// One grouped count over a scope. Every fragment is a caller-side literal.
+fn facet_sql(scope: &MatchScope, select: &str, group_by: &str, order_by: &str) -> String {
+    // A career scope reads every stored row and needs no window; anything
+    // narrower joins the same CTE the scoped aggregates do, so the counts
+    // beside a filter describe exactly the page it will produce.
+    let (cte, join) = if scope.is_career() {
+        (String::new(), "")
+    } else {
+        (scope.cte(), scope.join())
+    };
+
+    format!(
+        "{cte}
+         SELECT {select}
+           FROM matches m
+           {join}
+          WHERE m.dota_player_id = $1
+          GROUP BY {group_by}
+          ORDER BY {order_by}"
+    )
 }
 
 /// Fetch a match **scoped to its owner**.

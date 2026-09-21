@@ -48,7 +48,14 @@ pub async fn me(
     CurrentUser(user): CurrentUser,
 ) -> AppResult<Json<MeResponse>> {
     let dota_player = load_linked_player(&state, &user).await?;
-    let matches_stored = repositories::r#match::count_by_player(&state.db, dota_player.id).await?;
+    // Every stored match, whatever mode, hero or result — this is the "you have
+    // N matches" figure, not a view of them.
+    let matches_stored = repositories::r#match::count_by_player(
+        &state.db,
+        dota_player.id,
+        &repositories::r#match::MatchFilter::default(),
+    )
+    .await?;
 
     Ok(Json(MeResponse {
         user,

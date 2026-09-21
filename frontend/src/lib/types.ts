@@ -297,6 +297,36 @@ export interface MatchView extends Match {
   mode_label: string;
 }
 
+/** How a listed page is ordered. Slugs the backend accepts verbatim. */
+export type MatchSort =
+  | "newest"
+  | "oldest"
+  | "gpm_desc"
+  | "gpm_asc"
+  | "kda_desc";
+
+/** `all` keeps every result; the other two narrow it. */
+export type MatchResultFilter = "all" | "win" | "loss";
+
+/**
+ * One value a filter can take, with how many matches it would leave.
+ *
+ * Counted by the backend over the population being browsed, never over the
+ * filters already applied — so the options do not collapse to whatever is
+ * currently selected.
+ */
+export interface FilterOption {
+  /** Sent straight back as the query value: a hero id, or a role slug. */
+  value: string;
+  label: string;
+  matches: number;
+}
+
+export interface FilterOptions {
+  heroes: FilterOption[];
+  roles: FilterOption[];
+}
+
 export interface MatchListResponse {
   matches: MatchView[];
   page: number;
@@ -305,6 +335,11 @@ export interface MatchListResponse {
   total_pages: number;
   /** Which population this page was drawn from. */
   scope: "all" | "competitive";
+  /** True when a hero, role or result filter narrowed this page. */
+  filtered: boolean;
+  sort: MatchSort;
+  /** Drawn from the player's own matches — never a hardcoded hero list. */
+  filters: FilterOptions;
 }
 
 export interface MatchResponse {
@@ -397,6 +432,20 @@ export interface BenchmarkContextInfo {
   population: PopulationScope;
 }
 
+/**
+ * A rank bracket the peer distribution can be asked for.
+ *
+ * Served by the backend rather than listed here: `domain::hero::RankBracket` is
+ * the one definition of Dota's ranks in this system, and a second copy in
+ * TypeScript would be a second thing to keep in step.
+ */
+export interface BracketOption {
+  value: RankBracket;
+  label: string;
+  /** True for the bracket the player's own rank falls in. */
+  is_player_rank: boolean;
+}
+
 export interface BenchmarkResponse {
   hero_id: number;
   hero_name: string;
@@ -404,6 +453,8 @@ export interface BenchmarkResponse {
   results: BenchmarkResult[];
   segmented_by: Segment[];
   context: BenchmarkContextInfo;
+  /** Every bracket that can be compared against, in rank order. */
+  brackets: BracketOption[];
   note: string | null;
 }
 
@@ -1077,8 +1128,36 @@ export interface ProgressSeries {
   target_value: number | null;
 }
 
+/**
+ * The weakest thing that was measured, when nothing clears the bar for a real
+ * focus.
+ *
+ * Deliberately not a `TrainingFocus`: there is no target, no baseline and no
+ * progress, because the evidence cannot support them. `percentile` is `null`
+ * whenever the backend declined to claim one, and the UI must not fill that in
+ * from `peer_median` — an early signal that reads as a conclusion is the one
+ * failure mode this whole shape exists to prevent.
+ */
+export interface PreliminaryFocus {
+  metric: string;
+  label: string;
+  higher_is_better: boolean;
+  player_value: number;
+  /** Matches behind the figure. The number the caveat quotes. */
+  player_sample: number;
+  peer_median: number | null;
+  /** Direction-corrected, 0-100. `null` when the sample was too thin to rank. */
+  percentile: number | null;
+  confidence: Confidence;
+  why: string;
+  /** What would turn this reading into a conclusion. */
+  to_confirm: string;
+}
+
 export interface TrainingFocusResponse {
   focus: TrainingFocus | null;
+  /** Only ever set alongside `focus: null`. */
+  preliminary: PreliminaryFocus | null;
   progress: ProgressSeries | null;
   /** What would be next, so "why this one" has a comparison. */
   next_up: TrainingFocus[];
