@@ -383,9 +383,10 @@ pub async fn player_model(
         None,
         &MatchScope::competitive(window),
         None,
-        // Coaching always compares a player against their own bracket; the
-        // selectable one is a question the Benchmark page asks, not this one.
-        None,
+        // Coaching always compares a player against their own bracket. Where
+        // they would like to be is a question the Benchmark page asks; an
+        // insight is about where they are.
+        benchmark::TargetChoice::None,
     )
     .await?;
     let heroes = heroes::build(
@@ -1428,7 +1429,7 @@ async fn role_benchmark(
         None,
         &scope.matches,
         Some(scope.role),
-        None,
+        benchmark::TargetChoice::None,
     )
     .await
 }
@@ -1469,7 +1470,7 @@ async fn match_evidence(
         None,
         &match_scope,
         role,
-        None,
+        benchmark::TargetChoice::None,
     )
     .await?;
     let heroes = heroes::build(

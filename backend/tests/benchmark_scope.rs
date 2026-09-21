@@ -289,62 +289,189 @@ async fn a_role_with_no_matches_says_so_rather_than_benchmarking_another_one() {
 }
 
 // ---------------------------------------------------------------------------
-// Comparing against another rank bracket
+// Aiming at another rank bracket
 // ---------------------------------------------------------------------------
 //
 // A player asking "what does Ancient look like?" is asking a progression
-// question, and the only honest answer is that bracket's real distribution.
-// The rules below are the ones that keep it honest: the numbers have to move
-// with the bracket, the page has to say which bracket it is showing, and a
-// bracket the provider has nothing for has to be reported as a fallback rather
-// than served from the neighbouring one.
+// question, and the only useful answer puts both rungs on one scale. The rules
+// below are what keep that honest:
+//
+//   1. the target is *additive* — the player's own bracket, and every
+//      percentile measured against it, must not move because the reader got
+//      curious about Divine;
+//   2. the numbers genuinely come from the target bracket's distribution;
+//   3. a bracket the provider has nothing for is absent, never the all-ranks
+//      figures wearing that bracket's name;
+//   4. "clearing" a median honours direction, or a player would be told their
+//      deaths are fine for being high.
+
+/// The gold-per-minute row from a benchmark response.
+fn gold(body: &serde_json::Value, key: &str) -> serde_json::Value {
+    body[key]
+        .as_array()
+        .or_else(|| body[key]["metrics"].as_array())
+        .expect("a metric list")
+        .iter()
+        .find(|r| r["metric"] == "gold_per_min")
+        .expect("gold per minute")
+        .clone()
+}
 
 #[tokio::test]
-async fn the_peer_group_follows_the_requested_bracket() {
+async fn the_default_target_is_the_next_rank_up() {
     let Some(db) = support::pool().await else {
-        return skip("the_peer_group_follows_the_requested_bracket");
+        return skip("the_default_target_is_the_next_rank_up");
     };
 
     let (app, session) = seed_app(db, luna_in_two_roles(), 100).await;
 
-    // The seeded player is Legend. Their own bracket is the default.
-    let own = app.get("/api/benchmark", Some(&session.token)).await.json();
-    assert_eq!(own["context"]["bracket"]["used"], "legend");
-    assert_eq!(own["context"]["bracket"]["label"], "Legend");
-    assert_eq!(own["context"]["bracket"]["fell_back"], false);
+    // The seeded player is Legend, so they arrive aimed at Ancient with no
+    // interaction — the progression is the point of the page.
+    let body = app.get("/api/benchmark", Some(&session.token)).await.json();
 
-    let ancient = app
+    assert_eq!(body["context"]["bracket"]["used"], "legend");
+    assert_eq!(body["target"]["bracket"]["used"], "ancient");
+    assert_eq!(body["target"]["label"], "Ancient");
+
+    app.cleanup(&[]).await;
+}
+
+#[tokio::test]
+async fn a_target_is_added_beside_the_players_own_bracket_not_instead_of_it() {
+    let Some(db) = support::pool().await else {
+        return skip("a_target_is_added_beside_the_players_own_bracket_not_instead_of_it");
+    };
+
+    let (app, session) = seed_app(db, luna_in_two_roles(), 100).await;
+
+    let alone = app
+        .get("/api/benchmark?bracket=none", Some(&session.token))
+        .await
+        .json();
+    let aiming = app
+        .get("/api/benchmark?bracket=divine", Some(&session.token))
+        .await
+        .json();
+
+    // Where the player actually stands is the same fact either way. This is
+    // the whole rule: a percentile is about their peers, and their peers do
+    // not change when they look upwards.
+    assert!(alone["target"].is_null());
+    assert_eq!(aiming["target"]["bracket"]["used"], "divine");
+    assert_eq!(alone["context"]["bracket"]["used"], "legend");
+    assert_eq!(aiming["context"]["bracket"]["used"], "legend");
+    assert_eq!(alone["sample"], aiming["sample"]);
+
+    let (before, after) = (gold(&alone, "results"), gold(&aiming, "results"));
+    assert_eq!(before["player_value"], after["player_value"]);
+    assert_eq!(before["percentile"], after["percentile"]);
+    assert_eq!(before["peer_median"], after["peer_median"]);
+
+    // And the target is a genuinely different distribution, not a relabelling.
+    let target = gold(&aiming["target"], "metrics");
+    assert_ne!(target["peer_median"], after["peer_median"]);
+
+    app.cleanup(&[]).await;
+}
+
+#[tokio::test]
+async fn the_gap_to_the_target_is_signed_by_direction_not_by_size() {
+    let Some(db) = support::pool().await else {
+        return skip("the_gap_to_the_target_is_signed_by_direction_not_by_size");
+    };
+
+    let (app, session) = seed_app(db, luna_in_two_roles(), 100).await;
+    let body = app
         .get("/api/benchmark?bracket=ancient", Some(&session.token))
         .await
         .json();
-    assert_eq!(ancient["context"]["bracket"]["requested"], "ancient");
-    assert_eq!(ancient["context"]["bracket"]["used"], "ancient");
-    assert_eq!(ancient["context"]["bracket"]["label"], "Ancient");
-    assert_eq!(
-        ancient["context"]["rank_tier"], 55,
-        "the player is unchanged"
-    );
 
-    let peer_median = |body: &serde_json::Value| {
-        body["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["metric"] == "gold_per_min")
-            .unwrap()["peer_median"]
-            .as_f64()
-            .unwrap()
+    let target = &body["target"];
+    let metrics = target["metrics"].as_array().unwrap();
+
+    for metric in metrics {
+        let Some(gap) = metric["gap_to_median"].as_f64() else {
+            continue;
+        };
+        // Positive always means work to do, whichever way the metric runs.
+        assert_eq!(
+            metric["cleared"].as_bool().unwrap(),
+            gap <= 0.0,
+            "{} claims cleared={} on a gap of {gap}",
+            metric["metric"],
+            metric["cleared"],
+        );
+    }
+
+    let cleared = target["metrics_cleared"].as_i64().unwrap();
+    let compared = target["metrics_compared"].as_i64().unwrap();
+    assert_eq!(
+        cleared,
+        metrics.iter().filter(|m| m["cleared"] == true).count() as i64,
+        "the headline count is the rows it summarises",
+    );
+    assert!(compared > 0 && cleared <= compared);
+
+    app.cleanup(&[]).await;
+}
+
+#[tokio::test]
+async fn a_bracket_with_no_data_is_left_out_rather_than_substituted() {
+    let Some(db) = support::pool().await else {
+        return skip("a_bracket_with_no_data_is_left_out_rather_than_substituted");
     };
 
-    // The comparison genuinely moved: a different bracket is a different peer
-    // distribution, not the same numbers under a new heading.
-    assert_ne!(peer_median(&own), peer_median(&ancient));
-    // And the player's own half of it did not.
-    assert_eq!(own["sample"], ancient["sample"]);
-    assert_eq!(
-        own["results"][0]["player_value"],
-        ancient["results"][0]["player_value"],
+    // The provider publishes nothing for Immortal on this hero — routine above
+    // Divine, and the case where a silent substitution would be most tempting.
+    let mut config = test_config();
+    config.dota.sync_match_limit = 500;
+    config.roles.analysis_match_limit = 100;
+
+    let app = app_with(
+        db,
+        MockDota::with_matches(luna_in_two_roles()),
+        StubVerifier::rejecting(),
+        StubBenchmarks::without_bracket(dota_coach_backend::domain::hero::RankBracket::Immortal),
+        config,
     );
+    let session = app.login_as(support::unique_steam_id()).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+
+    let body = app
+        .get("/api/benchmark?bracket=immortal", Some(&session.token))
+        .await
+        .json();
+
+    // All-ranks medians under the heading "Immortal" would be the fabrication
+    // this whole engine refuses. Absent is the honest answer.
+    assert!(body["target"].is_null(), "{}", body["target"]);
+
+    // The player's own comparison is untouched by the target's absence.
+    assert_eq!(body["context"]["bracket"]["used"], "legend");
+    assert!(!body["results"].as_array().unwrap().is_empty());
+
+    app.cleanup(&[]).await;
+}
+
+#[tokio::test]
+async fn nobody_is_aimed_at_a_rank_that_does_not_exist() {
+    let Some(db) = support::pool().await else {
+        return skip("nobody_is_aimed_at_a_rank_that_does_not_exist");
+    };
+
+    let (app, session) = seed_app(db, luna_in_two_roles(), 100).await;
+
+    // Explicitly opting out, and asking for the bracket already being used,
+    // both mean "no second column" — the latter because a duplicate of your
+    // own numbers is noise dressed as a comparison.
+    for query in ["?bracket=none", "?bracket=legend"] {
+        let body = app
+            .get(&format!("/api/benchmark{query}"), Some(&session.token))
+            .await
+            .json();
+        assert!(body["target"].is_null(), "{query}: {}", body["target"]);
+        assert!(!body["results"].as_array().unwrap().is_empty());
+    }
 
     app.cleanup(&[]).await;
 }
@@ -381,68 +508,9 @@ async fn every_bracket_is_offered_with_the_players_own_marked() {
 }
 
 #[tokio::test]
-async fn a_bracket_with_no_data_is_reported_as_a_fallback_not_substituted() {
+async fn an_unknown_bracket_is_rejected_rather_than_defaulted() {
     let Some(db) = support::pool().await else {
-        return skip("a_bracket_with_no_data_is_reported_as_a_fallback_not_substituted");
-    };
-
-    // The provider publishes nothing for Immortal on this hero — routine above
-    // Divine, and the case where a silent substitution would be most tempting.
-    let mut config = test_config();
-    config.dota.sync_match_limit = 500;
-    config.roles.analysis_match_limit = 100;
-
-    let app = app_with(
-        db,
-        MockDota::with_matches(luna_in_two_roles()),
-        StubVerifier::rejecting(),
-        StubBenchmarks::without_bracket(dota_coach_backend::domain::hero::RankBracket::Immortal),
-        config,
-    );
-    let session = app.login_as(support::unique_steam_id()).await;
-    app.post("/api/players/me/sync", Some(&session.token)).await;
-
-    let body = app
-        .get("/api/benchmark?bracket=immortal", Some(&session.token))
-        .await
-        .json();
-
-    let bracket = &body["context"]["bracket"];
-    assert_eq!(
-        bracket["requested"], "immortal",
-        "what was asked for stands"
-    );
-    assert!(bracket["used"].is_null(), "and it is not claimed as served");
-    assert_eq!(bracket["label"], "All ranks");
-    assert_eq!(bracket["fell_back"], true);
-
-    // Rank stops counting as a segmented dimension, so the caveat reappears.
-    let segmented: Vec<&str> = body["segmented_by"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|s| s.as_str().unwrap())
-        .collect();
-    assert_eq!(segmented, vec!["hero"]);
-
-    let unavailable = body["context"]["unavailable"].as_array().unwrap();
-    let rank = unavailable
-        .iter()
-        .find(|u| u["segment"] == "rank_bracket")
-        .expect("rank is named as unavailable");
-    assert!(
-        rank["reason"].as_str().unwrap().contains("Immortal"),
-        "the reason names the bracket that was asked for: {}",
-        rank["reason"],
-    );
-
-    app.cleanup(&[]).await;
-}
-
-#[tokio::test]
-async fn an_unknown_bracket_is_rejected_rather_than_falling_back_to_the_players_own() {
-    let Some(db) = support::pool().await else {
-        return skip("an_unknown_bracket_is_rejected_rather_than_falling_back_to_the_players_own");
+        return skip("an_unknown_bracket_is_rejected_rather_than_defaulted");
     };
 
     let (app, session) = seed_app(db, luna_in_two_roles(), 100).await;
@@ -456,12 +524,12 @@ async fn an_unknown_bracket_is_rejected_rather_than_falling_back_to_the_players_
             .await;
         assert_eq!(
             response.status, 400,
-            "'{slug}' must not silently serve another bracket: {}",
+            "'{slug}' must not quietly become the default target: {}",
             response.body,
         );
     }
 
-    // The single-metric route takes the same parameter.
+    // The single-metric route takes the same parameter, and narrows both sides.
     let one = app
         .get(
             "/api/benchmark/gold_per_min?bracket=divine",
@@ -469,8 +537,9 @@ async fn an_unknown_bracket_is_rejected_rather_than_falling_back_to_the_players_
         )
         .await
         .json();
-    assert_eq!(one["context"]["bracket"]["used"], "divine");
     assert_eq!(one["results"].as_array().unwrap().len(), 1);
+    assert_eq!(one["target"]["metrics"].as_array().unwrap().len(), 1);
+    assert_eq!(one["target"]["bracket"]["used"], "divine");
 
     app.cleanup(&[]).await;
 }
