@@ -472,6 +472,21 @@ fn checked_price(cents: i64) -> Result<i64, ConfigError> {
     Ok(cents)
 }
 
+/// Split the comma-separated CORS allowlist into bare origins.
+///
+/// An `Origin` header carries a scheme, host and port and nothing else, so an
+/// entry copied out of a browser's address bar — trailing slash and all —
+/// matches no request that will ever arrive. The failure is invisible from
+/// here: the browser reports it, the server logs a perfectly ordinary
+/// preflight. Trim the slash rather than let a one-character typo look like a
+/// backend outage.
+fn parse_origins(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|origin| trim_trailing_slash(origin.trim()))
+        .filter(|origin| !origin.is_empty())
+        .collect()
+}
+
 /// `SameSite=None` without `Secure` is rejected by every current browser, so
 /// the pair would produce a deployment that drops its own session cookie and
 /// blames the network. Refuse it at startup, where it is still a typo.
@@ -526,11 +541,7 @@ impl Config {
             port: optional("PORT", "8080")
                 .parse()
                 .map_err(|e| ConfigError::Invalid("PORT", format!("{e}")))?,
-            cors_origins: optional("CORS_ORIGINS", "http://localhost:3000")
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
+            cors_origins: parse_origins(&optional("CORS_ORIGINS", "http://localhost:3000")),
             auth,
             dota: DotaConfig {
                 base_url: optional("DOTA_API_BASE_URL", "https://api.opendota.com/api"),
@@ -655,6 +666,18 @@ mod tests {
             cookie_secure,
             cookie_cross_site: false,
         }
+    }
+
+    #[test]
+    fn the_cors_allowlist_holds_bare_origins_however_they_were_pasted_in() {
+        assert_eq!(
+            parse_origins(" https://dota-coach.vercel.app/ ,http://localhost:3000,, "),
+            vec![
+                "https://dota-coach.vercel.app".to_string(),
+                "http://localhost:3000".to_string()
+            ]
+        );
+        assert!(parse_origins("").is_empty());
     }
 
     #[test]
