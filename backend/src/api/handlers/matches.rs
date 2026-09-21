@@ -3,19 +3,25 @@
 //! Both handlers scope every query to the caller's own Dota player id, so
 //! there is no code path that reads another user's matches.
 
+use std::collections::HashMap;
+
 use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::extract::{AppPath, AppQuery, CurrentUser};
+use crate::api::handlers::benchmark;
+use crate::domain::benchmark::{BenchmarkContext, ResolvedBracket};
 use crate::domain::eligibility;
+use crate::domain::match_comparison::{MatchComparison, Standing};
 use crate::domain::player::DotaPlayer;
 use crate::domain::r#match::Match;
 use crate::domain::scope::MatchScope;
 use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
+use crate::services::match_comparison;
 use crate::state::AppState;
 use utoipa::ToSchema;
 
@@ -207,6 +213,213 @@ pub async fn get(
 pub struct MatchResponse {
     #[serde(rename = "match")]
     pub match_: MatchView,
+}
+
+/// `GET /api/matches/:id/comparison`
+///
+/// How this game went against players in the same rank bracket on the same
+/// hero, the player's own trend on that hero, and what the numbers say to work
+/// on. Every figure is computed here; the language model is not involved.
+///
+/// Like `get`, a match belonging to someone else answers 404.
+#[utoipa::path(
+    get, path = "/api/matches/{id}/comparison", tag = "matches",
+    summary = "This match against same-rank peers on the same hero",
+    description = "Places one match in the peer distribution for its hero **and the player's own \
+rank bracket**, beside the player's average on that hero, with a trend over the games leading up \
+to it.\n\n\
+The two percentiles are different claims and are labelled as such: the single match is a fact \
+about a game that was played and carries no sample floor, while the hero average is an estimate \
+about the player and carries the usual `confidence`.\n\n\
+Turbo and other ineligible matches answer `comparable: false` — their raw values are served, but \
+no percentile is claimed against a distribution drawn from ranked public matches. A benchmark \
+provider outage degrades the response to raw values and a `note` rather than failing it.",
+    security(("session" = [])),
+    params(
+        ("id" = Uuid, Path,
+            description = "Internal match id — the `id` from `/api/matches`, not the Dota match id.",
+            example = "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+    ),
+    responses(
+        (status = 200, description = "The comparison, possibly degraded with a note", body = MatchComparison),
+        (status = 404, description = "No such match, or it belongs to another player", body = crate::error::ErrorBody),
+        (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
+pub async fn comparison(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    AppPath(id): AppPath<Uuid>,
+) -> AppResult<Json<MatchComparison>> {
+    let player = load_linked_player(&state, &user).await?;
+
+    let match_ = repositories::r#match::find_owned(&state.db, id, player.id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Match not found.".into()))?;
+
+    // No role filter. The page is about this hero in this game, and the
+    // player's other games on it are the right comparison whichever position
+    // they ran — `Match.role` is a lane-priority guess over a different set of
+    // labels than the five the coaching engine uses, so forcing one onto the
+    // other would mislabel rather than narrow.
+    let scope = MatchScope::competitive(state.config.roles.analysis_match_limit);
+
+    // Unscoped on purpose: a Turbo game, or one older than the analysis
+    // window, still has numbers worth showing on its own page.
+    let figures = repositories::metrics::match_figures(&state.db, match_.id)
+        .await?
+        .unwrap_or_default();
+    let match_values = figures.values();
+
+    let averages =
+        repositories::metrics::hero_averages(&state.db, player.id, match_.hero_id, &scope).await?;
+    let average_values = averages.figures.values();
+
+    let history =
+        repositories::metrics::hero_match_values(&state.db, player.id, match_.hero_id, &scope)
+            .await?;
+
+    // Whether this match may be *compared*, as opposed to displayed. A Turbo
+    // game's gold per minute against a distribution drawn from ranked public
+    // matches is the fabricated precision the product exists to avoid.
+    let eligible = eligibility::is_eligible(match_.game_mode, match_.lobby_type);
+
+    let context = BenchmarkContext {
+        hero_id: match_.hero_id,
+        role: None,
+        rank_tier: player.rank_tier,
+        patch: None,
+    };
+
+    let distribution = match state.benchmarks.get_distribution(&context).await {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::warn!(error = %e, hero_id = match_.hero_id, "benchmark distribution unavailable");
+            None
+        }
+    };
+
+    let provider_note = match &distribution {
+        Some(_) => None,
+        None => Some(
+            "Peer comparison is unavailable right now, so this match is shown without \
+             percentiles. Your own figures are unaffected."
+                .to_string(),
+        ),
+    };
+
+    let bracket = distribution
+        .as_ref()
+        .map(|d| d.bracket)
+        .unwrap_or_else(|| ResolvedBracket::requested_for(player.rank_tier));
+
+    let (match_percentiles, average_percentiles) = match (&distribution, eligible) {
+        (Some(d), true) => (
+            match_comparison::percentiles_for(&match_values, d),
+            match_comparison::percentiles_for(&average_values, d),
+        ),
+        // The hero average is drawn from eligible games only, so it keeps its
+        // percentiles even when the match on screen is a Turbo one.
+        (Some(d), false) => (
+            HashMap::new(),
+            match_comparison::percentiles_for(&average_values, d),
+        ),
+        (None, _) => (HashMap::new(), HashMap::new()),
+    };
+
+    let this_standing = match_comparison::standing(&match_percentiles);
+    let average_standing = match_comparison::standing(&average_percentiles);
+
+    let (trend, delta_vs_previous) = match &distribution {
+        Some(d) => {
+            let window = match_comparison::trend_window(&history, match_.id);
+            let points = match_comparison::trend(window, d, match_.id);
+            let delta = match_comparison::delta_vs_previous(&points, match_.id);
+            (points, delta)
+        }
+        None => (Vec::new(), None),
+    };
+
+    let (pros, cons, suggestion) = match (&distribution, eligible) {
+        (Some(d), true) => {
+            let (pros, cons) = match_comparison::pros_and_cons(
+                &match_percentiles,
+                &match_values,
+                d,
+                bracket.label,
+            );
+            let suggestion = match_comparison::suggestion(
+                &match_percentiles,
+                &match_values,
+                d,
+                match_.duration_seconds,
+                &match_.hero_name,
+                bracket.label,
+            );
+            (pros, cons, suggestion)
+        }
+        // Nothing to say about a game that was not compared. Saying it anyway
+        // would be reading strengths out of an empty percentile map.
+        _ => (Vec::new(), Vec::new(), None),
+    };
+
+    let note = provider_note.or_else(|| {
+        (!eligible).then(|| {
+            format!(
+                "This was a {} game. The peer distribution covers ranked public matches, so its \
+                 figures are shown without percentiles; the trend and your average below come \
+                 from your eligible games on this hero.",
+                eligibility::mode_label(match_.game_mode, match_.lobby_type),
+            )
+        })
+    });
+
+    let segmented_by = distribution
+        .as_ref()
+        .map(|d| d.segmented_by.clone())
+        .unwrap_or_default();
+
+    Ok(Json(MatchComparison {
+        hero_id: match_.hero_id,
+        bracket,
+        comparable: eligible && distribution.is_some(),
+        standing: Standing {
+            this_match: this_standing,
+            hero_average: average_standing,
+            metrics_counted: if this_standing.is_some() {
+                match_percentiles.len()
+            } else {
+                average_percentiles.len()
+            },
+            peer_sample_size: distribution.as_ref().and_then(|d| d.sample_size),
+        },
+        metrics: match_comparison::metric_comparisons(
+            &match_values,
+            &match_percentiles,
+            &average_values,
+            &average_percentiles,
+            averages.sample,
+            distribution.as_ref(),
+        ),
+        trend,
+        delta_vs_previous,
+        pros,
+        cons,
+        suggestion,
+        context: benchmark::context_info(
+            match_.hero_id,
+            &match_.hero_name,
+            None,
+            &player,
+            &scope,
+            &segmented_by,
+            bracket,
+        ),
+        hero_name: match_.hero_name,
+        note,
+    }))
 }
 
 async fn load_linked_player(state: &AppState, user: &User) -> AppResult<DotaPlayer> {

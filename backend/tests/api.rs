@@ -30,6 +30,10 @@ async fn an_anonymous_request_is_rejected_everywhere() {
         ("POST", "/api/players/me/sync"),
         ("GET", "/api/matches"),
         ("GET", "/api/matches/00000000-0000-0000-0000-000000000000"),
+        (
+            "GET",
+            "/api/matches/00000000-0000-0000-0000-000000000000/comparison",
+        ),
         ("GET", "/api/auth/me"),
         ("GET", "/api/stats"),
         ("GET", "/api/benchmark"),
@@ -53,7 +57,10 @@ async fn an_anonymous_request_is_rejected_everywhere() {
         ),
         ("GET", "/api/admin/stats"),
         ("GET", "/api/admin/users"),
-        ("GET", "/api/admin/users/00000000-0000-0000-0000-000000000000"),
+        (
+            "GET",
+            "/api/admin/users/00000000-0000-0000-0000-000000000000",
+        ),
         (
             "POST",
             "/api/admin/users/00000000-0000-0000-0000-000000000000/extend",
@@ -68,7 +75,10 @@ async fn an_anonymous_request_is_rejected_everywhere() {
         ),
         ("GET", "/api/admin/vouchers"),
         ("POST", "/api/admin/vouchers"),
-        ("GET", "/api/admin/vouchers/00000000-0000-0000-0000-000000000000"),
+        (
+            "GET",
+            "/api/admin/vouchers/00000000-0000-0000-0000-000000000000",
+        ),
         (
             "POST",
             "/api/admin/vouchers/00000000-0000-0000-0000-000000000000/deactivate",
@@ -838,8 +848,10 @@ async fn benchmarks_place_the_player_in_the_peer_distribution() {
     let body = app.get("/api/benchmark", Some(&session.token)).await.json();
 
     assert_eq!(body["sample"], 20);
-    // Hero only: the provider cannot segment by rank, and must not imply it.
+    // Hero and rank: the provider segments on both, so the response says both.
+    // Role and patch are still missing and still listed under `unavailable`.
     assert_eq!(body["segmented_by"][0], "hero");
+    assert_eq!(body["segmented_by"][1], "rank_bracket");
 
     let gpm = body["results"]
         .as_array()
@@ -3124,7 +3136,10 @@ async fn the_documentation_is_served_when_it_is_enabled() {
     );
 
     let spec = app.get("/api-docs/openapi.json", None).await;
-    assert_eq!(spec.status, 200, "the document is readable without a session");
+    assert_eq!(
+        spec.status, 200,
+        "the document is readable without a session"
+    );
     assert_eq!(spec.json()["info"]["title"], "Dota Coach API");
 }
 
@@ -3201,7 +3216,8 @@ async fn admin_routes_reject_a_signed_in_non_admin() {
         let response = if method == "GET" {
             app.get(&path, Some(&session.token)).await
         } else {
-            app.post_json(&path, r#"{"days": 1}"#, Some(&session.token)).await
+            app.post_json(&path, r#"{"days": 1}"#, Some(&session.token))
+                .await
         };
 
         assert_eq!(
@@ -3304,7 +3320,10 @@ async fn an_admin_can_view_one_accounts_profile_and_timeline() {
         .unwrap();
 
     let response = app
-        .get(&format!("/api/admin/users/{target_id}"), Some(&admin_session.token))
+        .get(
+            &format!("/api/admin/users/{target_id}"),
+            Some(&admin_session.token),
+        )
         .await;
     assert_eq!(response.status, StatusCode::OK);
     let body = response.json();
@@ -3417,7 +3436,9 @@ async fn disabling_an_account_locks_it_out_on_its_very_next_request() {
 
     // Same session, no re-login: the extractor checks status fresh every
     // request, so no session revocation is needed.
-    let after = app.get("/api/players/me", Some(&target_session.token)).await;
+    let after = app
+        .get("/api/players/me", Some(&target_session.token))
+        .await;
     assert_eq!(after.status, StatusCode::FORBIDDEN);
     assert_eq!(after.json()["error"]["code"], "ACCOUNT_DISABLED");
 
@@ -3528,7 +3549,9 @@ async fn trial_conversion_counts_the_cohort_that_actually_started_in_the_window(
 /// Parses an RFC3339 literal into a `DateTime<Utc>`, for tests that need an
 /// exact, synthetic instant rather than `now()`.
 fn rfc3339(s: &str) -> chrono::DateTime<chrono::Utc> {
-    DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc)
+    DateTime::parse_from_rfc3339(s)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
 }
 
 #[tokio::test]
@@ -3621,7 +3644,10 @@ async fn active_since_counts_distinct_accounts_not_raw_login_events() {
     .await
     .unwrap();
 
-    assert_eq!(active, 2, "A and B, counted once each — not five raw events");
+    assert_eq!(
+        active, 2,
+        "A and B, counted once each — not five raw events"
+    );
 
     app.cleanup(&steam_ids).await;
 }
@@ -3638,14 +3664,12 @@ async fn the_daily_series_has_no_gaps_on_a_day_with_no_activity() {
     }
 
     // Two signups on the 2nd, one on the 4th, nothing on the 1st, 3rd or 5th.
-    sqlx::query(
-        "UPDATE users SET created_at = '2021-03-02T00:00:00Z' WHERE steam_id IN ($1, $2)",
-    )
-    .bind(steam_ids[0])
-    .bind(steam_ids[1])
-    .execute(&app.db)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE users SET created_at = '2021-03-02T00:00:00Z' WHERE steam_id IN ($1, $2)")
+        .bind(steam_ids[0])
+        .bind(steam_ids[1])
+        .execute(&app.db)
+        .await
+        .unwrap();
     sqlx::query("UPDATE users SET created_at = '2021-03-04T00:00:00Z' WHERE steam_id = $1")
         .bind(steam_ids[2])
         .execute(&app.db)
@@ -3717,9 +3741,10 @@ async fn redeeming_a_valid_code_grants_time_and_records_the_event() {
     let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
     let session = app.login_as(steam_id).await;
 
-    let voucher = dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(30, 1, None))
-        .await
-        .unwrap();
+    let voucher =
+        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(30, 1, None))
+            .await
+            .unwrap();
 
     let response = app
         .post_json(
@@ -3789,9 +3814,10 @@ async fn a_voucher_already_at_its_use_limit_is_refused() {
     let first_session = app.login_as(steam_ids[0]).await;
     let second_session = app.login_as(steam_ids[1]).await;
 
-    let voucher = dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(7, 1, None))
-        .await
-        .unwrap();
+    let voucher =
+        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(7, 1, None))
+            .await
+            .unwrap();
 
     let first = app
         .post_json(
@@ -3800,7 +3826,11 @@ async fn a_voucher_already_at_its_use_limit_is_refused() {
             Some(&first_session.token),
         )
         .await;
-    assert_eq!(first.status, StatusCode::OK, "the first redemption should succeed");
+    assert_eq!(
+        first.status,
+        StatusCode::OK,
+        "the first redemption should succeed"
+    );
 
     let second = app
         .post_json(
@@ -3829,9 +3859,10 @@ async fn redeeming_the_same_code_twice_is_refused_the_second_time() {
 
     // max_uses well above 1, so a rejection here can only be "you already
     // redeemed this", never "someone else used it up".
-    let voucher = dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(7, 5, None))
-        .await
-        .unwrap();
+    let voucher =
+        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(7, 5, None))
+            .await
+            .unwrap();
 
     let first = app
         .post_json(
@@ -3864,7 +3895,11 @@ async fn concurrent_redemption_of_a_single_use_voucher_lets_exactly_one_through(
         return skip("concurrent_redemption_of_a_single_use_voucher_lets_exactly_one_through");
     };
     let steam_ids: Vec<i64> = (0..5).map(|_| unique_steam_id()).collect();
-    let app = app(db.clone(), MockDota::default().into(), StubVerifier::rejecting());
+    let app = app(
+        db.clone(),
+        MockDota::default().into(),
+        StubVerifier::rejecting(),
+    );
     for steam_id in &steam_ids {
         app.login_as(*steam_id).await;
     }
@@ -3873,9 +3908,10 @@ async fn concurrent_redemption_of_a_single_use_voucher_lets_exactly_one_through(
         user_ids.push(user_id_for(&app, *steam_id).await);
     }
 
-    let voucher = dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(7, 1, None))
-        .await
-        .unwrap();
+    let voucher =
+        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(7, 1, None))
+            .await
+            .unwrap();
 
     // Five different accounts racing the same single-use code — the row
     // lock in `services::voucher::redeem` is what has to serialize this
@@ -3909,7 +3945,10 @@ async fn concurrent_redemption_of_a_single_use_voucher_lets_exactly_one_through(
         }
     }
 
-    assert_eq!(succeeded, 1, "exactly one of the five should have won the race");
+    assert_eq!(
+        succeeded, 1,
+        "exactly one of the five should have won the race"
+    );
     assert_eq!(used_up, 4);
 
     app.cleanup(&steam_ids).await;
@@ -3941,9 +3980,10 @@ async fn redeeming_extends_an_existing_paid_period_rather_than_replacing_it() {
     .await
     .unwrap();
 
-    let voucher = dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(30, 1, None))
-        .await
-        .unwrap();
+    let voucher =
+        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(30, 1, None))
+            .await
+            .unwrap();
 
     let response = app
         .post_json(
@@ -4308,7 +4348,10 @@ async fn admin_stats_count_voucher_redemptions_and_daily_purchases() {
         dota_coach_backend::repositories::admin::count_voucher_redemptions(&app.db, from, to)
             .await
             .unwrap();
-    assert_eq!(voucher_redemptions, 1, "the January redemption is outside the window");
+    assert_eq!(
+        voucher_redemptions, 1,
+        "the January redemption is outside the window"
+    );
 
     let series = dota_coach_backend::repositories::admin::daily_series(
         &app.db,
@@ -4318,7 +4361,10 @@ async fn admin_stats_count_voucher_redemptions_and_daily_purchases() {
     .await
     .unwrap();
     let march_2 = series.iter().find(|d| d.date.day() == 2).unwrap();
-    assert_eq!(march_2.purchases, 2, "two separate charges, not one distinct user");
+    assert_eq!(
+        march_2.purchases, 2,
+        "two separate charges, not one distinct user"
+    );
 
     app.cleanup(&[steam_id]).await;
 }
@@ -4390,7 +4436,10 @@ async fn every_mutating_admin_action_writes_an_audit_entry() {
         )
         .await;
     assert_eq!(created.status, StatusCode::OK);
-    let voucher_id = created.json()["vouchers"][0]["id"].as_str().unwrap().to_string();
+    let voucher_id = created.json()["vouchers"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(
         app.post(
             &format!("/api/admin/vouchers/{voucher_id}/deactivate"),
@@ -4415,9 +4464,24 @@ async fn every_mutating_admin_action_writes_an_audit_entry() {
     assert_eq!(
         rows,
         vec![
-            ("extend_access".to_string(), "user".to_string(), target_id, Some(admin_id)),
-            ("disable_user".to_string(), "user".to_string(), target_id, Some(admin_id)),
-            ("enable_user".to_string(), "user".to_string(), target_id, Some(admin_id)),
+            (
+                "extend_access".to_string(),
+                "user".to_string(),
+                target_id,
+                Some(admin_id)
+            ),
+            (
+                "disable_user".to_string(),
+                "user".to_string(),
+                target_id,
+                Some(admin_id)
+            ),
+            (
+                "enable_user".to_string(),
+                "user".to_string(),
+                target_id,
+                Some(admin_id)
+            ),
             (
                 "create_voucher".to_string(),
                 "voucher".to_string(),
@@ -4480,7 +4544,9 @@ async fn the_audit_log_lists_entries_newest_first_with_the_admins_name() {
     // Newest first: enable was the more recent of the two actions.
     assert_eq!(entries[0]["action"], "enable_user");
     assert_eq!(entries[1]["action"], "disable_user");
-    assert!(entries[0]["admin_persona_name"].is_string() || entries[0]["admin_persona_name"].is_null());
+    assert!(
+        entries[0]["admin_persona_name"].is_string() || entries[0]["admin_persona_name"].is_null()
+    );
 
     app.cleanup(&[admin_steam_id, target_steam_id]).await;
 }

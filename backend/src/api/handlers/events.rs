@@ -79,7 +79,10 @@ mod tests {
         assert_eq!(sanitize_path("/coach"), "/coach");
         assert_eq!(sanitize_path("/reset?token=abc123"), "/reset");
         assert_eq!(sanitize_path("/coach#section"), "/coach");
-        assert_eq!(sanitize_path("/auth/callback?openid.sig=xyz&state=1"), "/auth/callback");
+        assert_eq!(
+            sanitize_path("/auth/callback?openid.sig=xyz&state=1"),
+            "/auth/callback"
+        );
     }
 
     #[test]

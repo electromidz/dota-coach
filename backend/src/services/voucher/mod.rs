@@ -73,7 +73,10 @@ pub async fn redeem(
     if !voucher.active {
         return Err(VoucherError::Inactive);
     }
-    if voucher.expires_at.is_some_and(|expires_at| expires_at <= now) {
+    if voucher
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= now)
+    {
         return Err(VoucherError::Expired);
     }
     if voucher.used_count >= voucher.max_uses {

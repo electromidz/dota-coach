@@ -19,8 +19,10 @@ use uuid::Uuid;
 use crate::api::extract::{AppJson, AppPath, CurrentUser, EntitledUser};
 use crate::api::handlers::{benchmark, heroes, stats};
 use crate::domain::coaching::{AnalysisScope, CoachingAnalysis, Evidence};
-use crate::domain::event::EventType;
 use crate::domain::coaching_profile::CoachingProfile;
+use crate::domain::coaching_session::CoachingSession;
+use crate::domain::event::EventType;
+use crate::domain::metrics::{HeroStats, PlayerStats};
 use crate::domain::player::DotaPlayer;
 use crate::domain::player_model::{PatternStatus, PlayerModel, RecurringPattern};
 use crate::domain::r#match::Match;
@@ -31,14 +33,17 @@ use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
 use crate::repositories::coaching::NewAnalysis;
+use crate::services::cache;
 use crate::services::coaching::{
     self,
     evidence::{EvidenceInputs, EvidenceScope},
     CoachingError,
 };
-use crate::services::llm::LlmError;
+use crate::services::coaching_session;
 use crate::services::events;
+use crate::services::llm::LlmError;
 use crate::services::player_model::{self, patterns, ModelInputs};
+use crate::services::progress as progress_engine;
 use crate::services::training::{self, SelectionInputs};
 use crate::state::AppState;
 use utoipa::ToSchema;
@@ -261,7 +266,10 @@ pub(crate) struct CoachingScope {
 /// only honest defaults are both wrong: every role mixes evidence the product
 /// exists to keep apart, and the recommended role silently overrides a decision
 /// that belongs to the player. So this is a precondition, not a fallback.
-async fn require_scope(state: &AppState, player: &DotaPlayer) -> AppResult<CoachingScope> {
+pub(crate) async fn require_scope(
+    state: &AppState,
+    player: &DotaPlayer,
+) -> AppResult<CoachingScope> {
     let window = state.config.roles.analysis_match_limit;
 
     let Some(profile) = repositories::coaching_profile::find(&state.db, player.id).await? else {
@@ -567,16 +575,53 @@ pub async fn analyze(
 ) -> AppResult<Json<CoachResponse>> {
     let player = load_linked_player(&state, &user).await?;
     let scope = require_scope(&state, &player).await?;
-    let (evidence, patterns) = role_evidence(&state, &user, &player, &scope).await?;
+
+    // One gather, two renderings: the prose the model is shown, and the
+    // numbers the session records. Fetching twice would let the snapshot and
+    // the advice written about it describe different windows.
+    let inputs = role_inputs(&state, &user, &player, &scope).await?;
+    let patterns = inputs.patterns.clone();
+
+    // A threshold of one, not ten: an analysis has to bind to a snapshot
+    // describing exactly the games it read, so any new match earns a session
+    // before the model sees anything. A failure here must not cost the player
+    // the analysis they are paying for.
+    let session = match checkpoint_from(&state, &player, &scope, &inputs, 1).await {
+        Ok(session) => session,
+        Err(e) => {
+            tracing::warn!(error = %e, "coaching session skipped before generation");
+            None
+        }
+    };
+    // With nothing new, the newest existing session is the one this analysis
+    // describes.
+    let session_id = match session {
+        Some(session) => Some(session.id),
+        None => repositories::coaching_session::latest(&state.db, player.id, scope.role)
+            .await?
+            .map(|s| s.id),
+    };
+
+    // Read *after* the checkpoint, so a session written a moment ago is the
+    // current half of the comparison rather than being compared against.
+    let progress = progress_context(&state, &player, scope.role).await?;
+    let evidence = inputs.evidence(
+        &scope,
+        state.config.coach.recent_matches as usize,
+        &progress,
+    );
 
     run(
         &state,
         &player,
-        AnalysisScope::Role,
-        Some(scope.role),
-        None,
-        evidence,
-        patterns,
+        Generation {
+            scope: AnalysisScope::Role,
+            role: Some(scope.role),
+            match_id: None,
+            evidence,
+            patterns,
+            session_id,
+        },
     )
     .await
 }
@@ -617,11 +662,15 @@ pub async fn analyze_match(
     run(
         &state,
         &player,
-        AnalysisScope::Match,
-        CoachableRole::from_stored(&match_.role),
-        Some(id),
-        evidence,
-        patterns,
+        Generation {
+            scope: AnalysisScope::Match,
+            role: CoachableRole::from_stored(&match_.role),
+            match_id: Some(id),
+            evidence,
+            patterns,
+            // A single game is not a coaching session, so nothing to bind.
+            session_id: None,
+        },
     )
     .await
 }
@@ -664,16 +713,33 @@ pub async fn match_analysis(
     )))
 }
 
-/// Generate, verify and store — or hand back the answer to the same question.
-async fn run(
-    state: &AppState,
-    player: &DotaPlayer,
+/// One question to put to the model, and where its answer belongs.
+struct Generation {
     scope: AnalysisScope,
     role: Option<CoachableRole>,
     match_id: Option<Uuid>,
     evidence: Vec<Evidence>,
     patterns: Vec<RecurringPattern>,
+    /// The session this analysis interprets, when there is one. A match
+    /// analysis has none: a single game is not a coaching session.
+    session_id: Option<Uuid>,
+}
+
+/// Generate, verify and store — or hand back the answer to the same question.
+async fn run(
+    state: &AppState,
+    player: &DotaPlayer,
+    request: Generation,
 ) -> AppResult<Json<CoachResponse>> {
+    let Generation {
+        scope,
+        role,
+        match_id,
+        evidence,
+        patterns,
+        session_id,
+    } = request;
+
     if evidence.is_empty() {
         return Err(AppError::PreconditionUnmet(
             "There is nothing to analyse yet — sync some matches first.".into(),
@@ -731,7 +797,7 @@ async fn run(
         .await
         .map_err(coaching_error)?;
 
-    repositories::coaching::insert(
+    let analysis_id = repositories::coaching::insert(
         &state.db,
         &NewAnalysis {
             dota_player_id: player.id,
@@ -747,6 +813,28 @@ async fn run(
         },
     )
     .await?;
+
+    // Bind the model's reading to the snapshot it read. A session records the
+    // *first* interpretation made of it: re-generating after a prompt-version
+    // bump writes a new analysis row and leaves the session alone, which is
+    // what immutability means here. `attach_analysis` answering false is that
+    // case, not a failure.
+    if let Some(session_id) = session_id {
+        match repositories::coaching_session::attach_analysis(
+            &state.db,
+            session_id,
+            player.id,
+            analysis_id,
+        )
+        .await
+        {
+            Ok(true) => tracing::info!(session = %session_id, "analysis attached to session"),
+            Ok(false) => {}
+            // The analysis is stored and is what the caller asked for; losing
+            // the link is not worth failing the request over.
+            Err(e) => tracing::warn!(error = %e, "could not attach the analysis to its session"),
+        }
+    }
 
     let stored =
         repositories::coaching::find_by_hash(&state.db, player.id, match_id, &hash).await?;
@@ -828,12 +916,227 @@ async fn enforce_limits(state: &AppState, player: &DotaPlayer) -> AppResult<()> 
 /// `scope.matches`, so a Support match cannot reach a Carry analysis by any
 /// path — not because the prompt asks the model to ignore it, but because it
 /// was never fetched.
-async fn role_evidence(
+pub(crate) async fn role_evidence(
     state: &AppState,
     user: &User,
     player: &DotaPlayer,
     scope: &CoachingScope,
 ) -> AppResult<(Vec<Evidence>, Vec<RecurringPattern>)> {
+    let key = evidence_cache_key(state, player, scope).await;
+
+    let compute = || async {
+        let inputs = role_inputs(state, user, player, scope).await?;
+        let progress = progress_context(state, player, scope.role).await?;
+        let evidence =
+            inputs.evidence(scope, state.config.coach.recent_matches as usize, &progress);
+        Ok(CachedEvidence {
+            evidence,
+            patterns: inputs.patterns,
+        })
+    };
+
+    let cached = match key {
+        Some(key) => cache::read_through(state.cache.as_ref(), &key, player.id, compute).await?,
+        // No fingerprint means something the key depends on could not be read.
+        // Computing without caching is the safe half of that: a value nobody
+        // can describe is a value nobody should store.
+        None => compute().await?,
+    };
+
+    Ok((cached.evidence, cached.patterns))
+}
+
+/// The cached half of a coaching read.
+///
+/// Both halves travel together because they are computed together and are
+/// consistent only with each other: patterns detected in one window and
+/// evidence built from another would let the page cite a habit its own
+/// figures do not show.
+#[derive(Serialize, Deserialize)]
+struct CachedEvidence {
+    evidence: Vec<Evidence>,
+    patterns: Vec<RecurringPattern>,
+}
+
+/// A key that stops matching the moment anything behind the value moves.
+///
+/// This is the invalidation mechanism, and it is deliberately not eviction.
+/// Forgetting to evict is how a coaching cache starts telling a player about
+/// last week; a key that cannot match cannot be forgotten about.
+///
+/// The fingerprint covers every input the cached evidence depends on:
+///
+/// | Input | Why it is in the key |
+/// |---|---|
+/// | `last_synced_at` | New matches, and the metrics recomputed with them |
+/// | `metrics_version` | A formula change makes every stored figure different |
+/// | coaching profile `updated_at` | The role, and the window it implies |
+/// | active focus id and `updated_at` | `focus.current` evidence |
+/// | newest session id | The progress comparison |
+/// | benchmark and hero-meta snapshot freshness | Peer and meta evidence |
+///
+/// `None` when the fingerprint itself could not be read, which is treated as
+/// "do not cache" rather than "cache under a guess".
+async fn evidence_cache_key(
+    state: &AppState,
+    player: &DotaPlayer,
+    scope: &CoachingScope,
+) -> Option<cache::CacheKey> {
+    if !state.cache.is_enabled() {
+        return None;
+    }
+
+    let fingerprint: String = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT concat_ws(
+                    '|',
+                    to_char(p.last_synced_at, 'YYYYMMDDHH24MISSUS'),
+                    $2::text,
+                    to_char(cp.updated_at, 'YYYYMMDDHH24MISSUS'),
+                    tf.id::text,
+                    to_char(tf.updated_at, 'YYYYMMDDHH24MISSUS'),
+                    cs.id::text,
+                    to_char(bs.newest, 'YYYYMMDDHH24MISSUS'),
+                    to_char(hms.newest, 'YYYYMMDDHH24MISSUS')
+                )
+           FROM dota_players p
+           LEFT JOIN coaching_profiles cp ON cp.dota_player_id = p.id
+           LEFT JOIN training_focus tf
+                  ON tf.dota_player_id = p.id
+                 AND tf.status = 'active'
+                 AND tf.role IS NOT DISTINCT FROM $3
+           LEFT JOIN LATERAL (
+                    SELECT id FROM coaching_sessions
+                     WHERE dota_player_id = p.id AND role = $3
+                     ORDER BY sequence DESC LIMIT 1
+                ) cs ON TRUE
+           LEFT JOIN LATERAL (
+                    SELECT MAX(fetched_at) AS newest FROM benchmark_snapshots
+                ) bs ON TRUE
+           LEFT JOIN LATERAL (
+                    SELECT MAX(fetched_at) AS newest FROM hero_meta_snapshots
+                ) hms ON TRUE
+          WHERE p.id = $1",
+    )
+    .bind(player.id)
+    .bind(crate::services::metrics::METRICS_VERSION)
+    .bind(scope.role.slug())
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "coaching cache fingerprint failed; computing uncached");
+        None
+    })
+    // `fetch_optional` wraps the column's own nullability, so flatten before
+    // using it: no row and a null fingerprint both mean "do not cache".
+    .flatten()?;
+
+    Some(cache::CacheKey::new(
+        "coach-evidence",
+        player.id,
+        scope.role.slug(),
+        &short_hash(&fingerprint),
+    ))
+}
+
+/// A fingerprint short enough to read in a log line.
+///
+/// Hashed rather than concatenated because the raw string carries timestamps
+/// and ids that have no business being a primary key, and because a key of
+/// bounded length keeps the index small.
+fn short_hash(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(input.as_bytes());
+    digest[..16].iter().fold(String::new(), |mut acc, byte| {
+        use std::fmt::Write;
+        let _ = write!(acc, "{byte:02x}");
+        acc
+    })
+}
+
+/// Everything one role's coaching is computed from, fetched once.
+///
+/// Two things are rendered from this: *sentences* for a model to cite, and
+/// *numbers* for a coaching session to store and a later session to be compared
+/// against. They are the same facts in two shapes — prose cannot be compared,
+/// and numbers cannot be read aloud — so fetching twice would mean a snapshot
+/// and the advice written about it could disagree.
+pub(crate) struct RoleInputs {
+    pub stats: PlayerStats,
+    /// The scoped match history the pattern detectors read.
+    pub history: Vec<crate::domain::player_model::AnalyzedMatch>,
+    pub patterns: Vec<RecurringPattern>,
+    /// The whole scoped window, newest first — the exact matches every figure
+    /// here was read from, and the set a session records.
+    ///
+    /// Fetched once and sliced for the recent-form evidence, rather than
+    /// queried twice at two limits: two reads of a moving window can disagree.
+    pub window: Vec<Match>,
+    pub benchmark: benchmark::BenchmarkResponse,
+    /// True when the benchmark provider answered at all. A provider that is
+    /// *down* is different from one that has no data for this hero, and only
+    /// the first should stop a session being written.
+    pub benchmark_available: bool,
+    pub heroes: heroes::Built,
+    /// The role's own rollup, used for the stored performance score.
+    pub hero_stats: Vec<HeroStats>,
+    pub focus: Option<TrainingFocus>,
+}
+
+impl RoleInputs {
+    /// The ids of every match behind these figures, newest first.
+    pub fn window_ids(&self) -> Vec<Uuid> {
+        self.window.iter().map(|m| m.id).collect()
+    }
+
+    /// The prose rendering, for the model.
+    ///
+    /// `progress` is passed in rather than gathered here because its value
+    /// depends on *when* it is read: a generation checkpoints first, so the
+    /// session it just wrote is part of the comparison the model is shown.
+    fn evidence(
+        &self,
+        scope: &CoachingScope,
+        recent: usize,
+        progress: &ProgressContext,
+    ) -> Vec<Evidence> {
+        let recent = &self.window[..recent.min(self.window.len())];
+
+        coaching::evidence::build(&EvidenceInputs {
+            scope: EvidenceScope {
+                role: Some(scope.role),
+                matches: self.stats.matches,
+                confidence: SampleConfidence::for_matches(self.stats.matches),
+            },
+            stats: &self.stats,
+            recent,
+            benchmarks: &self.benchmark.results,
+            benchmark_hero: (!self.benchmark.hero_name.is_empty())
+                .then_some(self.benchmark.hero_name.as_str()),
+            pool: &self.heroes.pool,
+            recommendations: &self.heroes.recommendations,
+            patterns: &self.patterns,
+            progress: progress.comparison.as_ref(),
+            has_session: progress.has_session,
+            focus: self.focus.as_ref(),
+            focus_match: None,
+            focus_metrics: None,
+        })
+    }
+}
+
+/// Fetch everything one role's coaching reads.
+///
+/// This is the architectural boundary: every query below is handed
+/// `scope.matches`, so a Support match cannot reach a Carry analysis by any
+/// path — not because the prompt asks the model to ignore it, but because it
+/// was never fetched.
+pub(crate) async fn role_inputs(
+    state: &AppState,
+    user: &User,
+    player: &DotaPlayer,
+    scope: &CoachingScope,
+) -> AppResult<RoleInputs> {
     let stats =
         repositories::metrics::player_stats_scoped(&state.db, player.id, &scope.matches).await?;
 
@@ -841,13 +1144,13 @@ async fn role_evidence(
     // average, so they are detected before the evidence is assembled — and
     // detected inside the scope, so "you keep doing this" means "in this role".
     let refreshed = player_model::analyze_scope(&state.db, player.id, &scope.matches).await?;
-    let detected = refreshed.patterns;
+    let patterns = refreshed.patterns;
 
-    let recent = repositories::r#match::list_by_player_scoped(
+    let window = repositories::r#match::list_by_player_scoped(
         &state.db,
         player.id,
         &scope.matches,
-        state.config.coach.recent_matches,
+        state.config.roles.analysis_match_limit,
         0,
     )
     .await?;
@@ -855,6 +1158,11 @@ async fn role_evidence(
     // Both of these degrade internally rather than failing: a benchmark or
     // meta outage removes evidence, it does not remove the coach.
     let benchmark = role_benchmark(state, player, scope).await?;
+    // `build` reports an outage as a note rather than an error, so that note is
+    // the only signal a caller has that the peer half is missing for a reason
+    // other than "no data".
+    let benchmark_available = benchmark.note.is_none();
+
     let heroes = heroes::build(
         state,
         user,
@@ -863,35 +1171,209 @@ async fn role_evidence(
         Some(scope.role),
     )
     .await?;
+
+    // The role's most-played heroes, as plain rollups. Cheaper than
+    // `heroes::build` and the shape a session stores.
+    let hero_stats = repositories::metrics::hero_stats_scoped(
+        &state.db,
+        player.id,
+        &scope.matches,
+        HERO_SNAPSHOT_LIMIT,
+    )
+    .await?;
+
     let focus = active_focus(
         state,
         player,
         Some(scope.role),
         &refreshed.history,
         &benchmark.results,
-        &detected,
+        &patterns,
     )
     .await?;
 
-    let evidence = coaching::evidence::build(&EvidenceInputs {
-        scope: EvidenceScope {
-            role: Some(scope.role),
-            matches: stats.matches,
-            confidence: SampleConfidence::for_matches(stats.matches),
+    Ok(RoleInputs {
+        stats,
+        history: refreshed.history,
+        patterns,
+        window,
+        benchmark,
+        benchmark_available,
+        heroes,
+        hero_stats,
+        focus,
+    })
+}
+
+/// How many of the role's heroes a session records.
+const HERO_SNAPSHOT_LIMIT: i64 = 5;
+
+/// What the coach knows about this player's history with the role.
+///
+/// Carries the absence as well as the comparison, because they are different
+/// absences: a player with no sessions and a player with exactly one both have
+/// no comparison, and only the second has been measured before.
+pub(crate) struct ProgressContext {
+    pub comparison: Option<crate::domain::progress::SessionProgress>,
+    pub has_session: bool,
+}
+
+/// Compare the two newest sessions for a role, if there are two.
+///
+/// Read at the point of use rather than cached on [`RoleInputs`]: a generation
+/// checkpoints *before* building its evidence, so the session it just wrote
+/// has to be part of the comparison the model is shown.
+pub(crate) async fn progress_context(
+    state: &AppState,
+    player: &DotaPlayer,
+    role: CoachableRole,
+) -> AppResult<ProgressContext> {
+    // Two is all a comparison needs. The trend across ten is a different
+    // question, answered by `/api/coach/progress`.
+    let sessions = repositories::coaching_session::list(&state.db, player.id, role, 2, 0).await?;
+
+    Ok(ProgressContext {
+        has_session: !sessions.is_empty(),
+        comparison: match sessions.as_slice() {
+            [current, previous] => Some(progress_engine::compare(previous, current)),
+            _ => None,
         },
-        stats: &stats,
-        recent: &recent,
-        benchmarks: &benchmark.results,
-        benchmark_hero: (!benchmark.hero_name.is_empty()).then_some(benchmark.hero_name.as_str()),
-        pool: &heroes.pool,
-        recommendations: &heroes.recommendations,
-        patterns: &detected,
-        focus: focus.as_ref(),
-        focus_match: None,
-        focus_metrics: None,
+    })
+}
+
+/// The coaching scope, or `None` when the player has not chosen a role.
+///
+/// The quiet counterpart to [`require_scope`], for callers that are not serving
+/// a coaching request and must not turn "no role yet" into an error. A sync is
+/// the case that matters: a player who has never opened the coach still syncs
+/// matches, and that must keep working.
+pub(crate) async fn scope_for_checkpoint(
+    state: &AppState,
+    player: &DotaPlayer,
+) -> AppResult<Option<CoachingScope>> {
+    let Some(profile) = repositories::coaching_profile::find(&state.db, player.id).await? else {
+        return Ok(None);
+    };
+
+    Ok(Some(CoachingScope {
+        role: profile.selected_role,
+        matches: MatchScope::for_role(
+            profile.selected_role,
+            state.config.roles.analysis_match_limit,
+        ),
+    }))
+}
+
+/// Record where the player stands, if enough has changed to be worth recording.
+///
+/// `min_new` is the number of matches the last session did not read that
+/// justifies a new one. Two callers want different answers:
+///
+///   * A **sync** passes [`MIN_NEW_MATCHES`] — background checkpointing, where
+///     the threshold is what stops history filling with near-identical
+///     snapshots that make every later comparison read as noise.
+///   * A **generation** passes 1, because an analysis must bind to a snapshot
+///     describing exactly the games it read.
+///
+/// `Ok(None)` means nothing was new enough to record. That is the common case
+/// and is not an error.
+///
+/// A session is only written when it can be written **completely**. If the
+/// benchmark provider is down, this writes nothing and lets the next
+/// checkpoint pick it up: a snapshot permanently missing its peer half would
+/// poison every comparison made against it, and unlike a page, a stored
+/// session cannot be re-rendered later.
+pub(crate) async fn checkpoint(
+    state: &AppState,
+    user: &User,
+    player: &DotaPlayer,
+    scope: &CoachingScope,
+    min_new: usize,
+) -> AppResult<Option<CoachingSession>> {
+    let inputs = role_inputs(state, user, player, scope).await?;
+    checkpoint_from(state, player, scope, &inputs, min_new).await
+}
+
+/// The same, from a gather the caller already did.
+///
+/// Generation needs both renderings of one fetch — the prose for the model and
+/// the numbers for the session — and fetching twice would let the snapshot and
+/// the advice written about it describe different windows.
+pub(crate) async fn checkpoint_from(
+    state: &AppState,
+    player: &DotaPlayer,
+    scope: &CoachingScope,
+    inputs: &RoleInputs,
+    min_new: usize,
+) -> AppResult<Option<CoachingSession>> {
+    let latest = repositories::coaching_session::latest(&state.db, player.id, scope.role).await?;
+
+    if !due(latest.as_ref(), &inputs.window_ids(), min_new) {
+        return Ok(None);
+    }
+
+    if !inputs.benchmark_available {
+        tracing::warn!(
+            role = scope.role.slug(),
+            "coaching session skipped: the benchmark provider is unavailable"
+        );
+        return Ok(None);
+    }
+
+    // The role's own row out of the ladder-wide analysis. `None` when the role
+    // has too few matches to score, which is a session with no performance
+    // rather than no session.
+    let (_, analysis) = stats::competitive_roles(state, player).await?;
+    let role_performance = analysis.roles.iter().find(|r| r.role == scope.role);
+
+    let model = player_model::build(
+        &ModelInputs {
+            matches: &inputs.history,
+            benchmarks: &inputs.benchmark.results,
+            benchmark_hero: (!inputs.benchmark.hero_name.is_empty())
+                .then_some(inputs.benchmark.hero_name.as_str()),
+            pool: &inputs.heroes.pool,
+            roles: &[],
+        },
+        inputs.patterns.clone(),
+        // Resolved patterns come from storage and are player-wide, not
+        // role-scoped. A role snapshot claims nothing about them.
+        Vec::new(),
+        Utc::now(),
+    );
+
+    let draft = coaching_session::build(&coaching_session::SessionInputs {
+        role: scope.role,
+        matches: &inputs.window,
+        role_performance,
+        stats: &inputs.stats,
+        model: &model,
+        benchmarks: &inputs.benchmark.results,
+        heroes: &inputs.hero_stats,
+        focus: inputs.focus.as_ref(),
     });
 
-    Ok((evidence, detected))
+    let stored = repositories::coaching_session::insert(&state.db, player.id, &draft).await?;
+
+    tracing::info!(
+        session = %stored.id,
+        sequence = stored.sequence,
+        role = scope.role.slug(),
+        matches = stored.analyzed_match_count,
+        "coaching session recorded"
+    );
+
+    Ok(Some(stored))
+}
+
+/// Whether the window has moved enough since the last session.
+///
+/// The first session is due as soon as there is anything to measure.
+fn due(latest: Option<&CoachingSession>, window_ids: &[Uuid], min_new: usize) -> bool {
+    match latest {
+        None => !window_ids.is_empty(),
+        Some(latest) => coaching_session::new_match_count(latest, window_ids) >= min_new,
+    }
 }
 
 /// The peer comparison for the role being coached.
@@ -988,6 +1470,10 @@ async fn match_evidence(
         // A single match read against the player's habits, not just their
         // averages: "you did it again" is the coachable observation.
         patterns: &detected,
+        // A single match is not a coaching session, so it is never described
+        // as progress against one.
+        progress: None,
+        has_session: false,
         focus: focus.as_ref(),
         focus_match: Some(match_),
         focus_metrics: metrics.as_ref(),

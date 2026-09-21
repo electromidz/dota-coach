@@ -12,6 +12,7 @@
 //! "the LLM is an interpretation layer, not a source of truth" — not a comment
 //! asking it to behave.
 
+pub mod chat;
 pub mod evidence;
 pub mod numbers;
 pub mod prompt;
@@ -73,6 +74,8 @@ pub async fn generate(
     let request = LlmRequest {
         system: prompt::system(config.max_insights, config.max_plan_steps),
         user: prompt::user(scope, evidence),
+        // A structured analysis is one question, not a conversation.
+        history: Vec::new(),
         max_output_tokens: config.max_output_tokens,
         temperature: config.temperature,
         json_only: true,
@@ -196,6 +199,19 @@ pub fn parse_analysis(
                 return None;
             }
 
+            // A claim that the player has got better is a claim about two
+            // points in time, and only `progress.*` evidence describes two.
+            // The prompt says so; this is what makes it true. Without it a
+            // model can call any good current figure an improvement, cite the
+            // current figure quite correctly, and produce a sentence the
+            // player has no way to check.
+            if kind == InsightKind::Improvement && !refs.iter().any(|id| is_progress(id)) {
+                tracing::warn!(
+                    "insight dropped: claimed an improvement without comparing two sessions"
+                );
+                return None;
+            }
+
             let title = clamp(raw.title.trim(), 80);
             let explanation = clamp(raw.explanation.trim(), 600);
             if title.is_empty() || explanation.is_empty() {
@@ -295,6 +311,17 @@ pub fn parse_analysis(
 }
 
 /// Keep only the citations that name evidence which actually exists.
+/// Whether an evidence id describes change over time rather than a current
+/// reading.
+///
+/// `progress.none` counts: it is the statement that there is nothing to
+/// compare, and an "improvement" insight citing only that is claiming an
+/// improvement from an explicit absence of one — which the figure-grounding
+/// check below will not catch, because there is no figure in it.
+fn is_progress(id: &str) -> bool {
+    id.starts_with("progress.") && id != "progress.none"
+}
+
 fn cited(refs: EvidenceRefs, known: &HashSet<&str>) -> Vec<String> {
     refs.into_vec()
         .into_iter()
@@ -400,11 +427,95 @@ mod tests {
         .collect()
     }
 
+    /// The same, plus a progress item and the explicit "nothing to compare"
+    /// marker, for the improvement rule.
+    fn evidence_with_progress() -> Vec<Evidence> {
+        let mut out = evidence();
+        for (id, statement) in [
+            (
+                "progress.overall.deaths",
+                "Deaths per 10 minutes improved to 5.80, from 7.20 at your previous coaching session.",
+            ),
+            (
+                "progress.none",
+                "This is the first coaching session recorded for this role.",
+            ),
+        ] {
+            out.push(Evidence {
+                id: id.to_string(),
+                kind: EvidenceKind::Progress,
+                label: "Progress".into(),
+                statement: statement.to_string(),
+                sample: 20,
+                confidence: Confidence::Adequate,
+            });
+        }
+        out
+    }
+
     fn answer(insights: &str) -> String {
         format!(r#"{{"summary": "You are farming well.", "insights": [{insights}]}}"#)
     }
 
     /// An answer with a plan attached, for the steps' own rules.
+    #[test]
+    fn an_improvement_claim_without_a_comparison_is_dropped() {
+        // The model cites a real id and writes a true-looking sentence. The
+        // citation is current-state evidence, so the claim that anything got
+        // better rests on nothing.
+        let raw = answer(
+            r#"{"kind":"improvement","title":"Your farm is better",
+                "explanation":"You are farming more than you were.",
+                "evidence":["benchmark.gold_per_min"]}"#,
+        );
+
+        let result = parse_analysis(&raw, &evidence(), 5, 4);
+        assert!(
+            matches!(result, Err(CoachingError::Unusable(_))),
+            "an unverifiable improvement should not survive as the only insight",
+        );
+    }
+
+    #[test]
+    fn an_improvement_citing_a_comparison_survives() {
+        let raw = answer(
+            r#"{"kind":"improvement","title":"You are dying less",
+                "explanation":"Deaths came down to 5.80 from 7.20 since last time.",
+                "evidence":["progress.overall.deaths"]}"#,
+        );
+
+        let draft = parse_analysis(&raw, &evidence_with_progress(), 5, 4).unwrap();
+        assert_eq!(draft.insights.len(), 1);
+        assert_eq!(draft.insights[0].kind, InsightKind::Improvement);
+    }
+
+    #[test]
+    fn progress_none_does_not_license_an_improvement_claim() {
+        // "There is nothing to compare against" is the one progress item that
+        // must not support a claim of change. It contains no figure, so the
+        // number check cannot catch this one.
+        let raw = answer(
+            r#"{"kind":"improvement","title":"You have improved",
+                "explanation":"Things are looking up.",
+                "evidence":["progress.none"]}"#,
+        );
+
+        let result = parse_analysis(&raw, &evidence_with_progress(), 5, 4);
+        assert!(matches!(result, Err(CoachingError::Unusable(_))));
+    }
+
+    #[test]
+    fn other_insight_kinds_are_unaffected_by_the_progress_rule() {
+        let raw = answer(
+            r#"{"kind":"weakness","title":"Farm is behind the median",
+                "explanation":"Your gold per minute sits below your peers.",
+                "evidence":["benchmark.gold_per_min"]}"#,
+        );
+
+        let draft = parse_analysis(&raw, &evidence(), 5, 4).unwrap();
+        assert_eq!(draft.insights.len(), 1);
+    }
+
     fn answer_with_plan(insights: &str, plan: &str) -> String {
         format!(
             r#"{{"summary": "You are farming well.", "insights": [{insights}], "plan": [{plan}]}}"#

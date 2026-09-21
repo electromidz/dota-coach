@@ -30,7 +30,11 @@ pub async fn record(
 }
 
 /// Every action any admin has taken, newest first — the audit log view.
-pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<AuditLogEntry>, sqlx::Error> {
+pub async fn list(
+    pool: &PgPool,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<AuditLogEntry>, sqlx::Error> {
     sqlx::query_as::<_, AuditLogEntry>(
         "SELECT a.id, a.admin_id, u.persona_name AS admin_persona_name,
                 a.action, a.target_type, a.target_id, a.metadata, a.created_at

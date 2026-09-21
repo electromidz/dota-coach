@@ -13,6 +13,7 @@ use crate::domain::coaching::{Evidence, EvidenceKind};
 use crate::domain::hero::{HeroFit, HeroPoolEntry};
 use crate::domain::metrics::{MatchMetrics, PlayerStats};
 use crate::domain::player_model::{PatternStatus, RecurringPattern};
+use crate::domain::progress::{MetricProgress, ProgressStatus, SessionProgress};
 use crate::domain::r#match::Match;
 use crate::domain::role::CoachableRole;
 use crate::domain::scope::SampleConfidence;
@@ -26,6 +27,10 @@ use crate::services::benchmarks::percentile;
 const MAX_POOL_EVIDENCE: usize = 3;
 const MAX_FIT_EVIDENCE: usize = 2;
 const MAX_PATTERN_EVIDENCE: usize = 4;
+/// Movements, resolutions and new issues each reach the prompt at most this
+/// many times. Same reasoning as the pool cap: a coach naming nine changes has
+/// not said which one matters.
+const MAX_PROGRESS_EVIDENCE: usize = 3;
 /// Matches counted as "recent form" in the player-wide evidence.
 pub const FORM_WINDOW: usize = 10;
 
@@ -63,6 +68,16 @@ pub struct EvidenceInputs<'a> {
     pub recommendations: &'a [HeroFit],
     /// Recurring patterns, as detected across the whole history.
     pub patterns: &'a [RecurringPattern],
+    /// What changed since the previous coaching session.
+    ///
+    /// `None` has two meanings the builder tells apart: no session recorded
+    /// yet, and one session with nothing before it. Both produce a statement
+    /// saying so, because a model shown no progress evidence and no
+    /// explanation may reach for "you have improved" anyway.
+    pub progress: Option<&'a SessionProgress>,
+    /// True when at least one session exists for this role. Distinguishes
+    /// "nothing recorded yet" from "first session, nothing to compare".
+    pub has_session: bool,
     /// The player's current training focus, when one is set.
     pub focus: Option<&'a TrainingFocus>,
     /// Present for a match-scoped analysis.
@@ -93,6 +108,8 @@ pub fn build(inputs: &EvidenceInputs<'_>) -> Vec<Evidence> {
     benchmarks(inputs.benchmarks, inputs.benchmark_hero, &mut evidence);
     heroes(inputs.pool, inputs.recommendations, &mut evidence);
     recurring(inputs.patterns, &mut evidence);
+    // After the patterns it refers to, before the focus that acts on it.
+    progress(inputs.progress, inputs.has_session, &mut evidence);
     training_focus(inputs.focus, &mut evidence);
 
     if let Some(match_) = inputs.focus_match {
@@ -595,6 +612,182 @@ fn focus_match(
     }
 }
 
+/// What changed since the previous coaching session.
+///
+/// The absence of this evidence is itself worth stating. A model given current
+/// figures and no comparison has, in practice, a standing temptation to say
+/// "this has improved" — so when there is nothing to compare, that fact is
+/// written down in the same voice as everything else rather than left as a
+/// gap the model can fill.
+///
+/// Only genuine movements are listed. A metric the engine could not compare —
+/// thin sample, redefined, measured on one side only — contributes nothing
+/// here, because "we do not know" is not a finding a coach should narrate.
+fn progress(progress: Option<&SessionProgress>, has_session: bool, out: &mut Vec<Evidence>) {
+    let Some(progress) = progress else {
+        let statement = if has_session {
+            "This is the first coaching session recorded for this role, so there are no \
+             earlier measurements to compare against."
+        } else {
+            "No previous coaching session has been recorded for this role, so there are no \
+             earlier measurements to compare against."
+        };
+
+        push(
+            out,
+            "progress.none",
+            EvidenceKind::Progress,
+            "No previous session",
+            statement.to_string(),
+            0,
+        );
+        return;
+    };
+
+    push(
+        out,
+        "progress.session",
+        EvidenceKind::Progress,
+        "Since your last session",
+        format!(
+            "These figures are coaching session {} for {}. The previous session was {}, and \
+             everything below compares the two.",
+            progress.current_sequence, progress.role_label, progress.previous_sequence,
+        ),
+        0,
+    );
+
+    if let Some(performance) = &progress.performance {
+        if let (Some(previous), Some(current)) = (performance.previous, performance.current) {
+            push(
+                out,
+                "progress.performance",
+                EvidenceKind::Progress,
+                "Performance since your last session",
+                format!(
+                    "Your {} performance score is {}, {} {} at your previous coaching session.",
+                    progress.role_label,
+                    round(current),
+                    movement_word(performance.status),
+                    round(previous),
+                ),
+                performance.current_sample.unwrap_or(0),
+            );
+        }
+    }
+
+    // The movements, biggest first, capped. A coach who lists nine changes has
+    // not said which one matters.
+    let mut moved: Vec<&MetricProgress> = progress
+        .metrics
+        .iter()
+        .filter(|m| {
+            m.key != "role.performance"
+                && matches!(
+                    m.status,
+                    ProgressStatus::Improved | ProgressStatus::Declined
+                )
+        })
+        .collect();
+    moved.sort_by(|a, b| {
+        b.direction_delta
+            .unwrap_or(0.0)
+            .abs()
+            .total_cmp(&a.direction_delta.unwrap_or(0.0).abs())
+    });
+
+    for metric in moved.into_iter().take(MAX_PROGRESS_EVIDENCE) {
+        let (Some(previous), Some(current)) = (metric.previous, metric.current) else {
+            continue;
+        };
+
+        push(
+            out,
+            &format!("progress.{}", metric.key),
+            EvidenceKind::Progress,
+            &format!("{} since your last session", metric.label),
+            format!(
+                "{} {} to {}, from {} at your previous coaching session.",
+                metric.label,
+                movement_verb(metric.status),
+                round(current),
+                round(previous),
+            ),
+            metric.current_sample.unwrap_or(0),
+        );
+    }
+
+    for metric in progress
+        .metrics
+        .iter()
+        .filter(|m| m.status == ProgressStatus::ResolvedIssue)
+        .take(MAX_PROGRESS_EVIDENCE)
+    {
+        push(
+            out,
+            &format!("progress.resolved.{}", metric.key),
+            EvidenceKind::Progress,
+            "Resolved since your last session",
+            format!(
+                "{} was flagged at your previous coaching session and is no longer detected.",
+                metric.label,
+            ),
+            metric.previous_sample.unwrap_or(0),
+        );
+    }
+
+    for metric in progress
+        .metrics
+        .iter()
+        .filter(|m| m.status == ProgressStatus::NewIssue)
+        .take(MAX_PROGRESS_EVIDENCE)
+    {
+        push(
+            out,
+            &format!("progress.new.{}", metric.key),
+            EvidenceKind::Progress,
+            "New since your last session",
+            format!(
+                "{} was not detected at your previous coaching session and is now.",
+                metric.label,
+            ),
+            metric.current_sample.unwrap_or(0),
+        );
+    }
+}
+
+/// "up from" / "down from" / "unchanged from".
+fn movement_word(status: ProgressStatus) -> &'static str {
+    match status {
+        ProgressStatus::Improved => "up from",
+        ProgressStatus::Declined => "down from",
+        _ => "unchanged from",
+    }
+}
+
+fn movement_verb(status: ProgressStatus) -> &'static str {
+    match status {
+        ProgressStatus::Improved => "improved",
+        ProgressStatus::Declined => "worsened",
+        _ => "moved",
+    }
+}
+
+/// Figures in a progress sentence read at the precision a player thinks in.
+///
+/// The same rule the rest of this module uses: large numbers whole, small
+/// rates with their decimals. A death rate printed as "6" when it is 5.8 would
+/// be a figure the grounding check then refuses to find in the evidence.
+fn round(value: f32) -> String {
+    if value.abs() >= 100.0 {
+        format!("{}", value.round() as i64)
+    } else if value.abs() >= 10.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
 fn push(
     out: &mut Vec<Evidence>,
     id: &str,
@@ -801,6 +994,8 @@ mod tests {
             pool,
             recommendations,
             patterns: &[],
+            progress: None,
+            has_session: false,
             focus: None,
             focus_match: None,
             focus_metrics: None,
@@ -1035,5 +1230,219 @@ mod tests {
 
         assert_eq!(ids(&first), ids(&second));
         assert_eq!(text(&first), text(&second));
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use crate::domain::progress::{MetricProgress, ProgressStatus, SessionProgress};
+    use uuid::Uuid;
+
+    fn metric(
+        key: &str,
+        label: &str,
+        previous: Option<f32>,
+        current: Option<f32>,
+        status: ProgressStatus,
+    ) -> MetricProgress {
+        let direction_delta = match (previous, current) {
+            (Some(p), Some(c)) => Some(c - p),
+            _ => None,
+        };
+
+        MetricProgress {
+            key: key.to_string(),
+            label: label.to_string(),
+            unit: crate::domain::coaching_session::MetricUnit::Per10,
+            higher_is_better: true,
+            previous,
+            current,
+            delta: direction_delta,
+            direction_delta,
+            percent_change: None,
+            previous_sample: Some(20),
+            current_sample: Some(20),
+            status,
+            status_label: status.label(),
+            note: None,
+        }
+    }
+
+    fn session_progress(metrics: Vec<MetricProgress>) -> SessionProgress {
+        SessionProgress {
+            role: CoachableRole::Carry,
+            role_label: "Carry",
+            previous_session_id: Uuid::new_v4(),
+            previous_sequence: 1,
+            previous_at: chrono::Utc::now(),
+            current_session_id: Uuid::new_v4(),
+            current_sequence: 2,
+            current_at: chrono::Utc::now(),
+            performance: Some(metric(
+                "role.performance",
+                "Role performance",
+                Some(54.0),
+                Some(61.0),
+                ProgressStatus::Improved,
+            )),
+            metrics,
+            headline: None,
+        }
+    }
+
+    fn build_progress(p: Option<&SessionProgress>, has_session: bool) -> Vec<Evidence> {
+        let mut out = Vec::new();
+        progress(p, has_session, &mut out);
+        out
+    }
+
+    fn statement<'a>(items: &'a [Evidence], id: &str) -> &'a str {
+        items
+            .iter()
+            .find(|e| e.id == id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{id} present in {:?}",
+                    items.iter().map(|e| &e.id).collect::<Vec<_>>()
+                )
+            })
+            .statement
+            .as_str()
+    }
+
+    #[test]
+    fn the_absence_of_a_comparison_is_stated_rather_than_left_blank() {
+        // A model given current figures and no comparison will reach for
+        // "this has improved" unless told otherwise, so the absence is
+        // written down in the same voice as everything else.
+        let first = build_progress(None, true);
+        assert!(statement(&first, "progress.none").contains("first coaching session"));
+
+        let none = build_progress(None, false);
+        assert!(statement(&none, "progress.none").contains("No previous coaching session"));
+    }
+
+    #[test]
+    fn the_performance_change_names_both_readings() {
+        let items = build_progress(Some(&session_progress(Vec::new())), true);
+
+        let s = statement(&items, "progress.performance");
+        // Both numbers appear, so the figure-grounding check can verify a
+        // model that quotes either of them.
+        assert!(s.contains("61"), "{s}");
+        assert!(s.contains("54"), "{s}");
+        assert!(s.contains("up from"), "{s}");
+    }
+
+    #[test]
+    fn only_real_movements_become_evidence() {
+        let items = build_progress(
+            Some(&session_progress(vec![
+                metric(
+                    "overall.deaths",
+                    "Deaths per 10 minutes",
+                    Some(7.2),
+                    Some(5.8),
+                    ProgressStatus::Improved,
+                ),
+                // Neither of these is a finding a coach should narrate.
+                metric(
+                    "overall.kda",
+                    "KDA",
+                    Some(3.0),
+                    Some(3.02),
+                    ProgressStatus::Stable,
+                ),
+                metric(
+                    "overall.gold_per_min",
+                    "Gold per minute",
+                    Some(500.0),
+                    Some(505.0),
+                    ProgressStatus::InsufficientData,
+                ),
+            ])),
+            true,
+        );
+
+        assert!(items.iter().any(|e| e.id == "progress.overall.deaths"));
+        assert!(!items.iter().any(|e| e.id == "progress.overall.kda"));
+        assert!(!items
+            .iter()
+            .any(|e| e.id == "progress.overall.gold_per_min"));
+    }
+
+    #[test]
+    fn resolved_and_new_issues_are_reported_separately() {
+        let items = build_progress(
+            Some(&session_progress(vec![
+                metric(
+                    "pattern.high_death_rate",
+                    "Dies too often",
+                    Some(0.6),
+                    None,
+                    ProgressStatus::ResolvedIssue,
+                ),
+                metric(
+                    "pattern.low_cs_at_10",
+                    "Low CS at 10",
+                    None,
+                    Some(0.5),
+                    ProgressStatus::NewIssue,
+                ),
+            ])),
+            true,
+        );
+
+        assert!(
+            statement(&items, "progress.resolved.pattern.high_death_rate")
+                .contains("no longer detected")
+        );
+        assert!(statement(&items, "progress.new.pattern.low_cs_at_10").contains("was not detected"));
+    }
+
+    #[test]
+    fn every_progress_item_is_kinded_as_progress() {
+        // The kind is what lets a reader — and the improvement rule in the
+        // validator — tell a change from a current reading.
+        let items = build_progress(
+            Some(&session_progress(vec![metric(
+                "overall.deaths",
+                "Deaths per 10 minutes",
+                Some(7.2),
+                Some(5.8),
+                ProgressStatus::Improved,
+            )])),
+            true,
+        );
+
+        assert!(items.iter().all(|e| e.kind == EvidenceKind::Progress));
+        assert!(items.iter().all(|e| e.id.starts_with("progress.")));
+    }
+
+    #[test]
+    fn the_movements_are_capped_so_one_change_can_still_matter() {
+        let metrics: Vec<MetricProgress> = (0..8)
+            .map(|i| {
+                metric(
+                    &format!("overall.metric_{i}"),
+                    &format!("Metric {i}"),
+                    Some(10.0),
+                    Some(10.0 + i as f32),
+                    ProgressStatus::Improved,
+                )
+            })
+            .collect();
+
+        let items = build_progress(Some(&session_progress(metrics)), true);
+        let movements = items
+            .iter()
+            .filter(|e| e.id.starts_with("progress.overall."))
+            .count();
+        assert_eq!(movements, MAX_PROGRESS_EVIDENCE);
+
+        // Biggest first, so the cap keeps the changes that matter most.
+        assert!(items.iter().any(|e| e.id == "progress.overall.metric_7"));
+        assert!(!items.iter().any(|e| e.id == "progress.overall.metric_1"));
     }
 }

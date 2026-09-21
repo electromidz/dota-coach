@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 
 use crate::domain::benchmark::{
-    BenchmarkContext, BenchmarkMetric, BenchmarkResult, Bucket, Confidence, Segment,
+    BenchmarkContext, BenchmarkMetric, BenchmarkResult, Bucket, Confidence, ResolvedBracket,
+    Segment,
 };
 
 /// The reference distribution for one context, keyed by metric.
@@ -22,6 +23,9 @@ pub struct Distribution {
     pub segmented_by: Vec<Segment>,
     /// `None` when the provider does not report one. Never guessed.
     pub sample_size: Option<i64>,
+    /// Which rank bracket these buckets actually describe, and whether that is
+    /// the one that was asked for.
+    pub bracket: ResolvedBracket,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -132,6 +136,7 @@ mod tests {
             buckets: HashMap::from([(BenchmarkMetric::GoldPerMin, buckets())]),
             segmented_by: vec![Segment::Hero],
             sample_size: None,
+            bracket: ResolvedBracket::all_ranks(),
         }
     }
 

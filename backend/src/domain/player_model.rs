@@ -122,7 +122,9 @@ pub struct RecurringPattern {
     pub recent_measured: i64,
 
     pub status: PatternStatus,
-    pub status_label: &'static str,
+    /// Owned rather than `&'static str` because this type round-trips through
+    /// the coaching cache, and a borrowed label cannot be deserialized into.
+    pub status_label: String,
     /// How much weight the rate can bear, from `measured`.
     pub confidence: Confidence,
 
@@ -195,7 +197,10 @@ impl TraitSource {
 }
 
 /// One thing the model believes about the player.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+///
+/// `PartialEq` because a coaching session snapshots these verbatim, and its
+/// tests compare a rebuilt draft against an expected one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct PlayerTrait {
     pub kind: TraitKind,
     pub source: TraitSource,

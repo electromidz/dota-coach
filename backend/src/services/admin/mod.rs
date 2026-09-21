@@ -46,8 +46,7 @@ pub async fn stats(
         repositories::admin::count_voucher_redemptions(pool, from, to).await?;
 
     let revenue_cents = repositories::admin::revenue_cents(pool, from, to).await?;
-    let daily =
-        repositories::admin::daily_series(pool, from.date_naive(), to.date_naive()).await?;
+    let daily = repositories::admin::daily_series(pool, from.date_naive(), to.date_naive()).await?;
 
     Ok(AdminStats {
         from,

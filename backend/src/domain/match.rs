@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use uuid::Uuid;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 /// Creep score per minute above which a laner is treated as a core.
 /// Deliberately blunt: the provider does not report roles, so this is an

@@ -11,8 +11,8 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
-use uuid::Uuid;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 /// What an account may do right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]

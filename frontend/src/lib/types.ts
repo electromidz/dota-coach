@@ -352,6 +352,22 @@ export interface UnavailableSegment {
 }
 
 /**
+ * Which bracket a comparison asked for, and which one it got.
+ *
+ * These differ more often than is comfortable: the provider publishes nothing
+ * for some hero/bracket pairs, and an unranked player has no bracket to ask
+ * for. Both fall back to all ranks, which is a different peer group — so the
+ * UI reads `fell_back` rather than assuming the request was honoured.
+ */
+export interface ResolvedBracket {
+  requested: RankBracket | null;
+  /** Null means the distribution covers every rank. */
+  used: RankBracket | null;
+  label: string;
+  fell_back: boolean;
+}
+
+/**
  * Which matches sit on each side of a comparison.
  *
  * `comparable` is false against the current provider and that is not a defect
@@ -371,6 +387,8 @@ export interface BenchmarkContextInfo {
   role: CoachableRole | null;
   role_label: string | null;
   rank_tier: number | null;
+  /** Which bracket the peer distribution actually covers. */
+  bracket: ResolvedBracket;
   /** The four dimensions the product asks to compare on. */
   requested: Segment[];
   /** The ones the peer distribution genuinely covers. */
@@ -387,6 +405,290 @@ export interface BenchmarkResponse {
   segmented_by: Segment[];
   context: BenchmarkContextInfo;
   note: string | null;
+}
+
+/* --- Match comparison ----------------------------------------------------- */
+
+/**
+ * One figure and where it sits in the peer distribution.
+ *
+ * `percentile` is direction-corrected server-side, so 90 means "better than
+ * 90% of peers" for deaths exactly as it does for gold. Nothing on the client
+ * inverts anything.
+ */
+export interface Reading {
+  value: number;
+  percentile: number | null;
+}
+
+/** The same, for an average, which carries the sample it rests on. */
+export interface AverageReading {
+  value: number;
+  percentile: number | null;
+  sample: number;
+  /** Applies to this reading only — a single match is not an estimate. */
+  confidence: Confidence;
+}
+
+export interface MetricComparison {
+  metric: string;
+  label: string;
+  higher_is_better: boolean;
+  this_match: Reading | null;
+  hero_average: AverageReading | null;
+  peer_median: number | null;
+  top_20_value: number | null;
+}
+
+/** The one-number summary, and what it is a summary of. */
+export interface Standing {
+  /** Median of this match's per-metric percentiles. */
+  this_match: number | null;
+  hero_average: number | null;
+  metrics_counted: number;
+  peer_sample_size: number | null;
+}
+
+/** A metric worth naming, good or bad. */
+export interface Highlight {
+  metric: string;
+  label: string;
+  value: number;
+  percentile: number;
+  /** Already carries its numbers; the client never recomputes one. */
+  detail: string;
+}
+
+/** One past game on this hero, reduced to its standing. */
+export interface TrendPoint {
+  match_id: string;
+  dota_match_id: number;
+  started_at: string;
+  won: boolean;
+  standing: number;
+  is_current: boolean;
+}
+
+export interface Suggestion {
+  metric: string;
+  label: string;
+  percentile: number;
+  player_value: number;
+  peer_median: number;
+  /** Null for gold, XP and damage, which stay rates. */
+  whole_game_delta: number | null;
+  whole_game_unit: string | null;
+  text: string;
+}
+
+export interface MatchComparisonResponse {
+  hero_id: number;
+  hero_name: string;
+  bracket: ResolvedBracket;
+  /**
+   * False when this match's figures must not be compared at all — a Turbo
+   * game against a distribution drawn from ranked pubs, or a provider outage.
+   * The raw values are still present; the percentiles are not.
+   */
+  comparable: boolean;
+  standing: Standing;
+  metrics: MetricComparison[];
+  /** Newest first. */
+  trend: TrendPoint[];
+  delta_vs_previous: number | null;
+  pros: Highlight[];
+  cons: Highlight[];
+  suggestion: Suggestion | null;
+  context: BenchmarkContextInfo;
+  note: string | null;
+}
+
+/* --- Coaching sessions, progress and conversation --------------------------- */
+
+export type MetricUnit =
+  | "count"
+  | "per_minute"
+  | "per10"
+  | "percentile"
+  /** A bounded 0-1 share: win rate, kill participation, a pattern's rate. */
+  | "proportion"
+  /** An unbounded ratio such as KDA. */
+  | "ratio"
+  /** A 0-100 composite the backend defines, such as the role score. */
+  | "score";
+
+/** One measured number, in a form a later session can be compared against. */
+export interface MetricSnapshot {
+  key: string;
+  label: string;
+  value: number;
+  sample: number;
+  unit: MetricUnit;
+  higher_is_better: boolean;
+}
+
+export interface BenchmarkSnapshot {
+  metric: string;
+  label: string;
+  player_value: number;
+  peer_median: number | null;
+  percentile: number | null;
+  higher_is_better: boolean;
+}
+
+export interface HeroSnapshot {
+  hero_id: number;
+  hero_name: string;
+  matches: number;
+  wins: number;
+  win_rate: number;
+  avg_kda: number | null;
+}
+
+/** A session summary, as the history list serves it. */
+export interface SessionSummary {
+  id: string;
+  role: CoachableRole;
+  role_label: string;
+  sequence: number;
+  analyzed_match_count: number;
+  newest_match_at: string | null;
+  performance: number | null;
+  has_analysis: boolean;
+  created_at: string;
+}
+
+/** One immutable snapshot, served verbatim. */
+export interface CoachingSession {
+  id: string;
+  role: CoachableRole;
+  role_label: string;
+  sequence: number;
+  analyzed_match_count: number;
+  analyzed_match_ids: string[];
+  newest_match_at: string | null;
+  performance: number | null;
+  metrics: MetricSnapshot[];
+  strengths: PlayerTrait[];
+  weaknesses: PlayerTrait[];
+  benchmarks: BenchmarkSnapshot[];
+  heroes: HeroSnapshot[];
+  training_focus_id: string | null;
+  analysis_id: string | null;
+  created_at: string;
+}
+
+export interface SessionHistoryResponse {
+  sessions: SessionSummary[];
+  page: number;
+  limit: number;
+  total: number;
+  total_pages: number;
+  role: CoachableRole;
+  role_label: string;
+}
+
+export interface SessionResponse {
+  session: CoachingSession;
+}
+
+/**
+ * What happened to one metric between two sessions.
+ *
+ * Every one of these is the backend's judgement. The client renders it and
+ * never recomputes it — `improved` is a decision, not a subtraction.
+ */
+export type ProgressStatus =
+  | "improved"
+  | "declined"
+  | "stable"
+  | "new_issue"
+  | "resolved_issue"
+  | "insufficient_data";
+
+export interface MetricProgress {
+  key: string;
+  label: string;
+  unit: MetricUnit;
+  higher_is_better: boolean;
+  previous: number | null;
+  current: number | null;
+  delta: number | null;
+  /** Signed so positive always means better, including for deaths. */
+  direction_delta: number | null;
+  percent_change: number | null;
+  previous_sample: number | null;
+  current_sample: number | null;
+  status: ProgressStatus;
+  status_label: string;
+  note: string | null;
+}
+
+export interface SessionProgress {
+  role: CoachableRole;
+  role_label: string;
+  previous_session_id: string;
+  previous_sequence: number;
+  previous_at: string;
+  current_session_id: string;
+  current_sequence: number;
+  current_at: string;
+  performance: MetricProgress | null;
+  metrics: MetricProgress[];
+  headline: string | null;
+}
+
+export interface SeriesPoint {
+  session_id: string;
+  sequence: number;
+  at: string;
+  value: number;
+}
+
+export interface MetricSeries {
+  key: string;
+  label: string;
+  unit: MetricUnit;
+  higher_is_better: boolean;
+  /** Oldest first. */
+  points: SeriesPoint[];
+}
+
+export interface ProgressResponse {
+  role: CoachableRole;
+  role_label: string;
+  /** Null until there are two sessions to compare. */
+  comparison: SessionProgress | null;
+  series: MetricSeries[];
+  sessions: number;
+  note: string | null;
+}
+
+export type ConversationSpeaker = "player" | "coach";
+
+export interface ConversationMessage {
+  id: string;
+  speaker: ConversationSpeaker;
+  content: string;
+  /** Evidence ids the reply's figures came from. Empty for a player turn. */
+  evidence: string[];
+  model: string | null;
+  created_at: string;
+}
+
+export interface ConversationResponse {
+  role: CoachableRole;
+  role_label: string;
+  /** Oldest first. */
+  messages: ConversationMessage[];
+  llm_available: boolean;
+  note: string | null;
+}
+
+export interface AskResponse {
+  role: CoachableRole;
+  role_label: string;
+  message: ConversationMessage;
 }
 
 /* --- Hero Intelligence ---------------------------------------------------- */
@@ -520,7 +822,9 @@ export type EvidenceKind =
   | "hero"
   | "pattern"
   | "focus"
-  | "match";
+  | "match"
+  /** What changed since the previous coaching session. */
+  | "progress";
 
 export type InsightKind =
   | "strength"

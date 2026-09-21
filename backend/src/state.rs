@@ -5,6 +5,8 @@ use sqlx::PgPool;
 use crate::config::Config;
 use crate::services::auth::steam_openid::{SteamOpenId, SteamVerifier};
 use crate::services::benchmarks::BenchmarkProvider;
+use crate::services::cache::postgres::PostgresCoachingCache;
+use crate::services::cache::{CoachingCache, NoCache};
 use crate::services::dota::DotaDataProvider;
 use crate::services::hero_meta::HeroMetaProvider;
 use crate::services::llm::LlmProvider;
@@ -39,6 +41,14 @@ pub struct AppState {
     /// Per-user abuse guard for `POST /api/subscribe/redeem`. In-memory, not
     /// a provider: nothing external to swap, so no trait.
     pub redeem_rate_limiter: Arc<RateLimiter>,
+    /// Read-through cache for the coaching context.
+    ///
+    /// Chosen from configuration rather than injected like the providers,
+    /// because there is nothing external to swap yet — `COACH_CACHE_ENABLED`
+    /// picks between the Postgres implementation and a no-op. The trait is
+    /// what a Redis implementation would land behind if a second instance
+    /// ever existed.
+    pub cache: Arc<dyn CoachingCache>,
 }
 
 /// Every external dependency, chosen once at startup.
@@ -57,6 +67,11 @@ pub struct Providers {
 
 impl AppState {
     pub fn new(db: PgPool, config: Config, providers: Providers) -> Self {
+        // Read before `config` is moved into the Arc below.
+        let config_cache_enabled = config.coach.cache_enabled;
+        let cache_ttl = config.coach.cache_ttl_minutes;
+        let db_for_cache = db.clone();
+
         Self {
             db,
             config: Arc::new(config),
@@ -68,6 +83,11 @@ impl AppState {
             llm: providers.llm,
             payments: providers.payments,
             redeem_rate_limiter: Arc::new(RateLimiter::new()),
+            cache: if config_cache_enabled {
+                PostgresCoachingCache::new(db_for_cache, cache_ttl)
+            } else {
+                Arc::new(NoCache)
+            },
         }
     }
 }

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::extract::{AppPath, AppQuery, CurrentUser};
 use crate::domain::benchmark::{
     BenchmarkContext, BenchmarkContextInfo, BenchmarkMetric, BenchmarkResult, Confidence,
-    PopulationScope, Segment, UnavailableSegment,
+    PopulationScope, ResolvedBracket, Segment, UnavailableSegment,
 };
 use crate::domain::player::DotaPlayer;
 use crate::domain::role::CoachableRole;
@@ -55,34 +55,47 @@ pub struct BenchmarkResponse {
 /// The dimensions the product asks to compare on. The spec's four.
 const REQUESTED_SEGMENTS: [Segment; 4] = Segment::ALL;
 
-/// Why each dimension the provider cannot segment on is missing.
+/// Why each dimension the provider could not segment on is missing.
 ///
 /// Worded as statements about the data source rather than apologies: a reader
 /// deciding how much to trust a percentile needs to know what it is a
 /// percentile *of*.
-fn unavailability_reason(segment: Segment) -> &'static str {
+///
+/// Rank is the one that varies per request, so it takes the resolved bracket:
+/// "we asked for Immortal and the provider publishes nothing there" and "you
+/// are unranked, so there was no bracket to ask for" are different facts, and
+/// neither is the old blanket "this provider cannot do rank".
+pub(crate) fn unavailability_reason(segment: Segment, bracket: ResolvedBracket) -> String {
     match segment {
-        Segment::Hero => "",
+        Segment::Hero => String::new(),
         Segment::Role => {
             "The benchmark provider publishes one distribution per hero and does not segment it \
              by position. Your own figures below are restricted to the selected role; the peer \
              values are not."
+                .into()
         }
-        Segment::RankBracket => {
-            "The benchmark provider does not segment its distribution by rank, so these peer \
-             values cover every bracket rather than yours."
-        }
+        Segment::RankBracket => match bracket.requested {
+            Some(asked) => format!(
+                "The provider publishes no distribution for this hero in {}, so these peer \
+                 values cover every bracket rather than yours.",
+                asked.label(),
+            ),
+            None => "Your rank is unknown, so there was no bracket to compare against and these \
+                     peer values cover every rank."
+                .into(),
+        },
         Segment::Patch => {
-            "The benchmark provider does not state which patch its distribution covers."
+            "The benchmark provider does not state which patch its distribution covers.".into()
         }
     }
 }
 
 /// Describe both sides of the comparison.
-fn population_scope(
+pub(crate) fn population_scope(
     scope: &MatchScope,
     role: Option<CoachableRole>,
     hero: &str,
+    bracket: ResolvedBracket,
 ) -> PopulationScope {
     let player = match (role, scope.limit) {
         (Some(role), Some(limit)) => format!(
@@ -101,15 +114,27 @@ fn population_scope(
         }
     };
 
+    let peers = match bracket.used {
+        Some(used) => format!(
+            "Public matches on {hero} in the {} bracket. The provider does not publish which \
+             game modes or patches that distribution covers.",
+            used.label(),
+        ),
+        None => format!(
+            "Public matches on {hero} across every rank. The provider does not publish which \
+             game modes or patches that distribution covers."
+        ),
+    };
+
     PopulationScope {
         player,
-        peers: "The provider's public distribution for this hero. It does not publish which \
-                game modes, ranks or patches that distribution covers.",
-        // Never true against this provider, and it is not a defect to hide: an
-        // unknown population cannot be declared equal to a known one.
+        peers,
+        // Rank lines up now, which is the dimension that moved these numbers
+        // most — but game mode and patch still do not, and a partially matched
+        // population is not a matched one.
         comparable: false,
-        note: "The two populations are described differently and are not known to match. Read \
-               these percentiles as a rough placement, not a measurement.",
+        note: "Rank aside, the two populations are described differently and are not known to \
+               match. Read these percentiles as a close placement, not a measurement.",
     }
 }
 
@@ -274,7 +299,15 @@ pub(crate) async fn build(
                     sample: 0,
                     results: Vec::new(),
                     segmented_by: Vec::new(),
-                    context: context_info(0, "", role, player, scope, &[]),
+                    context: context_info(
+                        0,
+                        "",
+                        role,
+                        player,
+                        scope,
+                        &[],
+                        ResolvedBracket::requested_for(player.rank_tier),
+                    ),
                     note: Some(note),
                 });
             }
@@ -288,11 +321,9 @@ pub(crate) async fn build(
         sample: averages.sample,
     };
 
-    // What we *ask* the provider for. It segments on hero alone — verified
-    // against the live API, which returns identical buckets for any `rank` or
-    // `lane_role` passed to it — so the extra dimensions are a statement of
-    // intent that a future provider can honour, and the response reports which
-    // of them actually came back.
+    // What we *ask* the provider for. It honours hero and rank bracket; role
+    // and patch are a statement of intent a future provider can fill in, and
+    // the response reports which dimensions actually came back.
     let context = BenchmarkContext {
         hero_id,
         role: role.map(|r| r.slug().to_string()),
@@ -315,7 +346,18 @@ pub(crate) async fn build(
             tracing::warn!(error = %e, hero_id, "benchmark distribution unavailable");
 
             return Ok(BenchmarkResponse {
-                context: context_info(hero_id, &hero_name, role, player, scope, &[]),
+                context: context_info(
+                    hero_id,
+                    &hero_name,
+                    role,
+                    player,
+                    scope,
+                    &[],
+                    // Nothing came back, so nothing was resolved. Reporting the
+                    // requested bracket keeps the caveat about *which* peers
+                    // are missing accurate.
+                    ResolvedBracket::requested_for(player.rank_tier),
+                ),
                 hero_id,
                 hero_name,
                 sample: averages.sample,
@@ -327,13 +369,22 @@ pub(crate) async fn build(
     };
 
     let segmented_by = distribution.segmented_by.clone();
+    let bracket = distribution.bracket;
     let mut results = benchmarks::compare(&values, &distribution);
     if let Some(wanted) = only {
         results.retain(|r| r.metric == wanted);
     }
 
     Ok(BenchmarkResponse {
-        context: context_info(hero_id, &hero_name, role, player, scope, &segmented_by),
+        context: context_info(
+            hero_id,
+            &hero_name,
+            role,
+            player,
+            scope,
+            &segmented_by,
+            bracket,
+        ),
         hero_id,
         hero_name,
         sample: averages.sample,
@@ -348,13 +399,14 @@ pub(crate) async fn build(
 /// Built on every path — including the two failure paths above — because a
 /// response that omits it when the provider is down is a response whose caveats
 /// disappear exactly when they matter most.
-fn context_info(
+pub(crate) fn context_info(
     hero_id: i32,
     hero_name: &str,
     role: Option<CoachableRole>,
     player: &DotaPlayer,
     scope: &MatchScope,
     segmented_by: &[Segment],
+    bracket: ResolvedBracket,
 ) -> BenchmarkContextInfo {
     let unavailable = REQUESTED_SEGMENTS
         .into_iter()
@@ -362,7 +414,7 @@ fn context_info(
         .map(|segment| UnavailableSegment {
             segment,
             label: segment.label(),
-            reason: unavailability_reason(segment),
+            reason: unavailability_reason(segment, bracket),
         })
         .collect();
 
@@ -372,10 +424,11 @@ fn context_info(
         role,
         role_label: role.map(CoachableRole::label),
         rank_tier: player.rank_tier,
+        bracket,
         requested: REQUESTED_SEGMENTS.to_vec(),
         segmented_by: segmented_by.to_vec(),
         unavailable,
-        population: population_scope(scope, role, hero_name),
+        population: population_scope(scope, role, hero_name, bracket),
     }
 }
 
@@ -405,28 +458,13 @@ fn bare_results(values: &PlayerValues, only: Option<BenchmarkMetric>) -> Vec<Ben
         .collect()
 }
 
-/// Map the SQL averages onto metric keys, dropping anything the player has no
-/// data for rather than sending a zero.
+/// Map the SQL averages onto metric keys.
 ///
-/// Shared with Hero Intelligence, which needs the same player-side values to
-/// derive a per-hero percentile; duplicating the mapping would be a second
-/// place for a unit mismatch to hide.
+/// A thin alias over [`BenchmarkFigures::values`], which a single match uses
+/// too — the mapping lives beside the columns it reads so a unit mismatch has
+/// only one place to hide.
 pub(crate) fn player_values(a: &HeroAverages) -> HashMap<BenchmarkMetric, f32> {
-    let pairs = [
-        (BenchmarkMetric::GoldPerMin, a.gold_per_min),
-        (BenchmarkMetric::XpPerMin, a.xp_per_min),
-        (BenchmarkMetric::LastHitsPerMin, a.last_hits_per_min),
-        (BenchmarkMetric::KillsPerMin, a.kills_per_min),
-        (BenchmarkMetric::DeathsPerMin, a.deaths_per_min),
-        (BenchmarkMetric::AssistsPerMin, a.assists_per_min),
-        (BenchmarkMetric::HeroDamagePerMin, a.hero_damage_per_min),
-        (BenchmarkMetric::TowerDamage, a.tower_damage),
-    ];
-
-    pairs
-        .into_iter()
-        .filter_map(|(metric, value)| value.map(|v| (metric, v as f32)))
-        .collect()
+    a.figures.values()
 }
 
 async fn load_linked_player(state: &AppState, user: &User) -> AppResult<DotaPlayer> {

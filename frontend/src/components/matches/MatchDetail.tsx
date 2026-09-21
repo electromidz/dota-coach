@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 
 import { BarList } from "@/components/charts/BarList";
 import { MatchAnalysis } from "@/components/coach/MatchAnalysis";
-import { MatchBenchmark } from "@/components/matches/MatchBenchmark";
+import { MatchComparison } from "@/components/matches/MatchComparison";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
@@ -230,7 +230,7 @@ export function MatchDetail({ id }: { id: string }) {
         ) : null}
       </div>
 
-      <MatchBenchmark heroId={match.hero_id} heroName={match.hero_name} />
+      <MatchComparison id={match.id} />
 
       <MatchAnalysis id={match.id} />
 

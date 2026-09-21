@@ -9,8 +9,8 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::api::handlers::{
-    admin, auth, benchmark, billing, coach, events, health, heroes, matches, players, stats,
-    subscribe,
+    admin, auth, benchmark, billing, coach, conversation, events, health, heroes, matches, players,
+    sessions, stats, subscribe,
 };
 use crate::api::{docs, observability};
 use crate::config::Config;
@@ -55,6 +55,10 @@ pub fn build(state: AppState, config: &Config) -> Router {
         // unable to say what it wants coaching on.
         .route("/coach/roles", get(coach::roles))
         .route("/coach/role", post(coach::select_role))
+        .route("/coach/sessions", get(sessions::list))
+        .route("/coach/sessions/{id}", get(sessions::get))
+        .route("/coach/progress", get(sessions::progress))
+        .route("/coach/conversation", get(conversation::get))
         .route("/coach/player-model", get(coach::player_model))
         .route("/coach/training-focus", get(coach::training_focus))
         // Billing. Reading is always allowed — an expired account still needs
@@ -72,6 +76,7 @@ pub fn build(state: AppState, config: &Config) -> Router {
         .route("/subscribe/redeem", post(subscribe::redeem))
         .route("/matches", get(matches::list))
         .route("/matches/{id}", get(matches::get))
+        .route("/matches/{id}/comparison", get(matches::comparison))
         .route("/matches/{id}/analysis", get(coach::match_analysis))
         // Admin panel. Gated by `AdminUser` in every handler, not by a layer —
         // same reasoning as the session requirement above.
@@ -81,7 +86,10 @@ pub fn build(state: AppState, config: &Config) -> Router {
         .route("/admin/users/{id}/extend", post(admin::extend))
         .route("/admin/users/{id}/disable", post(admin::disable_user))
         .route("/admin/users/{id}/enable", post(admin::enable_user))
-        .route("/admin/vouchers", post(admin::create_vouchers).get(admin::list_vouchers))
+        .route(
+            "/admin/vouchers",
+            post(admin::create_vouchers).get(admin::list_vouchers),
+        )
         .route("/admin/vouchers/{id}", get(admin::get_voucher))
         .route(
             "/admin/vouchers/{id}/deactivate",
@@ -96,6 +104,7 @@ pub fn build(state: AppState, config: &Config) -> Router {
     // the right to hold a connection open for three minutes.
     let generation = Router::new()
         .route("/coach/analyze", post(coach::analyze))
+        .route("/coach/conversation", post(conversation::ask))
         .route("/matches/{id}/analyze", post(coach::analyze_match));
 
     // Above the LLM client's own timeout, never below it: the inner deadline
@@ -127,9 +136,12 @@ pub fn build(state: AppState, config: &Config) -> Router {
             Duration::from_secs(30),
         ));
 
-    let slow = Router::new().nest("/api", generation).layer(
-        TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, generation_timeout),
-    );
+    let slow = Router::new()
+        .nest("/api", generation)
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
+            generation_timeout,
+        ));
 
     standard
         .merge(slow)

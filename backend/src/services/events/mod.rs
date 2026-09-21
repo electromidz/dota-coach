@@ -12,7 +12,12 @@ use uuid::Uuid;
 use crate::domain::event::EventType;
 use crate::repositories;
 
-pub async fn track(pool: &PgPool, user_id: Uuid, event_type: EventType, metadata: serde_json::Value) {
+pub async fn track(
+    pool: &PgPool,
+    user_id: Uuid,
+    event_type: EventType,
+    metadata: serde_json::Value,
+) {
     if let Err(e) = repositories::event::insert(pool, user_id, event_type.slug(), metadata).await {
         tracing::warn!(
             error = %e,

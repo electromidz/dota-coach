@@ -37,6 +37,13 @@ pub enum EvidenceKind {
     Focus,
     /// One specific match.
     Match,
+    /// What changed since the previous coaching session.
+    ///
+    /// The only kind that is a statement about *two* points in time. It is
+    /// separated from the rest because the difference matters to a reader: a
+    /// number under [`EvidenceKind::Overall`] is where the player is, and a
+    /// number under this one is how far they moved.
+    Progress,
 }
 
 /// One measured fact, with a stable id the model can cite.

@@ -1,6 +1,6 @@
 use serde::Serialize;
-use uuid::Uuid;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 /// Derived metrics for one match.
 ///

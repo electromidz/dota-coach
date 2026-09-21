@@ -229,9 +229,7 @@ impl From<VoucherError> for AppError {
     fn from(error: VoucherError) -> Self {
         match error {
             VoucherError::NotFound => AppError::BadRequest("That code is not valid.".into()),
-            VoucherError::Inactive => {
-                AppError::BadRequest("That code is no longer active.".into())
-            }
+            VoucherError::Inactive => AppError::BadRequest("That code is no longer active.".into()),
             VoucherError::Expired => AppError::BadRequest("That code has expired.".into()),
             VoucherError::UsedUp => AppError::BadRequest(
                 "That code has already been used the maximum number of times.".into(),

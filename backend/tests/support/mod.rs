@@ -23,7 +23,9 @@ use dota_coach_backend::config::{
     AuthConfig, BillingConfig, CoachConfig, Config, DotaConfig, HeroConfig, LlmConfig, RoleConfig,
     TrainingConfig,
 };
-use dota_coach_backend::domain::benchmark::{BenchmarkContext, BenchmarkMetric, Bucket, Segment};
+use dota_coach_backend::domain::benchmark::{
+    BenchmarkContext, BenchmarkMetric, Bucket, ResolvedBracket, Segment,
+};
 use dota_coach_backend::domain::billing::PaymentStatus;
 use dota_coach_backend::domain::hero::FitWeights;
 use dota_coach_backend::domain::hero::{HeroMeta, HeroMetaContext};
@@ -243,7 +245,7 @@ impl StubBenchmarks {
 impl BenchmarkProvider for StubBenchmarks {
     async fn get_distribution(
         &self,
-        _context: &BenchmarkContext,
+        context: &BenchmarkContext,
     ) -> Result<Distribution, BenchmarkError> {
         if let Some(reason) = self.failure {
             return Err(BenchmarkError::Unavailable(reason.to_string()));
@@ -270,14 +272,24 @@ impl BenchmarkProvider for StubBenchmarks {
             ]
         };
 
+        // Resolved the same way the real provider does, so the integration
+        // tests exercise the rank-segmentation path rather than a stub that
+        // quietly always says "hero only".
+        let bracket = ResolvedBracket::requested_for(context.rank_tier);
+
         Ok(Distribution {
             buckets: HashMap::from([
                 (BenchmarkMetric::GoldPerMin, buckets(200.0, 500.0, 800.0)),
                 (BenchmarkMetric::XpPerMin, buckets(250.0, 550.0, 850.0)),
                 (BenchmarkMetric::DeathsPerMin, buckets(0.05, 0.15, 0.30)),
             ]),
-            segmented_by: vec![Segment::Hero],
+            segmented_by: if bracket.is_rank_segmented() {
+                vec![Segment::Hero, Segment::RankBracket]
+            } else {
+                vec![Segment::Hero]
+            },
             sample_size: None,
+            bracket,
         })
     }
 }
@@ -586,6 +598,11 @@ pub fn test_config() -> Config {
             temperature: 0.0,
             request_timeout_seconds: 5,
             recent_matches: 10,
+            cache_ttl_minutes: 60,
+            // On by default in tests, so the cached path is the one being
+            // exercised everywhere rather than a path nothing covers.
+            cache_enabled: true,
+            chat_daily_limit: 50,
         },
         training: TrainingConfig {
             focus_weights: FocusWeights::default(),

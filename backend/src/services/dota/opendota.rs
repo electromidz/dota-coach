@@ -572,7 +572,10 @@ mod tests {
             "is_roaming",
             "party_size",
         ] {
-            assert!(projected.contains(&field), "`{field}` is read but not projected");
+            assert!(
+                projected.contains(&field),
+                "`{field}` is read but not projected"
+            );
         }
     }
 
