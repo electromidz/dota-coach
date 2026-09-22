@@ -3,6 +3,12 @@ import Link from "next/link";
 import { Brand } from "@/components/shell/Brand";
 import { Icon, type IconName } from "@/components/ui/Icon";
 
+/**
+ * Only destinations that exist. A footer full of `href="#"` costs crawl
+ * budget and reads as an abandoned template to a quality rater, so the
+ * "Company" and "Legal" columns stay out until there are real pages behind
+ * them — see the landing-page notes.
+ */
 const COLUMNS: { heading: string; links: { label: string; href: string }[] }[] = [
   {
     heading: "Product",
@@ -14,28 +20,21 @@ const COLUMNS: { heading: string; links: { label: string; href: string }[] }[] =
     ],
   },
   {
-    heading: "Company",
+    heading: "Learn",
     links: [
-      { label: "About", href: "#" },
-      { label: "Contact", href: "#" },
-    ],
-  },
-  {
-    heading: "Legal",
-    links: [
-      { label: "Terms of service", href: "#" },
-      { label: "Privacy policy", href: "#" },
+      {
+        label: "What is an AI Dota 2 coach?",
+        href: "#what-is-a-dota-coach",
+      },
+      { label: "Sample coaching report", href: "#product" },
     ],
   },
 ];
 
 /** Placeholder destinations — see the landing-page notes: wire these to the
- *  real community links before launch. */
-const SOCIALS: { icon: IconName; label: string; href: string }[] = [
-  { icon: "discord", label: "Discord", href: "#" },
-  { icon: "github", label: "GitHub", href: "#" },
-  { icon: "x", label: "X", href: "#" },
-];
+ *  real community links before launch. Until then they are omitted rather
+ *  than rendered as dead `#` links. */
+const SOCIALS: { icon: IconName; label: string; href: string }[] = [];
 
 export function Footer() {
   return (
@@ -44,20 +43,27 @@ export function Footer() {
         <div className="flex max-w-xs flex-col gap-3">
           <Brand />
           <p className="text-sm leading-relaxed text-ink-faint">
-            A personal AI coach that learns your Dota 2 habits across matches
-            and tells you what to train next.
+            A personal AI Dota 2 coach that learns your habits across matches,
+            benchmarks you against your own rank, and tells you what to train
+            next.
           </p>
-          <div className="mt-1 flex items-center gap-3">
-            {SOCIALS.map((social) => (
-              <a
-                key={social.label}
-                href={social.href}
-                className="focus-neon flex size-9 cursor-pointer items-center justify-center rounded-lg border border-glass-edge text-ink-faint transition-colors duration-200 ease-out hover:text-ink"
-              >
-                <Icon name={social.icon} title={social.label} className="size-4" />
-              </a>
-            ))}
-          </div>
+          {SOCIALS.length ? (
+            <div className="mt-1 flex items-center gap-3">
+              {SOCIALS.map((social) => (
+                <a
+                  key={social.label}
+                  href={social.href}
+                  className="focus-neon flex size-9 cursor-pointer items-center justify-center rounded-lg border border-glass-edge text-ink-faint transition-colors duration-200 ease-out hover:text-ink"
+                >
+                  <Icon
+                    name={social.icon}
+                    title={social.label}
+                    className="size-4"
+                  />
+                </a>
+              ))}
+            </div>
+          ) : null}
         </div>
 
         <div className="grid grid-cols-2 gap-8 sm:grid-cols-3">

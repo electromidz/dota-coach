@@ -4,6 +4,7 @@ import { Alert } from "@/components/ui/Alert";
 import { ButtonLink } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { steamLoginUrl } from "@/lib/api";
+import type { PlanResponse } from "@/lib/types";
 
 /** Codes the login redirect can hand back on `?error=`. */
 const LOGIN_ERRORS: Record<string, string> = {
@@ -14,7 +15,20 @@ const LOGIN_ERRORS: Record<string, string> = {
   server_error: "Something went wrong signing you in. Please try again.",
 };
 
-export function Hero({ loginError }: { loginError?: string }) {
+/**
+ * The one `<h1>` on the site, so it is the strongest on-page signal there is
+ * for what this page is about. It names the thing being searched for — "AI
+ * Dota 2 coach" — before the hook rather than after it: "Stop losing to the
+ * same mistake" was the better line and the worse heading, because nothing in
+ * it said Dota. The hook survives as the second half of the sentence.
+ */
+export function Hero({
+  loginError,
+  plan,
+}: {
+  loginError?: string;
+  plan?: PlanResponse | null;
+}) {
   const message = loginError ? LOGIN_ERRORS[loginError] : null;
 
   return (
@@ -31,21 +45,28 @@ export function Hero({ loginError }: { loginError?: string }) {
             <span className="absolute inline-flex size-full animate-ping rounded-full bg-string opacity-75" />
             <span className="relative inline-flex size-1.5 rounded-full bg-string" />
           </span>
-          Coaching that updates with the current patch
+          Dota 2 coaching that updates with the current patch
         </span>
 
-        <h1 className="font-display text-5xl leading-[1.05] tracking-wide sm:text-6xl lg:text-7xl">
-          Stop losing to the
+        <h1 className="font-display text-4xl leading-[1.08] tracking-wide sm:text-5xl lg:text-6xl">
+          The AI Dota 2 coach that finds
           <br />
           <span className="bg-gradient-to-r from-keyword via-operator to-function bg-clip-text text-transparent">
-            same mistake
+            the mistake you keep making
           </span>
         </h1>
 
         <p className="max-w-lg text-lg leading-relaxed text-ink-muted lg:text-xl">
-          Sign in with Steam and we read your last matches, find what keeps
-          costing you games, and turn it into one thing to fix next — with the
-          numbers to prove it moved.
+          Sign in with Steam and Dota Coach reads your recent{" "}
+          <strong className="font-medium text-ink">
+            Dota 2 match history
+          </strong>
+          , benchmarks it against players at your own rank and role, and turns
+          what keeps costing you games into{" "}
+          <strong className="font-medium text-ink">
+            one thing to fix next
+          </strong>{" "}
+          — with the numbers to prove it moved.
         </p>
 
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
@@ -58,16 +79,19 @@ export function Hero({ loginError }: { loginError?: string }) {
             variant="ghost"
             className="w-full sm:w-auto"
           >
-            See a sample report
+            See a sample coaching report
             <Icon name="external" className="size-4" />
           </ButtonLink>
         </div>
 
-        <TrialOffer className="text-sm leading-relaxed text-ink-faint" />
+        <TrialOffer
+          initialPlan={plan}
+          className="text-sm leading-relaxed text-ink-faint"
+        />
 
         <p className="text-xs text-ink-faint">
           Cancel anytime · Works with your Steam account · We only read public
-          match history
+          Dota 2 match history
         </p>
       </div>
 

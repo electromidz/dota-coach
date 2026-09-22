@@ -9,13 +9,14 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Icon } from "@/components/ui/Icon";
 import { logout } from "@/lib/api";
-import { useSession } from "@/lib/session-context";
+import { clearSignedInHint, useSession } from "@/lib/session-context";
 
 export function Profile() {
   const { session } = useSession();
 
   async function handleLogout() {
     await logout().catch(() => undefined);
+    clearSignedInHint();
     window.location.href = "/";
   }
 

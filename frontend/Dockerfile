@@ -14,6 +14,13 @@ COPY . .
 # this must be the URL the *browser* uses, not the compose service name.
 ARG NEXT_PUBLIC_API_URL=http://localhost:8080
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+
+# The site's own origin, baked in the same way. Canonical URLs, og:image,
+# robots.txt and the sitemap are absolute; if this is wrong the landing page
+# advertises a canonical it does not serve.
+ARG NEXT_PUBLIC_SITE_URL=http://localhost:3000
+ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL
+
 ENV NEXT_TELEMETRY_DISABLED=1
 
 RUN npm run build

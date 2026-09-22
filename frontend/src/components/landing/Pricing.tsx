@@ -7,6 +7,7 @@ import { ButtonLink } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { steamLoginUrl } from "@/lib/api";
 import { formatPlanPrice } from "@/lib/billing";
+import type { PlanResponse } from "@/lib/types";
 import { usePlan } from "@/lib/usePlan";
 
 const TRIAL_FEATURES = [
@@ -30,8 +31,8 @@ const PRO_FEATURES = [
  * one real subscription rather than fabricating tiers or a yearly discount
  * nothing behind checkout could honour.
  */
-export function Pricing() {
-  const { plan, checkoutAvailable } = usePlan();
+export function Pricing({ initialPlan }: { initialPlan?: PlanResponse | null }) {
+  const { plan, checkoutAvailable } = usePlan(initialPlan);
 
   return (
     <section id="pricing" className="safe-x mx-auto max-w-5xl py-16 lg:py-24">
@@ -40,8 +41,9 @@ export function Pricing() {
           One plan. No surprises.
         </h2>
         <p className="mt-3 text-ink-muted">
-          Every measured feature is free. The subscription only covers the AI
-          model calls that actually cost money to run.
+          Dota 2 coaching without a tier ladder: every measured feature is
+          free, and the subscription only covers the AI model calls that
+          actually cost money to run.
         </p>
       </Reveal>
 

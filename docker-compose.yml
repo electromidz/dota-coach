@@ -77,6 +77,9 @@ services:
       args:
         # Baked into the client bundle: must be reachable from the browser.
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+        # The site's own public origin — canonical URLs, og:image, robots.txt
+        # and the sitemap are absolute and must name the host serving them.
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
     # The backend's own HEALTHCHECK gates this: the frontend is useless until

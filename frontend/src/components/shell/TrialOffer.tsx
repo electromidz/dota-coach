@@ -1,6 +1,7 @@
 "use client";
 
 import { formatPlanPrice } from "@/lib/billing";
+import type { PlanResponse } from "@/lib/types";
 import { usePlan } from "@/lib/usePlan";
 
 /**
@@ -12,8 +13,14 @@ import { usePlan } from "@/lib/usePlan";
  * exactly when a visitor is least served by a broken sentence — nothing is
  * rendered rather than a guessed price.
  */
-export function TrialOffer({ className }: { className?: string }) {
-  const { plan } = usePlan();
+export function TrialOffer({
+  className,
+  initialPlan,
+}: {
+  className?: string;
+  initialPlan?: PlanResponse | null;
+}) {
+  const { plan } = usePlan(initialPlan);
 
   if (!plan) return null;
 

@@ -2,6 +2,12 @@ import type { Metadata, Viewport } from "next";
 import { Chakra_Petch, Russo_One } from "next/font/google";
 
 import { ServiceWorker } from "@/components/shell/ServiceWorker";
+import {
+  SITE_DESCRIPTION,
+  SITE_NAME,
+  SITE_TITLE,
+  SITE_URL,
+} from "@/lib/site";
 
 import "./globals.css";
 
@@ -24,13 +30,50 @@ const russo = Russo_One({
 });
 
 export const metadata: Metadata = {
+  // Every `og:`/`twitter:` image and every canonical below resolves against
+  // this. Without it Next emits relative URLs, which crawlers and social
+  // scrapers both refuse to follow.
+  metadataBase: new URL(SITE_URL),
   title: {
-    default: "AI Dota Coach",
-    template: "%s · AI Dota Coach",
+    default: SITE_TITLE,
+    template: "%s · Dota Coach",
   },
-  description:
-    "A personal AI coach that learns your Dota 2 habits across matches and tells you what to train next.",
-  applicationName: "AI Dota Coach",
+  description: SITE_DESCRIPTION,
+  applicationName: SITE_NAME,
+  // Signed-in screens carry no keywords worth competing on, so the canonical
+  // set here is the landing page's and every app route inherits a self-
+  // referencing one from `generateMetadata` where it matters.
+  alternates: { canonical: "/" },
+  authors: [{ name: SITE_NAME, url: SITE_URL }],
+  creator: SITE_NAME,
+  publisher: SITE_NAME,
+  category: "Gaming",
+  openGraph: {
+    type: "website",
+    siteName: SITE_NAME,
+    locale: "en_US",
+    url: SITE_URL,
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
+  },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: {
+      index: true,
+      follow: true,
+      // Lets Google show a full-length description and a large preview image
+      // instead of the truncated defaults it falls back to.
+      "max-snippet": -1,
+      "max-image-preview": "large",
+      "max-video-preview": -1,
+    },
+  },
   manifest: "/manifest.webmanifest",
   icons: {
     icon: [

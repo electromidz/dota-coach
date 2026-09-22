@@ -14,7 +14,7 @@ const STEPS: {
   {
     icon: "gauge",
     title: "We analyze your recent matches",
-    body: "Laning, deaths, gold and objectives — turned into deterministic numbers and benchmarked against your rank and role.",
+    body: "Laning, deaths, gold and objectives from your Dota 2 match history — turned into deterministic numbers and benchmarked against your rank and role.",
   },
   {
     icon: "trophy",
@@ -31,11 +31,11 @@ export function HowItWorks() {
     >
       <Reveal className="mx-auto max-w-2xl text-center">
         <h2 className="font-display text-3xl tracking-wide sm:text-4xl">
-          Three steps, no setup
+          How the Dota 2 coaching works
         </h2>
         <p className="mt-3 text-ink-muted">
-          Nothing to install. The coach reads what OpenDota already has on
-          your account.
+          Three steps, no setup, nothing to install — the coach reads the match
+          history OpenDota already has on your account.
         </p>
       </Reveal>
 

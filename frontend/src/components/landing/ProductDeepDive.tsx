@@ -66,7 +66,7 @@ export function ProductDeepDive() {
     <section id="product" className="safe-x mx-auto max-w-7xl py-16 lg:py-24">
       <Reveal className="mx-auto max-w-2xl text-center">
         <h2 className="font-display text-3xl tracking-wide sm:text-4xl">
-          A sample report, panel by panel
+          A sample Dota 2 coaching report, panel by panel
         </h2>
       </Reveal>
 
