@@ -50,6 +50,28 @@ export function RankCard({
             </p>
           )}
 
+          {rank.mmr ? (
+            <p className="mt-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <span className="font-mono text-lg font-bold tabular-nums text-ink">
+                ~{rank.mmr.midpoint.toLocaleString()}
+                <span className="ml-1 text-xs font-normal text-ink-faint">
+                  MMR
+                </span>
+              </span>
+              {/* The band is the part that is actually pinned down by the
+                  medal; the single figure above is its middle. Showing both
+                  keeps the headline number from reading as a measurement of
+                  where inside the band this player sits — Valve publishes
+                  nothing that could say. */}
+              <span className="font-mono text-xs tabular-nums text-ink-faint">
+                {rank.mmr.high === null
+                  ? `${rank.mmr.low.toLocaleString()}+`
+                  : `${rank.mmr.low.toLocaleString()}–${rank.mmr.high.toLocaleString()}`}
+                <span className="ml-1 font-sans">estimated from your medal</span>
+              </span>
+            </p>
+          ) : null}
+
           {rank.leaderboard_rank !== null ? (
             <p className="mt-1 font-mono text-sm tabular-nums text-keyword">
               Leaderboard #{rank.leaderboard_rank.toLocaleString()}

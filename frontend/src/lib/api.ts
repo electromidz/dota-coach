@@ -26,6 +26,7 @@ import type {
   PlayerModelResponse,
   ProgressResponse,
   RankBracket,
+  RankDistribution,
   RedeemResponse,
   RoleSelectionResponse,
   SessionHistoryResponse,
@@ -145,6 +146,17 @@ export function getStats(): Promise<StatsResponse> {
  */
 export function getCalibration(): Promise<CalibrationResponse> {
   return apiFetch<CalibrationResponse>("/api/calibration");
+}
+
+/**
+ * Where the player's numbers sit against every rank bracket.
+ *
+ * A separate call from `getCalibration` on purpose: this one needs the
+ * benchmark provider, so an outage empties this panel without taking the rank
+ * and trajectory down with it.
+ */
+export function getRankDistribution(): Promise<RankDistribution> {
+  return apiFetch<RankDistribution>("/api/calibration/brackets");
 }
 
 /**

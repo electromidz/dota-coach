@@ -30,11 +30,13 @@
 use chrono::{DateTime, Duration, Utc};
 
 use crate::config::CalibrationConfig;
+use crate::domain::benchmark::BenchmarkResult;
 use crate::domain::calibration::{
-    rank_label, Methodology, Momentum, MomentumPoint, RankConfidence, RankSnapshot, RolePreference,
-    Streak, StreakKind, TrajectoryPoint,
+    rank_label, BracketFit, BracketResemblance, Consistency, Methodology, Momentum, MomentumPoint,
+    RankConfidence, RankSnapshot, RolePreference, Streak, StreakKind, TrajectoryPoint,
 };
 use crate::domain::eligibility::{self, lobby_type};
+use crate::domain::hero::RankBracket;
 use crate::domain::r#match::Match;
 use crate::services::metrics;
 
@@ -59,8 +61,9 @@ const MAX_PERFORMANCE_SWING: f32 = 0.25;
 /// nothing. It should not be allowed to dip four medals.
 const TRAJECTORY_OVERSHOOT: f32 = 1.0;
 
-/// Approximate MMR behind one rank tier (one star) — a medal spans five stars
-/// and roughly 750 MMR.
+/// MMR behind one rank tier (one star), from the same published medal table
+/// [`crate::domain::calibration::MMR_PER_STAR`] uses — one constant, so the
+/// trajectory's scale and the headline MMR band can never disagree.
 ///
 /// A fixed scale rather than one derived per segment. Deriving it (net modeled
 /// MMR maps onto the tiers actually gained) collapses whenever a window's wins
@@ -69,7 +72,7 @@ const TRAJECTORY_OVERSHOOT: f32 = 1.0;
 /// proportional to what was actually played, and the residual — whatever the
 /// match results cannot account for — is spread evenly so the segment still
 /// lands on the next real reading.
-const MMR_PER_TIER: f32 = 150.0;
+const MMR_PER_TIER: f32 = crate::domain::calibration::MMR_PER_STAR as f32;
 
 /// Ranked matches only — see the module note on population.
 fn is_ranked(m: &Match) -> bool {
@@ -185,6 +188,137 @@ pub fn role_preference(matches: &[Match]) -> Vec<RolePreference> {
             matches,
         })
         .collect()
+}
+
+/// Reduce one bracket's per-metric comparison to a single placement.
+///
+/// The mean of the metrics that produced a usable percentile. `compare`
+/// already refuses to rank a figure from too few matches and already corrects
+/// for direction, so everything arriving here is comparable and 90 always
+/// means "better than 90% of them". Metrics it declined are skipped rather
+/// than counted as average — a metric with no verdict is not a verdict of
+/// fifty.
+///
+/// `None` when nothing was rankable, which is the honest answer for a hero the
+/// provider has no data on and for a player with three games on it.
+pub fn bracket_placement(results: &[BenchmarkResult]) -> (Option<f32>, i64) {
+    let ranked: Vec<f32> = results.iter().filter_map(|r| r.percentile).collect();
+
+    if ranked.is_empty() {
+        return (None, 0);
+    }
+
+    let mean = ranked.iter().sum::<f32>() / ranked.len() as f32;
+    (Some(mean), ranked.len() as i64)
+}
+
+/// The medal whose peers this player most resembles.
+///
+/// The bracket where they sit closest to the middle of the pack — a player
+/// beating 98% of Heralds and 6% of Divines belongs somewhere around the
+/// bracket they are merely average in, which is what a medal means.
+///
+/// Ties break toward the higher bracket: `RankBracket::ALL` runs Herald to
+/// Immortal, and a strict `<` keeps the first-seen best, so this deliberately
+/// scans in reverse to prefer the higher of two equally central brackets.
+pub fn closest_bracket(fits: &[BracketFit]) -> Option<RankBracket> {
+    fits.iter()
+        .rev()
+        .filter_map(|f| f.percentile.map(|p| (f.bracket, (p - 50.0).abs())))
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(bracket, _)| bracket)
+}
+
+/// Below this many ranked matches, consistency is not measured.
+///
+/// Variance over a handful of games describes the games, not the player. Ten
+/// is where a run of results starts to say something about how steady they
+/// are.
+const CONSISTENCY_FLOOR: i64 = 10;
+
+/// Turn per-bracket placements into the shares a distribution chart draws.
+///
+/// Scores each bracket by how near the player sits to the middle of it — a
+/// bracket they are exactly average in scores 1.0, one they beat or lose to
+/// outright scores near 0 — then normalises the scores to sum to 100.
+///
+/// The reason this exists rather than sorting percentiles directly: beating
+/// 98% of Heralds would put Herald at the top of a descending sort while
+/// meaning the player is furthest from Herald. Sorting the raw percentile
+/// inverts the chart's meaning, so the chart is given a quantity that can be
+/// sorted.
+pub fn resemblance(fits: &[BracketFit]) -> Vec<BracketResemblance> {
+    // Distance from the middle, mapped so 50 -> 1.0 and 0 or 100 -> 0.0.
+    let scored: Vec<(&BracketFit, f32)> = fits
+        .iter()
+        .filter_map(|f| f.percentile.map(|p| (f, 1.0 - (p - 50.0).abs() / 50.0)))
+        .collect();
+
+    let total: f32 = scored.iter().map(|(_, score)| score).sum();
+    if scored.is_empty() || total <= 0.0 {
+        return Vec::new();
+    }
+
+    let mut out: Vec<BracketResemblance> = scored
+        .iter()
+        .map(|(fit, score)| BracketResemblance {
+            bracket: fit.bracket,
+            label: fit.label,
+            percentage: (score / total) * 100.0,
+            is_highest: false,
+            is_player_bracket: fit.is_player_bracket,
+        })
+        .collect();
+
+    // Strongest match first, which is the order the chart draws.
+    out.sort_by(|a, b| {
+        b.percentage
+            .partial_cmp(&a.percentage)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if let Some(first) = out.first_mut() {
+        first.is_highest = true;
+    }
+
+    out
+}
+
+/// How steady the player's per-match output is, 0-100.
+///
+/// Built from the spread of per-match KDA around the player's own mean: a
+/// coefficient of variation, inverted so high means steady. Someone who goes
+/// 4/2/10 most nights scores high; someone alternating 12/1/8 with 0/9/2
+/// scores low, even on the same average.
+///
+/// `None` below [`CONSISTENCY_FLOOR`] matches. That is the whole point of the
+/// function returning an option — the alternative some tools take is to
+/// default the figure to a plausible-looking 75, which reports a measurement
+/// nobody made.
+pub fn consistency(matches: &[Match]) -> Option<Consistency> {
+    let ranked = ranked_newest_first(matches);
+    if (ranked.len() as i64) < CONSISTENCY_FLOOR {
+        return None;
+    }
+
+    let values: Vec<f32> = ranked
+        .iter()
+        .map(|m| metrics::kda(m.kills, m.deaths, m.assists))
+        .collect();
+
+    let mean = values.iter().sum::<f32>() / values.len() as f32;
+    if mean <= 0.0 || !mean.is_finite() {
+        return None;
+    }
+
+    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32;
+    let cv = variance.sqrt() / mean;
+
+    // A coefficient of variation at or above 1.0 is as scattered as this
+    // scale distinguishes; everything past it is equally "all over the place".
+    Some(Consistency {
+        percentage: ((1.0 - cv.clamp(0.0, 1.0)) * 100.0).clamp(0.0, 100.0),
+        matches: values.len() as i64,
+    })
 }
 
 /// How many recent ranked matches the momentum curve spans.

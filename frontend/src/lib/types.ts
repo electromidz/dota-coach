@@ -1466,6 +1466,65 @@ export interface RolePreference {
   matches: number;
 }
 
+/**
+ * Where the player's numbers sit against one bracket's peers.
+ *
+ * A measurement, not a prediction. `percentile` of 62 means "better than 62%
+ * of Archon players on the metrics that could be compared" — it is not a 62%
+ * chance of calibrating Archon. `null` means the provider had nothing for this
+ * bracket, or the sample was too thin to rank against; it is never a default.
+ */
+export interface BracketFit {
+  bracket: RankBracket;
+  label: string;
+  percentile: number | null;
+  /** How many metrics contributed. A fit from one metric is a weaker claim. */
+  metrics_used: number;
+  sample_size: number | null;
+  is_player_bracket: boolean;
+}
+
+/**
+ * How much the player resembles one bracket, as a share of 100.
+ *
+ * What the distribution chart draws. Not a percentile and not a probability of
+ * calibrating there: a percentile cannot be sorted descending without
+ * inverting its meaning, so the server scores each bracket by how near the
+ * middle of it the player sits and normalises those scores.
+ */
+export interface BracketResemblance {
+  bracket: RankBracket;
+  label: string;
+  /** 0-100. Shares across placed brackets sum to 100. */
+  percentage: number;
+  is_highest: boolean;
+  is_player_bracket: boolean;
+}
+
+/** `null` from the server when there are too few matches to measure it. */
+export interface Consistency {
+  /** 0-100. High means their good and bad games look alike. */
+  percentage: number;
+  matches: number;
+}
+
+export interface RankDistribution {
+  /** Peer distributions are per-hero, so this describes one hero. */
+  hero_id: number;
+  hero_name: string;
+  sample: number;
+  /** One entry per medal, Herald first. */
+  fits: BracketFit[];
+  /** The medal whose peers this player most resembles. */
+  closest: RankBracket | null;
+  /** Placements as shares, sorted strongest first — what the chart draws. */
+  resemblance: BracketResemblance[];
+  /** Per-metric placement against the player's own bracket. */
+  own_bracket_metrics: BenchmarkResult[];
+  consistency: Consistency | null;
+  note: string | null;
+}
+
 /** One match on the momentum curve. */
 export interface MomentumPoint {
   /** 1-based position in the window, oldest first — the chart's x axis. */
@@ -1500,12 +1559,30 @@ export interface Momentum {
   window: number;
 }
 
+/**
+ * The MMR range a medal implies.
+ *
+ * An **estimate**, and labelled as one wherever it renders. What makes it
+ * defensible is that it is a range: the medal is a real reading from Valve,
+ * and the band is what that reading pins down. `midpoint` is a headline
+ * figure, not a measurement of where inside the band the player sits —
+ * nothing public can say that.
+ */
+export interface MmrEstimate {
+  low: number;
+  /** Null for Immortal, which has no ceiling. */
+  high: number | null;
+  midpoint: number;
+}
+
 export interface EstablishedRank {
   /** `medal * 10 + stars`. `null` for an unranked or private account. */
   rank_tier: number | null;
   /** `"Archon 5"`. `null` when there is no tier to name — never a placeholder. */
   label: string | null;
   leaderboard_rank: number | null;
+  /** The band the medal implies. Null when there is no medal. */
+  mmr: MmrEstimate | null;
 }
 
 /**

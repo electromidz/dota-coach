@@ -26,8 +26,8 @@ use utoipa::ToSchema;
 use crate::api::extract::CurrentUser;
 use crate::api::handlers::stats::load_linked_player;
 use crate::domain::calibration::{
-    rank_label, EstablishedRank, Methodology, Momentum, RankConfidence, RolePreference, Streak,
-    TrajectoryPoint,
+    estimate_mmr, rank_label, EstablishedRank, Methodology, Momentum, RankConfidence,
+    RolePreference, Streak, TrajectoryPoint,
 };
 use crate::error::{AppError, AppResult};
 use crate::repositories;
@@ -114,6 +114,7 @@ pub async fn get(
         rank_tier,
         label: rank_tier.and_then(rank_label),
         leaderboard_rank: latest.and_then(|s| s.leaderboard_rank),
+        mmr: rank_tier.and_then(estimate_mmr),
     };
 
     Ok(Json(CalibrationResponse {

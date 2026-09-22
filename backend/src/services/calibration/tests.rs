@@ -623,3 +623,239 @@ fn momentum_never_reports_an_absolute_rating() {
         "these are movements in the hundreds, not a rating in the thousands"
     );
 }
+
+// ---------------------------------------------------------------------------
+// bracket placement
+// ---------------------------------------------------------------------------
+
+use crate::domain::benchmark::{BenchmarkMetric, BenchmarkResult};
+
+fn result(percentile: Option<f32>) -> BenchmarkResult {
+    BenchmarkResult {
+        metric: BenchmarkMetric::GoldPerMin,
+        label: "Gold per minute",
+        higher_is_better: true,
+        player_value: 500.0,
+        player_sample: 20,
+        peer_median: Some(480.0),
+        top_20_value: Some(600.0),
+        percentile,
+        gap_to_top_20: None,
+        confidence: crate::domain::benchmark::Confidence::Adequate,
+        peer_sample_size: Some(500),
+        segmented_by: Vec::new(),
+        note: None,
+    }
+}
+
+fn fit(bracket: RankBracket, percentile: Option<f32>) -> BracketFit {
+    BracketFit {
+        bracket,
+        label: bracket.label(),
+        percentile,
+        metrics_used: percentile.map_or(0, |_| 1),
+        sample_size: Some(500),
+        is_player_bracket: false,
+    }
+}
+
+#[test]
+fn a_placement_averages_only_the_metrics_that_could_be_ranked() {
+    let results = vec![result(Some(60.0)), result(None), result(Some(80.0))];
+
+    let (percentile, used) = bracket_placement(&results);
+
+    assert_eq!(percentile, Some(70.0));
+    assert_eq!(
+        used, 2,
+        "a metric with no verdict is skipped, not counted as average"
+    );
+}
+
+#[test]
+fn nothing_rankable_is_no_placement_rather_than_fifty() {
+    let (percentile, used) = bracket_placement(&[result(None), result(None)]);
+
+    assert_eq!(
+        percentile, None,
+        "an unrankable hero is not a player of median skill"
+    );
+    assert_eq!(used, 0);
+    assert_eq!(bracket_placement(&[]).0, None);
+}
+
+/// The medal a player belongs to is the one they are *average* in — beating
+/// 98% of Heralds says where they are not.
+#[test]
+fn the_closest_bracket_is_the_one_they_are_merely_average_in() {
+    let fits = vec![
+        fit(RankBracket::Herald, Some(98.0)),
+        fit(RankBracket::Guardian, Some(94.0)),
+        fit(RankBracket::Crusader, Some(85.0)),
+        fit(RankBracket::Archon, Some(54.0)),
+        fit(RankBracket::Legend, Some(30.0)),
+        fit(RankBracket::Ancient, Some(12.0)),
+    ];
+
+    assert_eq!(closest_bracket(&fits), Some(RankBracket::Archon));
+}
+
+#[test]
+fn a_bracket_with_no_placement_is_never_the_closest() {
+    let fits = vec![
+        fit(RankBracket::Herald, None),
+        fit(RankBracket::Archon, Some(70.0)),
+        fit(RankBracket::Divine, None),
+    ];
+
+    assert_eq!(closest_bracket(&fits), Some(RankBracket::Archon));
+}
+
+#[test]
+fn nothing_placed_names_no_closest_bracket() {
+    let fits = vec![
+        fit(RankBracket::Herald, None),
+        fit(RankBracket::Archon, None),
+    ];
+
+    assert_eq!(closest_bracket(&fits), None);
+    assert_eq!(closest_bracket(&[]), None);
+}
+
+/// Two brackets equally far from the middle is a genuine tie. Resolving it
+/// upward keeps the product from quietly under-calling a player who sits
+/// exactly between two medals.
+#[test]
+fn an_exact_tie_resolves_to_the_higher_bracket() {
+    let fits = vec![
+        fit(RankBracket::Archon, Some(60.0)),
+        fit(RankBracket::Legend, Some(40.0)),
+    ];
+
+    assert_eq!(closest_bracket(&fits), Some(RankBracket::Legend));
+}
+
+// ---------------------------------------------------------------------------
+// resemblance and consistency
+// ---------------------------------------------------------------------------
+
+/// The reason `resemblance` exists. Sorting raw percentiles descending puts
+/// Herald first for a Divine-calibre player, because beating 98% of Heralds is
+/// the *highest* number on the board and the *furthest* from being a Herald.
+#[test]
+fn resemblance_does_not_put_the_bracket_they_crush_at_the_top() {
+    let fits = vec![
+        fit(RankBracket::Herald, Some(98.0)),
+        fit(RankBracket::Crusader, Some(85.0)),
+        fit(RankBracket::Archon, Some(52.0)),
+        fit(RankBracket::Legend, Some(28.0)),
+        fit(RankBracket::Divine, Some(3.0)),
+    ];
+
+    let shares = resemblance(&fits);
+
+    assert_eq!(shares.first().unwrap().bracket, RankBracket::Archon);
+    assert!(shares[0].is_highest);
+    assert!(
+        shares
+            .iter()
+            .all(|s| s.bracket != RankBracket::Herald || !s.is_highest),
+        "the bracket they beat 98 percent of is not the one they resemble"
+    );
+}
+
+#[test]
+fn resemblance_shares_add_up_to_a_hundred() {
+    let fits = vec![
+        fit(RankBracket::Crusader, Some(80.0)),
+        fit(RankBracket::Archon, Some(55.0)),
+        fit(RankBracket::Legend, Some(35.0)),
+    ];
+
+    let total: f32 = resemblance(&fits).iter().map(|s| s.percentage).sum();
+
+    assert!((total - 100.0).abs() < 0.01, "shares total {total}");
+}
+
+#[test]
+fn resemblance_is_sorted_strongest_first_with_one_highest() {
+    let fits = vec![
+        fit(RankBracket::Herald, Some(95.0)),
+        fit(RankBracket::Archon, Some(50.0)),
+        fit(RankBracket::Legend, Some(40.0)),
+    ];
+
+    let shares = resemblance(&fits);
+
+    for pair in shares.windows(2) {
+        assert!(pair[0].percentage >= pair[1].percentage);
+    }
+    assert_eq!(shares.iter().filter(|s| s.is_highest).count(), 1);
+}
+
+#[test]
+fn resemblance_skips_brackets_with_no_placement() {
+    let fits = vec![
+        fit(RankBracket::Herald, None),
+        fit(RankBracket::Archon, Some(50.0)),
+        fit(RankBracket::Divine, None),
+    ];
+
+    let shares = resemblance(&fits);
+
+    assert_eq!(shares.len(), 1);
+    assert_eq!(shares[0].bracket, RankBracket::Archon);
+    assert!(resemblance(&[]).is_empty());
+}
+
+/// The fabricated-default case, as a test. Some tools answer 75% here. A
+/// player with four games has no measurable consistency, and saying so is the
+/// only honest answer.
+#[test]
+fn consistency_is_absent_below_the_sample_floor_not_defaulted() {
+    let matches: Vec<Match> = (1..=9).map(|i| ranked(i, true, day(i))).collect();
+
+    assert!(
+        consistency(&matches).is_none(),
+        "nine games is not a consistency measurement"
+    );
+    assert!(consistency(&[]).is_none());
+}
+
+#[test]
+fn identical_games_read_as_perfectly_consistent() {
+    let matches: Vec<Match> = (1..=12).map(|i| ranked(i, true, day(i))).collect();
+
+    let c = consistency(&matches).expect("twelve games clears the floor");
+
+    // Every fixture match carries the same KDA, so there is no spread at all.
+    assert_eq!(c.percentage, 100.0);
+    assert_eq!(c.matches, 12);
+}
+
+#[test]
+fn a_wildly_swingy_record_scores_lower_than_a_steady_one() {
+    let steady: Vec<Match> = (1..=12).map(|i| ranked(i, true, day(i))).collect();
+
+    let mut swingy = steady.clone();
+    for (i, m) in swingy.iter_mut().enumerate() {
+        if i % 2 == 0 {
+            m.kills = 20;
+            m.deaths = 1;
+            m.assists = 20;
+        } else {
+            m.kills = 0;
+            m.deaths = 12;
+            m.assists = 1;
+        }
+    }
+
+    let steady_pct = consistency(&steady).unwrap().percentage;
+    let swingy_pct = consistency(&swingy).unwrap().percentage;
+
+    assert!(
+        swingy_pct < steady_pct,
+        "swingy {swingy_pct} should sit below steady {steady_pct}"
+    );
+    assert!((0.0..=100.0).contains(&swingy_pct));
+}

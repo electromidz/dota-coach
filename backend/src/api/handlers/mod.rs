@@ -10,6 +10,7 @@ pub mod health;
 pub mod heroes;
 pub mod matches;
 pub mod players;
+pub mod rank_distribution;
 pub mod sessions;
 pub mod stats;
 pub mod subscribe;

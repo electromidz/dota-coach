@@ -12,6 +12,7 @@ const RANK: EstablishedRank = {
   rank_tier: 45,
   label: "Archon 5",
   leaderboard_rank: null,
+  mmr: { low: 2926, high: 3079, midpoint: 3002 },
 };
 
 const CONFIDENCE: RankConfidence = {
@@ -46,7 +47,7 @@ describe("RankCard", () => {
   it("shows no rank rather than a placeholder when none was reported", () => {
     render(
       <RankCard
-        rank={{ rank_tier: null, label: null, leaderboard_rank: null }}
+        rank={{ rank_tier: null, label: null, leaderboard_rank: null, mmr: null }}
         confidence={{ ...CONFIDENCE, matches_counted: 0, confidence_pct: 0 }}
         thresholdPct={30}
       />,
@@ -55,6 +56,49 @@ describe("RankCard", () => {
     expect(screen.getByText(/No rank reported/)).toBeDefined();
     expect(screen.queryByText(/Unranked/)).toBeNull();
     expect(screen.queryByText(/Tier 0/)).toBeNull();
+  });
+
+  /**
+   * An estimate, and labelled as one. The medal is a real reading from Valve;
+   * the band is what that reading pins down, and the single figure is the
+   * middle of it — not a measurement of where inside the band this player
+   * sits, which nothing public can say.
+   */
+  it("shows the MMR estimate with the band it came from", () => {
+    render(<RankCard rank={RANK} confidence={CONFIDENCE} thresholdPct={30} />);
+
+    expect(screen.getByText(/~3,002/)).toBeDefined();
+    expect(screen.getByText(/2,926.3,079/)).toBeDefined();
+    expect(screen.getByText(/estimated from your medal/)).toBeDefined();
+  });
+
+  it("gives Immortal an open-ended band rather than an invented ceiling", () => {
+    render(
+      <RankCard
+        rank={{
+          rank_tier: 80,
+          label: "Immortal",
+          leaderboard_rank: 166,
+          mmr: { low: 5421, high: null, midpoint: 5421 },
+        }}
+        confidence={CONFIDENCE}
+        thresholdPct={30}
+      />,
+    );
+
+    expect(screen.getByText(/5,421\+/)).toBeDefined();
+  });
+
+  it("shows no MMR figure when there is no medal to derive one from", () => {
+    const { container } = render(
+      <RankCard
+        rank={{ rank_tier: null, label: null, leaderboard_rank: null, mmr: null }}
+        confidence={CONFIDENCE}
+        thresholdPct={30}
+      />,
+    );
+
+    expect(container.textContent).not.toMatch(/MMR/);
   });
 
   it("marks a calibrated account with a word, not only a colour", () => {
@@ -72,7 +116,12 @@ describe("RankCard", () => {
   it("names the Immortal ladder position when there is one", () => {
     render(
       <RankCard
-        rank={{ rank_tier: 80, label: "Immortal", leaderboard_rank: 166 }}
+        rank={{
+          rank_tier: 80,
+          label: "Immortal",
+          leaderboard_rank: 166,
+          mmr: { low: 5421, high: null, midpoint: 5421 },
+        }}
         confidence={CONFIDENCE}
         thresholdPct={30}
       />,

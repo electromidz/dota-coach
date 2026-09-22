@@ -21,7 +21,12 @@ vi.mock("@/lib/session-context", () => ({
 }));
 
 const RESPONSE: CalibrationResponse = {
-  established_rank: { rank_tier: 45, label: "Archon 5", leaderboard_rank: null },
+  established_rank: {
+    rank_tier: 45,
+    label: "Archon 5",
+    leaderboard_rank: null,
+    mmr: { low: 2926, high: 3079, midpoint: 3002 },
+  },
   confidence: { confidence_pct: 18, matches_counted: 12, is_calibrated: false },
   trajectory: [
     { rank_tier: 44, label: "Archon 4", at: "2026-09-15T12:00:00Z", estimated: false },

@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from "react";
 
+import { EstablishedRankPanel } from "@/components/calibrating/EstablishedRankPanel";
 import { MethodologyNote } from "@/components/calibrating/MethodologyNote";
 import { MomentumChart } from "@/components/calibrating/MomentumChart";
 import { RankCard } from "@/components/calibrating/RankCard";
+import { RankDistributionBars } from "@/components/calibrating/RankDistributionBars";
 import { RolePreferenceBars } from "@/components/calibrating/RolePreferenceBars";
 import { StreakBadge } from "@/components/calibrating/StreakBadge";
 import { TrajectoryChart } from "@/components/calibrating/TrajectoryChart";
@@ -12,9 +14,9 @@ import { PageSkeleton } from "@/components/shell/PageSkeleton";
 import { SignedOut } from "@/components/shell/SignedOut";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
-import { ApiError, getCalibration } from "@/lib/api";
+import { ApiError, getCalibration, getRankDistribution } from "@/lib/api";
 import { useSession } from "@/lib/session-context";
-import type { CalibrationResponse } from "@/lib/types";
+import type { CalibrationResponse, RankDistribution } from "@/lib/types";
 
 /**
  * The calibrating screen.
@@ -32,6 +34,10 @@ export function Calibrating() {
    *  to explain, not a failure to apologise for, so it is kept apart from a
    *  real error. */
   const [needsSync, setNeedsSync] = useState(false);
+  /** Fetched separately, because it is the only part of this screen that
+   *  needs the benchmark provider. A `null` here empties one card; it never
+   *  costs the rank, the trajectory or the momentum curve. */
+  const [brackets, setBrackets] = useState<RankDistribution | null>(null);
 
   useEffect(() => {
     if (session.kind !== "signed-in") return;
@@ -52,6 +58,14 @@ export function Calibrating() {
           e instanceof ApiError ? e.message : "Could not load your rank.",
         );
       });
+
+    getRankDistribution()
+      .then((response) => {
+        if (!cancelled) setBrackets(response);
+      })
+      // Deliberately swallowed: this panel is the optional one. Its absence is
+      // rendered as its absence, not as a failure of the page around it.
+      .catch(() => undefined);
 
     return () => {
       cancelled = true;
@@ -107,6 +121,35 @@ export function Calibrating() {
 
         <MomentumChart momentum={data.momentum} />
       </Card>
+
+      {brackets ? (
+        <Card>
+          <EstablishedRankPanel
+            rank={data.established_rank}
+            confidence={data.confidence}
+            consistency={brackets.consistency}
+            metrics={brackets.own_bracket_metrics}
+            resemblancePct={
+              brackets.resemblance.find((r) => r.is_player_bracket)
+                ?.percentage ?? null
+            }
+          />
+        </Card>
+      ) : null}
+
+      {brackets ? (
+        <Card className="flex flex-col gap-4">
+          <div>
+            <p className="font-semibold text-ink">Rank distribution</p>
+            <p className="mt-1 text-sm text-ink-muted">
+              How closely your {brackets.hero_name} figures resemble each
+              bracket&rsquo;s real peers.
+            </p>
+          </div>
+
+          <RankDistributionBars distribution={brackets} />
+        </Card>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <Card className="flex flex-col gap-4">
