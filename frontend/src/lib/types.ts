@@ -1422,3 +1422,80 @@ export interface VoucherListResponse {
 export interface RedeemResponse {
   subscription: Subscription;
 }
+
+// ---------------------------------------------------------------------------
+// Rank calibration
+// ---------------------------------------------------------------------------
+
+/**
+ * One point on the rank trajectory.
+ *
+ * `estimated` is the field that matters. Valve stopped publishing per-match
+ * MMR, so only points that came from a real rank reading are measured; the
+ * rest are a disclosed model. A component that renders the two alike is
+ * presenting a guess as Valve's number, so this is never optional and never
+ * defaulted.
+ */
+export interface TrajectoryPoint {
+  rank_tier: number;
+  /** `"Archon 5"`. Named by the server so no client ships a medal table. */
+  label: string | null;
+  /** ISO 8601. */
+  at: string;
+  estimated: boolean;
+}
+
+export interface RankConfidence {
+  confidence_pct: number;
+  /** Ranked matches behind that percentage. */
+  matches_counted: number;
+  is_calibrated: boolean;
+}
+
+/** `null` only when there are no ranked matches to read — never a zero-length win. */
+export type StreakKind = "win" | "loss";
+
+export interface Streak {
+  count: number;
+  kind: StreakKind | null;
+}
+
+export interface RolePreference {
+  role: string;
+  pct: number;
+  matches: number;
+}
+
+export interface EstablishedRank {
+  /** `medal * 10 + stars`. `null` for an unranked or private account. */
+  rank_tier: number | null;
+  /** `"Archon 5"`. `null` when there is no tier to name — never a placeholder. */
+  label: string | null;
+  leaderboard_rank: number | null;
+}
+
+/**
+ * The disclosed model, shipped with every response.
+ *
+ * Rendered rather than hardcoded: these are server configuration, and a
+ * methodology note that has drifted from the model it describes is worse than
+ * no note at all.
+ */
+export interface Methodology {
+  win_base_mmr: number;
+  loss_base_mmr: number;
+  confidence_per_match_pct: number;
+  confidence_threshold_pct: number;
+}
+
+export interface CalibrationResponse {
+  established_rank: EstablishedRank;
+  confidence: RankConfidence;
+  /** Oldest first. */
+  trajectory: TrajectoryPoint[];
+  streak: Streak;
+  /** Most-played first. Empty when no ranked match is in the window. */
+  role_preference: RolePreference[];
+  methodology: Methodology;
+  calibration_version: number;
+}

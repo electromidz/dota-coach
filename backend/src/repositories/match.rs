@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, PgPool};
 use uuid::Uuid;
 
@@ -433,6 +434,34 @@ pub async fn find_owned(
     .bind(id)
     .bind(dota_player_id)
     .fetch_optional(pool)
+    .await
+}
+
+/// Every stored match this player started on or after `since`, oldest first.
+///
+/// Deliberately unfiltered by mode. The calibration engine applies its own,
+/// narrower rule (ranked lobbies only) and is the tested home of it; a second
+/// copy here would be one more place for the two to drift apart. The date
+/// bound is what keeps this from reading a whole career: nothing past the
+/// confidence decay window can affect any figure on that screen.
+pub async fn list_since(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    since: DateTime<Utc>,
+) -> Result<Vec<Match>, sqlx::Error> {
+    sqlx::query_as::<_, Match>(concat!(
+        "SELECT ",
+        columns!(),
+        ", mm.kda AS metrics_kda
+           FROM matches m
+           LEFT JOIN match_metrics mm ON mm.match_id = m.id
+          WHERE m.dota_player_id = $1
+            AND m.started_at >= $2
+          ORDER BY m.started_at ASC"
+    ))
+    .bind(dota_player_id)
+    .bind(since)
+    .fetch_all(pool)
     .await
 }
 

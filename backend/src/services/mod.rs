@@ -6,6 +6,7 @@ pub mod auth;
 pub mod benchmarks;
 pub mod billing;
 pub mod cache;
+pub mod calibration;
 pub mod coaching;
 pub mod coaching_session;
 pub mod dota;

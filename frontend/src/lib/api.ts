@@ -1,34 +1,35 @@
 import type {
   AdminStats,
   AdminUserDetail,
-  AdminUserSummary,
   AdminUserListResponse,
+  AdminUserSummary,
   AdminVoucherDetail,
   ApiErrorBody,
+  AskResponse,
   BenchmarkResponse,
   BillingResponse,
+  CalibrationResponse,
   CheckoutResponse,
-  PlanResponse,
   CoachableRole,
   CoachResponse,
+  ConversationResponse,
   HealthResponse,
   HeroIntelligenceResponse,
   HeroPoolResponse,
+  MatchComparisonResponse,
   MatchListResponse,
+  MatchResponse,
   MatchResultFilter,
   MatchSort,
-  AskResponse,
-  ConversationResponse,
-  MatchComparisonResponse,
-  MatchResponse,
-  ProgressResponse,
-  SessionHistoryResponse,
-  SessionResponse,
   MeResponse,
+  PlanResponse,
   PlayerModelResponse,
+  ProgressResponse,
   RankBracket,
   RedeemResponse,
   RoleSelectionResponse,
+  SessionHistoryResponse,
+  SessionResponse,
   StatsResponse,
   SyncResponse,
   TrainingFocusResponse,
@@ -133,6 +134,17 @@ export function syncMatches(): Promise<SyncResponse> {
 /** Aggregated analytics. All arithmetic happens in the backend. */
 export function getStats(): Promise<StatsResponse> {
   return apiFetch<StatsResponse>("/api/stats");
+}
+
+/**
+ * Established rank, rank confidence, trajectory, streak and role split.
+ *
+ * Ranked lobbies only, and every figure is computed server-side — including
+ * which trajectory points are measured and which are modeled. Nothing here is
+ * derived in the browser.
+ */
+export function getCalibration(): Promise<CalibrationResponse> {
+  return apiFetch<CalibrationResponse>("/api/calibration");
 }
 
 /**

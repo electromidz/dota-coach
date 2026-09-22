@@ -9,8 +9,8 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::api::handlers::{
-    admin, auth, benchmark, billing, coach, conversation, events, health, heroes, matches, players,
-    sessions, stats, subscribe,
+    admin, auth, benchmark, billing, calibration, coach, conversation, events, health, heroes,
+    matches, players, sessions, stats, subscribe,
 };
 use crate::api::{docs, observability};
 use crate::config::Config;
@@ -41,6 +41,9 @@ pub fn build(state: AppState, config: &Config) -> Router {
         .route("/stats", get(stats::get))
         .route("/benchmark", get(benchmark::overview))
         .route("/benchmark/{metric}", get(benchmark::metric))
+        // Rank calibration. Deterministic and free, same tier as /stats: this
+        // is the player's own medal read back to them, not a model call.
+        .route("/calibration", get(calibration::get))
         // Hero Intelligence. `/heroes` is local-only by design, so it keeps
         // answering while the meta provider is down.
         .route("/heroes", get(heroes::pool))

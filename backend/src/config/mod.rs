@@ -25,6 +25,7 @@ pub struct Config {
     pub roles: RoleConfig,
     pub coach: CoachConfig,
     pub training: TrainingConfig,
+    pub calibration: CalibrationConfig,
     pub llm: LlmConfig,
     pub billing: BillingConfig,
     /// Whether to mount Swagger UI and the OpenAPI document.
@@ -334,6 +335,89 @@ impl TrainingConfig {
     }
 }
 
+/// Rank calibration tuning.
+///
+/// Two of these are Valve's, two are ours, and the difference matters.
+///
+/// `confidence_per_match_pct` and `confidence_threshold_pct` describe the Rank
+/// Confidence meter the game itself shows, so they are set to match observed
+/// behaviour and should only move if Valve's does.
+///
+/// `win_base_mmr` and `loss_base_mmr` are **ours**: Valve stopped publishing
+/// per-match MMR, so no public source can recover a real delta. They
+/// parameterise the shape of the modeled segments between two real rank
+/// snapshots, and every point they produce is flagged `estimated`. They are
+/// configuration precisely so the disclosed formula and the rendered number
+/// can never disagree.
+#[derive(Clone, Debug)]
+pub struct CalibrationConfig {
+    pub confidence_per_match_pct: f32,
+    pub confidence_threshold_pct: f32,
+    /// A gap this long with no ranked match resets the confidence count —
+    /// Valve decays an idle account's certainty, and a player returning after
+    /// six months is not still calibrated on games from before the break.
+    pub decay_days: i64,
+    pub win_base_mmr: f32,
+    pub loss_base_mmr: f32,
+}
+
+impl CalibrationConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let config = Self {
+            confidence_per_match_pct: parsed("CALIB_CONFIDENCE_PER_MATCH", 1.5)?,
+            confidence_threshold_pct: parsed("CALIB_CONFIDENCE_THRESHOLD", 30.0)?,
+            decay_days: parsed("CALIB_DECAY_DAYS", 180)?,
+            win_base_mmr: parsed("CALIB_WIN_BASE_MMR", 30.0)?,
+            loss_base_mmr: parsed("CALIB_LOSS_BASE_MMR", 25.0)?,
+        };
+        validate_calibration(&config)?;
+
+        Ok(config)
+    }
+}
+
+/// A zero or negative value here does not tune the model, it breaks it: zero
+/// percent per match never calibrates anyone, and a negative base MMR inverts
+/// what a win means.
+fn validate_calibration(config: &CalibrationConfig) -> Result<(), ConfigError> {
+    let named = [
+        (
+            "CALIB_CONFIDENCE_PER_MATCH",
+            config.confidence_per_match_pct,
+        ),
+        (
+            "CALIB_CONFIDENCE_THRESHOLD",
+            config.confidence_threshold_pct,
+        ),
+        ("CALIB_WIN_BASE_MMR", config.win_base_mmr),
+        ("CALIB_LOSS_BASE_MMR", config.loss_base_mmr),
+    ];
+
+    for (key, value) in named {
+        if value <= 0.0 || !value.is_finite() {
+            return Err(ConfigError::Invalid(
+                key,
+                "must be greater than zero".into(),
+            ));
+        }
+    }
+
+    if config.confidence_threshold_pct > 100.0 {
+        return Err(ConfigError::Invalid(
+            "CALIB_CONFIDENCE_THRESHOLD",
+            "a threshold above 100% can never be reached".into(),
+        ));
+    }
+    if config.decay_days <= 0 {
+        return Err(ConfigError::Invalid(
+            "CALIB_DECAY_DAYS",
+            "must be at least one day".into(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Same rule as the fit weights: a negative weight inverts a component's
 /// meaning, and an all-zero set leaves the score undefined.
 fn validate_focus_weights(weights: &FocusWeights) -> Result<(), ConfigError> {
@@ -563,6 +647,7 @@ impl Config {
             roles: RoleConfig::from_env()?,
             coach: CoachConfig::from_env()?,
             training: TrainingConfig::from_env()?,
+            calibration: CalibrationConfig::from_env()?,
             llm: LlmConfig {
                 base_url: optional("LLM_BASE_URL", "https://api.openai.com/v1"),
                 api_key: env::var("LLM_API_KEY").ok().filter(|s| !s.is_empty()),
@@ -770,6 +855,7 @@ mod tests {
             roles: RoleConfig::from_env().unwrap(),
             coach: CoachConfig::from_env().unwrap(),
             training: TrainingConfig::from_env().unwrap(),
+            calibration: CalibrationConfig::from_env().unwrap(),
             llm: llm(None),
             billing: BillingConfig::from_env().unwrap(),
         };
@@ -796,6 +882,62 @@ mod tests {
         assert!(matches!(
             checked_price(-1),
             Err(ConfigError::Invalid("BILLING_PRICE_CENTS", _))
+        ));
+    }
+
+    #[test]
+    fn calibration_defaults_match_the_meter_the_game_shows() {
+        let calibration = CalibrationConfig::from_env().unwrap();
+
+        // 1.5% per ranked match, calibrated at 30% — Valve's model, so these
+        // should only move if the game's does.
+        assert_eq!(calibration.confidence_per_match_pct, 1.5);
+        assert_eq!(calibration.confidence_threshold_pct, 30.0);
+        assert_eq!(calibration.decay_days, 180);
+        assert_eq!(calibration.win_base_mmr, 30.0);
+        assert_eq!(calibration.loss_base_mmr, 25.0);
+    }
+
+    #[test]
+    fn calibration_values_that_break_the_model_fail_the_boot() {
+        let valid = CalibrationConfig {
+            confidence_per_match_pct: 1.5,
+            confidence_threshold_pct: 30.0,
+            decay_days: 180,
+            win_base_mmr: 30.0,
+            loss_base_mmr: 25.0,
+        };
+        assert!(validate_calibration(&valid).is_ok());
+
+        // Zero percent per match never calibrates anybody.
+        let mut stuck = valid.clone();
+        stuck.confidence_per_match_pct = 0.0;
+        assert!(matches!(
+            validate_calibration(&stuck),
+            Err(ConfigError::Invalid("CALIB_CONFIDENCE_PER_MATCH", _))
+        ));
+
+        // A negative base inverts what winning means.
+        let mut inverted = valid.clone();
+        inverted.win_base_mmr = -30.0;
+        assert!(matches!(
+            validate_calibration(&inverted),
+            Err(ConfigError::Invalid("CALIB_WIN_BASE_MMR", _))
+        ));
+
+        // A threshold nobody can reach is a meter that never fills.
+        let mut unreachable = valid.clone();
+        unreachable.confidence_threshold_pct = 120.0;
+        assert!(matches!(
+            validate_calibration(&unreachable),
+            Err(ConfigError::Invalid("CALIB_CONFIDENCE_THRESHOLD", _))
+        ));
+
+        let mut no_window = valid.clone();
+        no_window.decay_days = 0;
+        assert!(matches!(
+            validate_calibration(&no_window),
+            Err(ConfigError::Invalid("CALIB_DECAY_DAYS", _))
         ));
     }
 

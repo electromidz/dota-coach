@@ -8,10 +8,11 @@ mod support;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use chrono::{DateTime, Datelike};
+use chrono::{DateTime, Datelike, Duration, Utc};
 use support::{
-    app, app_with, app_with_config, app_with_llm, matches_with, sample_matches, skip, test_config,
-    unique_steam_id, Failure, MockDota, StubBenchmarks, StubHeroMeta, StubLlm, StubVerifier,
+    app, app_with, app_with_config, app_with_llm, matches_with, recent_matches, sample_matches,
+    skip, test_config, unique_steam_id, Failure, MockDota, StubBenchmarks, StubHeroMeta, StubLlm,
+    StubVerifier,
 };
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,7 @@ async fn an_anonymous_request_is_rejected_everywhere() {
         ("GET", "/api/stats"),
         ("GET", "/api/benchmark"),
         ("GET", "/api/benchmark/gold_per_min"),
+        ("GET", "/api/calibration"),
         ("GET", "/api/heroes"),
         ("GET", "/api/heroes/recommendations"),
         ("GET", "/api/hero-intelligence"),
@@ -426,6 +428,58 @@ async fn syncing_twice_stores_each_match_once() {
     assert_eq!(
         dota.detail_calls.load(std::sync::atomic::Ordering::SeqCst),
         5
+    );
+
+    app.cleanup(&[steam_id]).await;
+}
+
+/// The rank snapshot is the whole point of the table: `dota_players.rank_tier`
+/// only ever holds today's value, so without this write there is no history to
+/// chart later.
+///
+/// Two syncs on the same day must leave one row, not two. That collapse is
+/// enforced by a unique index on an expression
+/// (`(captured_at AT TIME ZONE 'UTC')::date`) which the upsert's `ON CONFLICT`
+/// has to name verbatim — a near-miss there does not silently insert twice, it
+/// raises at runtime, and only a real round trip catches that.
+#[tokio::test]
+async fn syncing_records_one_rank_snapshot_per_day() {
+    let Some(db) = support::pool().await else {
+        return skip("syncing_records_one_rank_snapshot_per_day");
+    };
+    let steam_id = unique_steam_id();
+    let dota_account_id = steam_id - dota_coach_backend::domain::player::STEAM_ID64_BASE;
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(3)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+
+    assert_eq!(
+        app.post("/api/players/me/sync", Some(&session.token))
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    let after_first = app.stored_rank_snapshots(dota_account_id).await;
+    assert_eq!(after_first.len(), 1, "one reading per sync day");
+    // MockDota reports Legend 5 and no leaderboard position.
+    assert_eq!(after_first[0], (Some(55), None));
+
+    assert_eq!(
+        app.post("/api/players/me/sync", Some(&session.token))
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    let after_second = app.stored_rank_snapshots(dota_account_id).await;
+    assert_eq!(
+        after_second.len(),
+        1,
+        "a second sync the same day moves the point, it does not stack one: {after_second:?}"
     );
 
     app.cleanup(&[steam_id]).await;
@@ -4549,4 +4603,294 @@ async fn the_audit_log_lists_entries_newest_first_with_the_admins_name() {
     );
 
     app.cleanup(&[admin_steam_id, target_steam_id]).await;
+}
+
+// ---------------------------------------------------------------------------
+// Rank calibration
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn calibration_needs_a_linked_dota_account() {
+    let Some(db) = support::pool().await else {
+        return skip("calibration_needs_a_linked_dota_account");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let token = app.login_without_dota_link(steam_id).await;
+
+    let response = app.get("/api/calibration", Some(&token)).await;
+
+    assert_eq!(response.status, StatusCode::CONFLICT);
+    assert_eq!(response.error_code(), "DOTA_ACCOUNT_NOT_LINKED");
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn calibration_asks_for_a_sync_before_it_calibrates_anything() {
+    let Some(db) = support::pool().await else {
+        return skip("calibration_asks_for_a_sync_before_it_calibrates_anything");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let session = app.login_as(steam_id).await;
+
+    // Linked, but nothing synced: there is no history to calibrate against,
+    // and answering with zeroes would read as a measured result.
+    let response = app.get("/api/calibration", Some(&session.token)).await;
+
+    assert_eq!(response.status, StatusCode::CONFLICT);
+    assert_eq!(response.error_code(), "PRECONDITION_UNMET");
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn calibration_reports_rank_confidence_streak_and_roles() {
+    let Some(db) = support::pool().await else {
+        return skip("calibration_reports_rank_confidence_streak_and_roles");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::with_matches(recent_matches(10)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+
+    assert_eq!(
+        app.post("/api/players/me/sync", Some(&session.token))
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    let response = app.get("/api/calibration", Some(&session.token)).await;
+    assert_eq!(response.status, StatusCode::OK);
+
+    let body = response.json();
+
+    // MockDota reports Legend 5, and the sync wrote that down as a reading.
+    assert_eq!(body["established_rank"]["rank_tier"], 55);
+    assert_eq!(body["established_rank"]["label"], "Legend 5");
+    assert!(
+        body["established_rank"]["leaderboard_rank"].is_null(),
+        "Legend is nowhere near the Immortal ladder"
+    );
+
+    // 10 ranked matches at 1.5% each.
+    assert_eq!(body["confidence"]["matches_counted"], 10);
+    assert_eq!(body["confidence"]["confidence_pct"], 15.0);
+    assert_eq!(
+        body["confidence"]["is_calibrated"], false,
+        "15% is under the 30% threshold"
+    );
+
+    assert!(body["streak"]["count"].as_i64().unwrap() >= 1);
+    assert!(!body["role_preference"].as_array().unwrap().is_empty());
+
+    // The disclosed model travels with the response so no client hardcodes it.
+    assert_eq!(body["methodology"]["win_base_mmr"], 30.0);
+    assert_eq!(body["methodology"]["loss_base_mmr"], 25.0);
+    assert_eq!(body["methodology"]["confidence_per_match_pct"], 1.5);
+    assert_eq!(body["methodology"]["confidence_threshold_pct"], 30.0);
+
+    app.cleanup(&[steam_id]).await;
+}
+
+/// The honesty guarantee, asserted over the wire: every point a client
+/// receives says whether it was measured or modeled, and the modeled ones only
+/// ever appear between two real readings.
+#[tokio::test]
+async fn every_trajectory_point_declares_whether_it_was_measured() {
+    let Some(db) = support::pool().await else {
+        return skip("every_trajectory_point_declares_whether_it_was_measured");
+    };
+    let steam_id = unique_steam_id();
+    let account_id = steam_id - 76_561_197_960_265_728;
+    let app = app(
+        db,
+        MockDota::with_matches(recent_matches(6)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+
+    assert_eq!(
+        app.post("/api/players/me/sync", Some(&session.token))
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    // Sync only ever writes today's reading, so the earlier anchor is
+    // backdated here — without two, there is no segment to model.
+    app.insert_rank_snapshot(account_id, Some(53), Utc::now() - Duration::days(7))
+        .await;
+
+    let body = app
+        .get("/api/calibration", Some(&session.token))
+        .await
+        .json();
+
+    let points = body["trajectory"].as_array().unwrap().clone();
+    assert!(points.len() >= 2, "two readings at minimum: {points:?}");
+
+    for point in &points {
+        assert!(
+            point["estimated"].is_boolean(),
+            "a point with no `estimated` flag is a guess presented as Valve's number: {point}"
+        );
+        assert!(point["rank_tier"].is_i64());
+        assert!(point["at"].is_string());
+    }
+
+    let real: Vec<&serde_json::Value> = points.iter().filter(|p| p["estimated"] == false).collect();
+    assert_eq!(real.len(), 2, "exactly the two readings are measured");
+    assert_eq!(real[0]["rank_tier"], 53);
+    assert_eq!(real[1]["rank_tier"], 55);
+
+    // Everything modeled sits strictly inside the window the readings define.
+    let first = points.first().unwrap()["at"].as_str().unwrap().to_string();
+    let last = points.last().unwrap()["at"].as_str().unwrap().to_string();
+    for point in points.iter().filter(|p| p["estimated"] == true) {
+        let at = point["at"].as_str().unwrap();
+        assert!(
+            at > first.as_str() && at < last.as_str(),
+            "a modeled point outside its anchors has nothing holding it down: {point}"
+        );
+    }
+
+    app.cleanup(&[steam_id]).await;
+}
+
+/// The bug this test exists for: a window with no matches in it is not an
+/// empty history. A player who stopped queueing a year ago still has games,
+/// and telling them to "sync your matches" would be both wrong and a dead end
+/// — the sync has nothing newer to fetch.
+#[tokio::test]
+async fn a_history_older_than_the_window_reads_as_uncalibrated_not_as_unsynced() {
+    let Some(db) = support::pool().await else {
+        return skip("a_history_older_than_the_window_reads_as_uncalibrated_not_as_unsynced");
+    };
+    let steam_id = unique_steam_id();
+    // `sample_matches` is pinned to 2023, which is exactly the stale history
+    // this is about.
+    let app = app(
+        db,
+        MockDota::with_matches(sample_matches(5)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+
+    assert_eq!(
+        app.post("/api/players/me/sync", Some(&session.token))
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    let response = app.get("/api/calibration", Some(&session.token)).await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "matches exist, they are merely old"
+    );
+
+    let body = response.json();
+    assert_eq!(body["confidence"]["matches_counted"], 0);
+    assert_eq!(body["confidence"]["confidence_pct"], 0.0);
+    assert_eq!(body["confidence"]["is_calibrated"], false);
+    assert!(
+        body["streak"]["kind"].is_null(),
+        "no recent ranked games means no streak to report, not a zero-length win"
+    );
+
+    app.cleanup(&[steam_id]).await;
+}
+
+/// The production path, minus the passage of time.
+///
+/// Every other trajectory test inserts its earlier anchor directly, so the
+/// real sequence — *sync writes a reading, a day passes, sync writes another,
+/// and the endpoint stitches a modeled segment between them* — had never
+/// actually run. Only the calendar is faked here: both readings are written by
+/// the sync itself, and the chart is built from what it left behind.
+#[tokio::test]
+async fn two_days_of_syncing_produce_a_modeled_segment_between_two_real_readings() {
+    let Some(db) = support::pool().await else {
+        return skip("two_days_of_syncing_produce_a_modeled_segment_between_two_real_readings");
+    };
+    let steam_id = unique_steam_id();
+    let account_id = steam_id - 76_561_197_960_265_728;
+    let app = app(
+        db.clone(),
+        MockDota::with_matches(recent_matches(3)),
+        StubVerifier::rejecting(),
+    );
+    let session = app.login_as(steam_id).await;
+
+    // Day one: the sync reads the profile and writes today's rank.
+    assert_eq!(
+        app.post("/api/players/me/sync", Some(&session.token))
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    // Age that reading by three days and drop it a couple of stars, standing
+    // in for the days this test cannot wait out. Nothing else is touched — the
+    // row itself is the one the sync wrote.
+    sqlx::query(
+        "UPDATE rank_snapshots
+            SET captured_at = now() - interval '3 days', rank_tier = 53
+          WHERE dota_account_id = $1",
+    )
+    .bind(account_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    // Day two: a second sync writes today's reading beside it.
+    assert_eq!(
+        app.post("/api/players/me/sync", Some(&session.token))
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    let body = app
+        .get("/api/calibration", Some(&session.token))
+        .await
+        .json();
+
+    let points = body["trajectory"].as_array().unwrap();
+    let real: Vec<&serde_json::Value> = points.iter().filter(|p| p["estimated"] == false).collect();
+    let modeled: Vec<&serde_json::Value> =
+        points.iter().filter(|p| p["estimated"] == true).collect();
+
+    assert_eq!(
+        real.len(),
+        2,
+        "both anchors were written by the sync, not by the test: {points:?}"
+    );
+    assert_eq!(real[0]["rank_tier"], 53);
+    assert_eq!(
+        real[1]["rank_tier"], 55,
+        "Legend 5, as the provider reports"
+    );
+    assert_eq!(real[1]["label"], "Legend 5");
+
+    assert!(
+        !modeled.is_empty(),
+        "matches were played between the two readings, so there is a segment to model: {points:?}"
+    );
+    for point in &modeled {
+        let tier = point["rank_tier"].as_i64().unwrap();
+        assert!(
+            (52..=56).contains(&tier),
+            "a modeled point outside its anchors' band plus one star: {point}"
+        );
+    }
+
+    app.cleanup(&[steam_id]).await;
 }

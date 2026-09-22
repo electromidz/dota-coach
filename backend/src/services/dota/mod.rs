@@ -20,6 +20,10 @@ pub struct ProviderPlayer {
     pub avatar_url: Option<String>,
     pub profile_url: Option<String>,
     pub rank_tier: Option<i32>,
+    /// Immortal ladder position. `None` for everyone below Immortal, and for
+    /// Immortals outside the published leaderboard — the provider reports the
+    /// field either way, so an absent value means "not on it", not "unknown".
+    pub leaderboard_rank: Option<i32>,
     /// False when the provider has no public profile for this account. The
     /// account may still have matches.
     pub has_public_profile: bool,

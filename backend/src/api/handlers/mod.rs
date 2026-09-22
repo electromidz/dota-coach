@@ -2,6 +2,7 @@ pub mod admin;
 pub mod auth;
 pub mod benchmark;
 pub mod billing;
+pub mod calibration;
 pub mod coach;
 pub mod conversation;
 pub mod events;

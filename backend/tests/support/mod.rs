@@ -20,8 +20,8 @@ use axum::Router;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use dota_coach_backend::api;
 use dota_coach_backend::config::{
-    AuthConfig, BillingConfig, CoachConfig, Config, DotaConfig, HeroConfig, LlmConfig, RoleConfig,
-    TrainingConfig,
+    AuthConfig, BillingConfig, CalibrationConfig, CoachConfig, Config, DotaConfig, HeroConfig,
+    LlmConfig, RoleConfig, TrainingConfig,
 };
 use dota_coach_backend::domain::benchmark::{
     BenchmarkContext, BenchmarkMetric, Bucket, ResolvedBracket, Segment,
@@ -123,6 +123,9 @@ impl DotaDataProvider for MockDota {
             avatar_url: Some("https://avatars.example/full.jpg".into()),
             profile_url: Some("https://steamcommunity.com/id/test/".into()),
             rank_tier: Some(55),
+            // Legend 5 is nowhere near the Immortal ladder, so the honest
+            // fixture value is "not on it".
+            leaderboard_rank: None,
             has_public_profile: true,
         })
     }
@@ -655,6 +658,16 @@ pub fn test_config() -> Config {
             focus_weights: FocusWeights::default(),
             history_limit: 10,
         },
+        // The production defaults: the confidence meter is Valve's model, and
+        // a test that quietly calibrated at a different threshold would be
+        // asserting against a rank nobody ships.
+        calibration: CalibrationConfig {
+            confidence_per_match_pct: 1.5,
+            confidence_threshold_pct: 30.0,
+            decay_days: 180,
+            win_base_mmr: 30.0,
+            loss_base_mmr: 25.0,
+        },
         heroes: HeroConfig {
             meta_ttl_hours: 24,
             recommendation_limit: 8,
@@ -1070,6 +1083,73 @@ impl TestApp {
         .unwrap()
     }
 
+    /// A session for an account that completed Steam login but has no Dota
+    /// identity linked — the state every `DOTA_ACCOUNT_NOT_LINKED` path is
+    /// about, and one `login_as` cannot produce because it always links.
+    pub async fn login_without_dota_link(&self, steam_id: i64) -> String {
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (steam_id, last_login_at) VALUES ($1, now())
+             ON CONFLICT (steam_id) DO UPDATE SET last_login_at = now()
+             RETURNING id",
+        )
+        .bind(steam_id)
+        .fetch_one(&self.db)
+        .await
+        .unwrap();
+
+        let token = NewToken::generate();
+        sqlx::query("INSERT INTO sessions (user_id, token_hash, expires_at) VALUES ($1, $2, $3)")
+            .bind(user_id)
+            .bind(&token.hash)
+            .bind(Utc::now() + Duration::hours(1))
+            .execute(&self.db)
+            .await
+            .unwrap();
+
+        token.plaintext
+    }
+
+    /// Backdate a rank reading, so a test can have the two anchors a modeled
+    /// trajectory segment needs. Sync only ever writes today's.
+    pub async fn insert_rank_snapshot(
+        &self,
+        dota_account_id: i64,
+        rank_tier: Option<i16>,
+        at: DateTime<Utc>,
+    ) {
+        sqlx::query(
+            "INSERT INTO rank_snapshots (dota_account_id, rank_tier, captured_at)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(dota_account_id)
+        .bind(rank_tier)
+        .bind(at)
+        .execute(&self.db)
+        .await
+        .unwrap();
+    }
+
+    /// This account's rank readings, oldest first.
+    ///
+    /// Keyed by `dota_account_id` rather than the `dota_players.id` UUID the
+    /// other helpers take, because that is how `rank_snapshots` is keyed —
+    /// the assertion has to go through the same key the write did.
+    pub async fn stored_rank_snapshots(
+        &self,
+        dota_account_id: i64,
+    ) -> Vec<(Option<i16>, Option<i32>)> {
+        sqlx::query_as(
+            "SELECT rank_tier, leaderboard_rank
+               FROM rank_snapshots
+              WHERE dota_account_id = $1
+              ORDER BY captured_at ASC",
+        )
+        .bind(dota_account_id)
+        .fetch_all(&self.db)
+        .await
+        .unwrap()
+    }
+
     /// Remove everything a test created. Tests share a database, so each one
     /// cleans up after itself rather than truncating shared tables.
     pub async fn cleanup(&self, steam_ids: &[i64]) {
@@ -1188,6 +1268,22 @@ pub fn sample_match(match_id: i64, started_at: DateTime<Utc>) -> NormalizedMatch
 ///
 /// Pattern detection is about rates across a history, so a test needs to be
 /// able to append a *second* batch that does not collide with the first.
+/// Matches played over the last `count` days, newest last.
+///
+/// `sample_matches` is pinned to a fixed 2023 timestamp, which is fine for
+/// anything that only cares about ordering and stays wrong for anything with a
+/// window: by now those games are years old and fall outside every recency
+/// bound in the product.
+pub fn recent_matches(count: i64) -> Vec<NormalizedMatch> {
+    let now = Utc::now();
+    (0..count)
+        .map(|i| {
+            let started = now - Duration::days(count - i);
+            sample_match(9_500_000_000 + i, started)
+        })
+        .collect()
+}
+
 pub fn matches_with(count: i64, start_id: i64, deaths: i32) -> Vec<NormalizedMatch> {
     (0..count)
         .map(|i| {

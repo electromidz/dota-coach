@@ -19,6 +19,7 @@ pub mod hero_pool;
 pub mod r#match;
 pub mod metrics;
 pub mod player_model;
+pub mod rank_snapshots;
 pub mod session;
 pub mod training;
 pub mod user;

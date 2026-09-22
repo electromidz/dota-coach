@@ -171,6 +171,11 @@ impl DotaDataProvider for OpenDotaProvider {
 struct RawPlayerEnvelope {
     profile: Option<RawProfile>,
     rank_tier: Option<i32>,
+    /// Sits beside `rank_tier` at the top level of `/players/{id}`, verified
+    /// against the live endpoint. Serde treats a missing `Option` field as
+    /// `None`, so an account whose response omits it decodes rather than
+    /// failing the whole profile refresh.
+    leaderboard_rank: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,6 +277,7 @@ fn normalize_player(account_id: i64, raw: RawPlayerEnvelope) -> ProviderPlayer {
         avatar_url,
         profile_url,
         rank_tier: raw.rank_tier,
+        leaderboard_rank: raw.leaderboard_rank,
         has_public_profile,
     }
 }
@@ -602,6 +608,33 @@ mod tests {
 
         assert!(!player.has_public_profile);
         assert_eq!(player.persona_name, None);
+    }
+
+    /// The field is absent from this fixture entirely, which is the case that
+    /// would break a required field: serde must read a missing `Option` as
+    /// `None` rather than failing the whole profile refresh.
+    #[test]
+    fn an_absent_leaderboard_rank_is_not_a_decode_failure() {
+        let raw: RawPlayerEnvelope =
+            serde_json::from_str(r#"{"profile":null,"rank_tier":45}"#).unwrap();
+        let player = normalize_player(ACCOUNT_ID, raw);
+
+        assert_eq!(player.rank_tier, Some(45));
+        assert_eq!(player.leaderboard_rank, None);
+    }
+
+    /// Verified against the live `/players/{id}` response: `leaderboard_rank`
+    /// sits at the top level beside `rank_tier`, and is populated for an
+    /// Immortal on the published ladder.
+    #[test]
+    fn an_immortal_carries_a_leaderboard_position() {
+        let raw: RawPlayerEnvelope =
+            serde_json::from_str(r#"{"profile":null,"rank_tier":80,"leaderboard_rank":166}"#)
+                .unwrap();
+        let player = normalize_player(ACCOUNT_ID, raw);
+
+        assert_eq!(player.rank_tier, Some(80));
+        assert_eq!(player.leaderboard_rank, Some(166));
     }
 
     #[test]

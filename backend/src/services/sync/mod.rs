@@ -75,6 +75,32 @@ pub async fn sync_player(
             )
             .await?;
             repositories::dota_player::update_rank(pool, player.id, profile.rank_tier).await?;
+
+            // `dota_players.rank_tier` is a single mutable column: it says
+            // where the player stands now and nothing about where they stood.
+            // Writing the reading down here is what gives a rank trajectory
+            // real points to sit on later.
+            //
+            // A `None` rank is recorded rather than skipped — a private
+            // profile genuinely reports no medal, and storing that keeps a
+            // later chart honest about the gap instead of drawing through it.
+            //
+            // Best-effort, like the rest of this arm: a failed snapshot must
+            // not fail a sync whose actual job is matches and metrics.
+            if let Err(e) = repositories::rank_snapshots::insert_snapshot(
+                pool,
+                player.dota_account_id,
+                profile.rank_tier,
+                profile.leaderboard_rank,
+            )
+            .await
+            {
+                tracing::warn!(
+                    dota_account_id = player.dota_account_id,
+                    error = %e,
+                    "rank snapshot failed"
+                );
+            }
         }
         Err(e) => {
             tracing::warn!(

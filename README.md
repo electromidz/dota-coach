@@ -170,11 +170,12 @@ dota-coach/
     ├── Dockerfile
     └── src/
         ├── app/               # App Router: /, /matches, /benchmark, /heroes,
-        │                      #   /coach, /billing, /profile, /offline,
-        │                      #   /admin, /admin/users, /admin/vouchers
+        │                      #   /calibrating, /coach, /billing, /profile,
+        │                      #   /offline, /admin, /admin/users,
+        │                      #   /admin/vouchers
         │                      #   + manifest, error, not-found, loading states
         ├── components/        # shell / dashboard / matches / heroes / coach /
-        │                      #   billing / charts / ui / admin
+        │                      #   calibrating / billing / charts / ui / admin
         └── lib/               # api client, types, hero map, formatters
 ```
 
@@ -271,6 +272,11 @@ Copy `.env.example` to `.env`. Never commit the real file.
 | `FOCUS_WEIGHT_CONFIDENCE`| backend  | Focus weight: confidence. Default 0.10.                             |
 | `FOCUS_WEIGHT_RECENCY`   | backend  | Focus weight: recency. Default 0.10.                                |
 | `FOCUS_HISTORY_LIMIT`    | backend  | Past focuses returned with the current one. Default 10.             |
+| `CALIB_CONFIDENCE_PER_MATCH` | backend | Rank confidence gained per ranked match. Default 1.5 (%).        |
+| `CALIB_CONFIDENCE_THRESHOLD` | backend | Where a rank counts as calibrated. Default 30.0 (%).             |
+| `CALIB_DECAY_DAYS`       | backend  | Idle gap that resets the confidence count. Default 180.             |
+| `CALIB_WIN_BASE_MMR`     | backend  | Modeled MMR per win — **ours, not Valve's**. Default 30.            |
+| `CALIB_LOSS_BASE_MMR`    | backend  | Modeled MMR per loss — **ours, not Valve's**. Default 25.           |
 | `COACH_COOLDOWN_SECONDS` | backend  | Minimum gap between two generations per player. Default 30.         |
 | `COACH_DAILY_LIMIT`      | backend  | Generations per player per rolling 24h. Default 20; `0` disables.   |
 | `COACH_MAX_INSIGHTS`     | backend  | Insights kept from one answer. Default 5.                           |
@@ -372,6 +378,7 @@ answer with redirects, not JSON — OpenID cannot be completed from `fetch`.
 | `GET`  | `/api/stats`              | Overall analysis over the competitive window: scope, eligibility, per hero, per role |
 | `GET`  | `/api/benchmark`          | Peer comparison. `?hero_id=` picks the hero, `?role=` the scope |
 | `GET`  | `/api/benchmark/:metric`  | The same, narrowed to one metric                   |
+| `GET`  | `/api/calibration`        | Established rank, rank confidence, trajectory, streak, role split |
 | `GET`  | `/api/heroes`             | Your hero pool. No provider call — always answers  |
 | `GET`  | `/api/heroes/recommendations` | Scored candidates, best fit first. `?limit=`   |
 | `GET`  | `/api/hero-intelligence`  | Pool, meta and recommendations in one payload      |
@@ -631,6 +638,64 @@ fabrication the spec forbids.
 Distributions are cached in `benchmark_snapshots` (Postgres, `BENCHMARK_TTL_HOURS`,
 default 24). They are identical for every user, so they are fetched once, shared,
 and survive a restart rather than costing each deploy a fresh stampede.
+
+---
+
+## How rank calibration works
+
+The `/calibrating` screen answers three things: what rank the player actually
+holds, how settled that rank is, and how it got there.
+
+The first two are measurements. The third is partly a model, and the whole
+design of this feature is about keeping the two apart on screen.
+
+### Why the trajectory is only partly real
+
+Valve stopped publishing per-match MMR changes years ago. Nothing in any public
+API can recover the delta for a given game — so any site printing an exact
+number under each match is inventing it, usually a fixed `+30 / -25` presented
+without comment.
+
+This product does not, because
+[missing data is represented, never invented](#known-limitations). Instead:
+
+- **`dota_players.rank_tier` only holds today's value.** Every sync also writes
+  the reading into `rank_snapshots`, at most one row per account per UTC day.
+  Those rows are the only real points on the chart.
+- **Between two readings the path is modeled**, from the ranked matches played
+  in that window, and every point it produces is flagged `estimated: true` in
+  the API and drawn dashed with a hollow marker in the UI.
+- **A reading with no rank breaks the line.** A private profile reports no
+  medal; that is recorded as a null and the chart stops rather than drawing a
+  confident path across a stretch nobody observed.
+- **Nothing is modeled past the newest reading.** A free-running tail has no
+  second anchor, which is exactly the invented number this avoids. Sync writes
+  a reading a day, so the blind spot is at most today.
+
+The model itself is disclosed in the response (`methodology`) and rendered from
+it, so the sentence shown to the player cannot drift from the numbers actually
+in force. Each match moves `CALIB_WIN_BASE_MMR` or `-CALIB_LOSS_BASE_MMR`,
+stretched up to ±25% by how the player performed relative to their own median,
+then the segment is scaled so it lands exactly on the next real reading.
+Anchoring both ends to measurements is what keeps this a disclosed estimate
+rather than a fabrication: the shape between two points is a guess, the points
+themselves are not, and the line cannot drift somewhere the player never was.
+
+### Rank confidence
+
+Mirrors the 0→100% meter the game shows: `CALIB_CONFIDENCE_PER_MATCH` per
+ranked match, calibrated at `CALIB_CONFIDENCE_THRESHOLD`, reset by a gap of
+`CALIB_DECAY_DAYS` with no ranked game. `matches_counted` ships alongside it, so
+a low figure reads as "play more" rather than as a verdict.
+
+### Ranked only
+
+Every figure on this screen counts **ranked lobbies only** — narrower than the
+competitive population the dashboard uses, which also admits unranked public
+All Pick. Those are the right games to coach on, but they do not move a medal:
+counting them would report a confidence the ladder does not share, and put
+unranked results in a streak the player reads as ladder form. One population for
+the whole screen, so no two panels describe different games.
 
 ---
 
@@ -1584,6 +1649,21 @@ Nothing in the suite touches OpenDota or Valve:
   public plan endpoint is covered too: readable without a session, carrying
   pricing copy and nothing else, and every response — including a `401` —
   carrying a request id, with a hostile one replaced rather than echoed.
+  Rank calibration is covered from both ends: `backend/tests/rank_snapshots.rs`
+  pins the SQL guarantees a unit test cannot see — two readings on one day
+  collapsing to the later one, a null rank stored rather than skipped, the
+  `since` bound, per-player isolation and the cascade through the
+  `dota_account_id` foreign key — and `api.rs` asserts the endpoint's error
+  codes, its shape, that a history older than the window reads as uncalibrated
+  rather than unsynced, and that **every trajectory point carries an explicit
+  `estimated` flag**. That last one is the honesty guarantee of the feature, so
+  it is asserted over the wire rather than inferred from the engine.
+
+The frontend suite mirrors it: `TrajectoryChart.test.tsx` fails loudly if
+estimated and recorded points ever render alike, and `Panels.test.tsx` pins
+that the methodology note quotes the server's model rather than a hardcoded
+one — a disclosure that has drifted from what it describes is a specific false
+claim rather than a vague one.
 
 Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
 `SKIPPED <name>` rather than passing silently.
@@ -1646,6 +1726,20 @@ Without `DATABASE_URL` (or `TEST_DATABASE_URL`) the integration tests print
   stored match, because otherwise there is no honest way to plot progress
   against it — so gold per minute and deaths qualify, and the rest reach the
   coach as evidence but never as a goal.
+- **The rank trajectory is anchored, not measured.** Only `rank_snapshots`
+  rows are real; every point between two of them is a model, flagged
+  `estimated` in the API and dashed in the UI. See
+  [How rank calibration works](#how-rank-calibration-works).
+- **Rank history starts when you do.** `rank_snapshots` is written by sync, so
+  a new account has one reading and no trajectory until it syncs on a second
+  day. There is no backfill — OpenDota does not expose historical rank, and
+  inventing the past is the one thing this feature exists not to do.
+- **MMR per rank tier is an approximation.** The trajectory model converts its
+  modeled MMR into stars with a fixed constant (`MMR_PER_TIER`, 150) rather
+  than a per-segment scale, because a scale derived from a window whose wins
+  and losses nearly cancel explodes and collapses the path into a flat line
+  with a cliff. It is not configurable and not reported in `methodology`; it
+  shapes a disclosed estimate whose endpoints are real either way.
 - **Pattern thresholds are documented constants, not a skill rating.** Three
   deaths per 10 minutes is the line between "worth mentioning" and "not worth
   mentioning". Comparison against real players is the benchmark engine's job.
