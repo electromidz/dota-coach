@@ -13,7 +13,9 @@ import type { NextConfig } from "next";
  */
 function contentSecurityPolicy(): string {
   // Same value the client bundle is built against, so the policy cannot
-  // disagree with what the app actually calls.
+  // disagree with what the app actually calls. Empty when the backend is
+  // reached through `rewrites` below, in which case every call is same-origin
+  // and `'self'` already covers it.
   const api = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
   // The dev server compiles and hot-reloads in the browser: React Refresh
@@ -36,7 +38,7 @@ function contentSecurityPolicy(): string {
     // interchangeable CDN hostnames.
     "img-src 'self' data: https://*.steamstatic.com https://steamcdn-a.akamaihd.net",
     "font-src 'self'",
-    `connect-src 'self' ${api}${sockets}`,
+    `connect-src 'self'${api ? ` ${api}` : ""}${sockets}`,
     "manifest-src 'self'",
     // Nothing is embedded, and nothing may embed this app.
     "frame-ancestors 'none'",
@@ -45,6 +47,27 @@ function contentSecurityPolicy(): string {
   ].join("; ");
 }
 
+/**
+ * The backend, when it should be reached *through this origin* rather than
+ * directly.
+ *
+ * Set it and every `/api/*` call becomes same-origin: the browser talks only
+ * to this deployment, and the session cookie the backend sets arrives as a
+ * first-party cookie belonging to this host.
+ *
+ * That is the whole point. A frontend on `vercel.app` calling a backend on
+ * `blitz.cloud` is a *cross-site* request, so the session cookie is a
+ * third-party cookie — Safari blocks those outright and Chrome is retiring
+ * them. The cookie gets set correctly and then silently never sent, which
+ * looks exactly like a login that did not work. `SameSite=None; Secure` is
+ * necessary for that arrangement and no longer sufficient.
+ *
+ * Leave it unset to call the backend directly, which is right for local
+ * development where both sides are `localhost` and therefore already
+ * same-site.
+ */
+const proxiedBackend = process.env.BACKEND_ORIGIN?.replace(/\/+$/, "");
+
 const nextConfig: NextConfig = {
   // Emits a self-contained server bundle so the production Docker image does
   // not need node_modules.
@@ -52,6 +75,21 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   // The server's identity is not a secret worth leaking to every scanner.
   poweredByHeader: false,
+
+  async rewrites() {
+    if (!proxiedBackend) return [];
+
+    // Everything under /api, not just the fetch targets: the Steam login is a
+    // full-page navigation to /api/auth/steam and its callback comes back to
+    // /api/auth/steam/callback. Both have to travel the same path, or the
+    // cookie is set on the wrong origin and nothing above helps.
+    return [
+      {
+        source: "/api/:path*",
+        destination: `${proxiedBackend}/api/:path*`,
+      },
+    ];
+  },
 
   async headers() {
     return [
