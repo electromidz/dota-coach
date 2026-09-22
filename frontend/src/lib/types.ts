@@ -1466,6 +1466,40 @@ export interface RolePreference {
   matches: number;
 }
 
+/** One match on the momentum curve. */
+export interface MomentumPoint {
+  /** 1-based position in the window, oldest first — the chart's x axis. */
+  index: number;
+  match_id: number;
+  hero_name: string;
+  won: boolean;
+  /** This match's modeled movement. */
+  delta: number;
+  /**
+   * Running total since the start of the window, **starting from zero**.
+   *
+   * Relative movement, never an absolute rating. The win/loss sequence behind
+   * it is real; the per-match magnitude is the server's disclosed model, and
+   * Valve publishes nothing that could confirm it. "+85 over your last 20
+   * ranked games" is arithmetic over real results; "your MMR is 4230" would be
+   * a claim about a number nobody outside Valve can see.
+   */
+  cumulative: number;
+  started_at: string;
+}
+
+export interface Momentum {
+  /** Oldest first. Empty when the window holds no ranked matches. */
+  points: MomentumPoint[];
+  /** Where the curve ends: net modeled movement across the window. */
+  net: number;
+  wins: number;
+  losses: number;
+  /** How many matches the window may hold, so a short curve reads as
+   *  "not enough games yet" rather than as a flat stretch. */
+  window: number;
+}
+
 export interface EstablishedRank {
   /** `medal * 10 + stars`. `null` for an unranked or private account. */
   rank_tier: number | null;
@@ -1494,6 +1528,7 @@ export interface CalibrationResponse {
   /** Oldest first. */
   trajectory: TrajectoryPoint[];
   streak: Streak;
+  momentum: Momentum;
   /** Most-played first. Empty when no ranked match is in the window. */
   role_preference: RolePreference[];
   methodology: Methodology;

@@ -29,6 +29,17 @@ const RESPONSE: CalibrationResponse = {
     { rank_tier: 45, label: "Archon 5", at: "2026-09-22T12:00:00Z", estimated: false },
   ],
   streak: { count: 3, kind: "win" },
+  momentum: {
+    points: [
+      { index: 1, match_id: 1, hero_name: "Luna", won: true, delta: 30, cumulative: 30, started_at: "2026-09-20T12:00:00Z" },
+      { index: 2, match_id: 2, hero_name: "Luna", won: false, delta: -25, cumulative: 5, started_at: "2026-09-21T12:00:00Z" },
+      { index: 3, match_id: 3, hero_name: "Luna", won: true, delta: 30, cumulative: 35, started_at: "2026-09-22T12:00:00Z" },
+    ],
+    net: 35,
+    wins: 2,
+    losses: 1,
+    window: 20,
+  },
   role_preference: [
     { role: "Carry", pct: 75, matches: 9 },
     { role: "Mid", pct: 25, matches: 3 },

@@ -26,7 +26,7 @@ use utoipa::ToSchema;
 use crate::api::extract::CurrentUser;
 use crate::api::handlers::stats::load_linked_player;
 use crate::domain::calibration::{
-    rank_label, EstablishedRank, Methodology, RankConfidence, RolePreference, Streak,
+    rank_label, EstablishedRank, Methodology, Momentum, RankConfidence, RolePreference, Streak,
     TrajectoryPoint,
 };
 use crate::error::{AppError, AppResult};
@@ -44,6 +44,9 @@ pub struct CalibrationResponse {
     /// number.
     pub trajectory: Vec<TrajectoryPoint>,
     pub streak: Streak,
+    /// Modeled MMR movement across the most recent ranked matches, oldest
+    /// first. Relative to zero — never an absolute rating.
+    pub momentum: Momentum,
     /// Most-played role first. Empty when no ranked match is in the window.
     pub role_preference: Vec<RolePreference>,
     pub methodology: Methodology,
@@ -121,6 +124,7 @@ pub async fn get(
         confidence: calibration::rank_confidence(&matches, config, now),
         trajectory: calibration::trajectory(&snapshots, &matches, config),
         streak: calibration::streak(&matches),
+        momentum: calibration::momentum(&matches, config),
         role_preference: calibration::role_preference(&matches),
         methodology: calibration::methodology(config),
         calibration_version: CALIBRATION_VERSION,

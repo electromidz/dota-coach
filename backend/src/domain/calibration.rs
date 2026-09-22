@@ -94,6 +94,45 @@ pub struct RolePreference {
     pub matches: i64,
 }
 
+/// One match on the momentum curve.
+///
+/// `cumulative` is a **relative** figure: the curve starts at zero and shows
+/// how far the modeled model has moved since, never an absolute MMR. That
+/// distinction is the whole reason this is shippable. The win/loss sequence it
+/// is built from is real; the per-match value is ours (see
+/// [`crate::config::CalibrationConfig`]), and Valve publishes nothing that
+/// could confirm or refute it. Printing "your MMR is 4230" from these numbers
+/// would be a specific claim about a figure nobody outside Valve can see —
+/// printing "+85 over your last 20 ranked games" is arithmetic over results
+/// the player actually got.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct MomentumPoint {
+    /// 1-based position in the window, oldest first — the chart's x axis.
+    pub index: i64,
+    pub match_id: i64,
+    pub hero_name: String,
+    pub won: bool,
+    /// This match's modeled movement.
+    pub delta: f32,
+    /// Running total since the start of the window. Starts from zero.
+    pub cumulative: f32,
+    pub started_at: DateTime<Utc>,
+}
+
+/// Modeled movement across a recent window of ranked matches.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct Momentum {
+    /// Oldest first. Empty when the window holds no ranked matches.
+    pub points: Vec<MomentumPoint>,
+    /// Where the curve ends: the net modeled movement across the window.
+    pub net: f32,
+    pub wins: i64,
+    pub losses: i64,
+    /// How many matches the window was allowed to hold, so a short curve reads
+    /// as "not enough games yet" rather than as a flat stretch.
+    pub window: i64,
+}
+
 /// The player's current medal, as the game spells it.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct EstablishedRank {

@@ -525,3 +525,101 @@ fn every_trajectory_point_names_its_medal() {
         "a modeled point still sits at a real tier, so it still has a name"
     );
 }
+
+// ---------------------------------------------------------------------------
+// momentum
+// ---------------------------------------------------------------------------
+
+#[test]
+fn momentum_starts_at_zero_and_reports_relative_movement() {
+    let matches: Vec<Match> = (1..=5).map(|i| ranked(i, true, day(i))).collect();
+
+    let m = momentum(&matches, &config());
+
+    assert_eq!(m.points.len(), 5);
+    assert_eq!(m.points[0].index, 1, "1-based, oldest first");
+    // Five wins at the 30 base: the curve is a climb from zero, and the first
+    // point is one match's movement — never a starting rating.
+    assert!(m.points[0].cumulative > 0.0 && m.points[0].cumulative < 40.0);
+    assert!(m.net > m.points[0].cumulative);
+    assert_eq!(m.wins, 5);
+    assert_eq!(m.losses, 0);
+}
+
+#[test]
+fn momentum_falls_across_a_losing_run() {
+    let matches: Vec<Match> = (1..=4).map(|i| ranked(i, false, day(i))).collect();
+
+    let m = momentum(&matches, &config());
+
+    assert!(m.net < 0.0, "four losses is a fall, not a flat line");
+    assert_eq!(m.losses, 4);
+    // Monotonically down: each loss moves the running total further negative.
+    for pair in m.points.windows(2) {
+        assert!(pair[1].cumulative < pair[0].cumulative);
+    }
+}
+
+#[test]
+fn momentum_reads_the_most_recent_window_oldest_first() {
+    // Thirty matches, so the window has to choose.
+    let matches: Vec<Match> = (1..=30).map(|i| ranked(i, true, day(i))).collect();
+
+    let m = momentum(&matches, &config());
+
+    assert_eq!(m.points.len(), MOMENTUM_WINDOW as usize);
+    assert_eq!(m.window, MOMENTUM_WINDOW);
+    assert_eq!(
+        m.points.first().unwrap().match_id,
+        11,
+        "the newest twenty, presented oldest first"
+    );
+    assert_eq!(m.points.last().unwrap().match_id, 30);
+}
+
+#[test]
+fn momentum_ignores_games_that_cannot_move_a_medal() {
+    let mut matches = vec![ranked(1, true, day(1))];
+
+    let mut turbo = ranked(2, true, day(2));
+    turbo.game_mode = Some(game_mode::TURBO);
+    matches.push(turbo);
+
+    let mut unranked = ranked(3, true, day(3));
+    unranked.lobby_type = Some(lobby_type::NORMAL);
+    matches.push(unranked);
+
+    let m = momentum(&matches, &config());
+
+    assert_eq!(m.points.len(), 1, "only the ranked game moves the curve");
+}
+
+#[test]
+fn momentum_is_empty_rather_than_a_flat_line_without_matches() {
+    let m = momentum(&[], &config());
+
+    assert!(m.points.is_empty());
+    assert_eq!(m.net, 0.0);
+    assert_eq!(m.wins, 0);
+    assert_eq!(m.losses, 0);
+}
+
+/// The honesty property, as a test rather than a comment: the curve reports
+/// movement from zero. If someone ever seeds it with an absolute rating, the
+/// first point stops being one match's worth of movement.
+#[test]
+fn momentum_never_reports_an_absolute_rating() {
+    let matches: Vec<Match> = (1..=20).map(|i| ranked(i, i % 2 == 0, day(i))).collect();
+
+    let m = momentum(&matches, &config());
+
+    let first = &m.points[0];
+    assert_eq!(
+        first.cumulative, first.delta,
+        "the curve starts at zero, so the first point is exactly its own delta"
+    );
+    assert!(
+        m.points.iter().all(|p| p.cumulative.abs() < 2_000.0),
+        "these are movements in the hundreds, not a rating in the thousands"
+    );
+}

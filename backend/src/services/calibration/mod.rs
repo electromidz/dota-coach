@@ -31,8 +31,8 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::config::CalibrationConfig;
 use crate::domain::calibration::{
-    rank_label, Methodology, RankConfidence, RankSnapshot, RolePreference, Streak, StreakKind,
-    TrajectoryPoint,
+    rank_label, Methodology, Momentum, MomentumPoint, RankConfidence, RankSnapshot, RolePreference,
+    Streak, StreakKind, TrajectoryPoint,
 };
 use crate::domain::eligibility::{self, lobby_type};
 use crate::domain::r#match::Match;
@@ -185,6 +185,77 @@ pub fn role_preference(matches: &[Match]) -> Vec<RolePreference> {
             matches,
         })
         .collect()
+}
+
+/// How many recent ranked matches the momentum curve spans.
+///
+/// Twenty is enough for a run of form to show as a shape rather than as noise,
+/// and short enough that the curve describes how the player is playing now
+/// instead of averaging away a month.
+pub const MOMENTUM_WINDOW: i64 = 20;
+
+/// Modeled MMR movement across the most recent ranked matches.
+///
+/// The curve answers "which way am I going, and how hard" — the question a
+/// win/loss list makes you count out by hand. Everything about the *shape* is
+/// real: which games were won, in what order, and how the player performed in
+/// them. What is ours is the per-match magnitude, since Valve publishes no
+/// per-match MMR and no public source can recover one.
+///
+/// So the curve is deliberately **relative**. It starts at zero and reports
+/// movement since, never an absolute rating. A cumulative total is honest
+/// arithmetic over real results; an absolute MMR would be a claim about a
+/// number nobody outside Valve can see.
+pub fn momentum(matches: &[Match], config: &CalibrationConfig) -> Momentum {
+    // Newest first to take the window, then flipped: the curve reads oldest to
+    // newest like every other time series in the product.
+    let mut window: Vec<&Match> = ranked_newest_first(matches)
+        .into_iter()
+        .take(MOMENTUM_WINDOW as usize)
+        .collect();
+    window.reverse();
+
+    // The same yardstick the trajectory uses, measured over the same window
+    // the curve covers — so a match reads as strong or weak relative to the
+    // form being plotted, not to a year of history.
+    let median = median_kda(&window);
+
+    let mut running = 0.0_f32;
+    let mut wins = 0_i64;
+    let mut losses = 0_i64;
+
+    let points: Vec<MomentumPoint> = window
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let delta = modeled_delta(m, median, config);
+            running += delta;
+
+            if m.won {
+                wins += 1;
+            } else {
+                losses += 1;
+            }
+
+            MomentumPoint {
+                index: i as i64 + 1,
+                match_id: m.match_id,
+                hero_name: m.hero_name.clone(),
+                won: m.won,
+                delta,
+                cumulative: running,
+                started_at: m.started_at,
+            }
+        })
+        .collect();
+
+    Momentum {
+        points,
+        net: running,
+        wins,
+        losses,
+        window: MOMENTUM_WINDOW,
+    }
 }
 
 /// Rank over time: real snapshots, with a modeled path between them.

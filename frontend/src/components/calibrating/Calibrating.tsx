@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { MethodologyNote } from "@/components/calibrating/MethodologyNote";
+import { MomentumChart } from "@/components/calibrating/MomentumChart";
 import { RankCard } from "@/components/calibrating/RankCard";
 import { RolePreferenceBars } from "@/components/calibrating/RolePreferenceBars";
 import { StreakBadge } from "@/components/calibrating/StreakBadge";
@@ -93,6 +94,18 @@ export function Calibrating() {
         <TrajectoryChart points={data.trajectory} />
 
         <MethodologyNote methodology={data.methodology} />
+      </Card>
+
+      <Card className="flex flex-col gap-4">
+        <div>
+          <p className="font-semibold text-ink">Recent momentum</p>
+          <p className="mt-1 text-sm text-ink-muted">
+            Modeled movement across your last {data.momentum.window} ranked
+            matches, relative to where the window started.
+          </p>
+        </div>
+
+        <MomentumChart momentum={data.momentum} />
       </Card>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
