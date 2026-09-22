@@ -8,6 +8,12 @@ import { SignedOut } from "./SignedOut";
 
 const getPlan = vi.hoisted(() => vi.fn());
 
+// `SessionHandoff` calls `useRouter`, which throws outside an app router.
+// Nothing here asserts on the handoff — it has its own test file.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
+
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
   return { ...actual, getPlan };

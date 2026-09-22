@@ -56,6 +56,18 @@ export function clearSignedInHint() {
 }
 
 /**
+ * Records that this browser has a session.
+ *
+ * Needed outside `SessionProvider` because of an ordering problem the provider
+ * cannot solve on its own: `/` only mounts the provider once the hint already
+ * exists, and the hint only gets written by the provider. Something has to
+ * write the first one — see `SessionHandoff`.
+ */
+export function markSignedInHint() {
+  writeHint(true);
+}
+
+/**
  * Resolves the session once for the whole screen.
  *
  * Context rather than a hook per component: the page body and the tab bar both

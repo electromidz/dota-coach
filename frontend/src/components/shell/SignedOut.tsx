@@ -11,6 +11,7 @@ import { Problem } from "@/components/landing/Problem";
 import { ProductDeepDive } from "@/components/landing/ProductDeepDive";
 import { WhatIsDotaCoach } from "@/components/landing/WhatIsDotaCoach";
 import { LandingBackdrop } from "@/components/shell/LandingBackdrop";
+import { SessionHandoff } from "@/components/shell/SessionHandoff";
 import type { PlanResponse } from "@/lib/types";
 
 /**
@@ -44,6 +45,11 @@ export function SignedOut({
 }) {
   return (
     <div className="flex min-h-dvh flex-col">
+      {/* Renders nothing. Asks once whether this browser already has a
+          session, so somebody arriving back from Steam is not stranded on the
+          pitch — `/` cannot tell on its own, the session cookie being the
+          backend's and `HttpOnly`. */}
+      <SessionHandoff />
       <LandingJsonLd
         priceUsd={
           plan ? (plan.plan.amount_cents / 100).toFixed(2) : undefined
