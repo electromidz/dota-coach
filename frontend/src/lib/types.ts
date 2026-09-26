@@ -295,7 +295,23 @@ export interface MatchView extends Match {
   eligible: boolean;
   /** `Ranked All Pick`, `Turbo`, `Other mode`, … */
   mode_label: string;
+  /**
+   * 1.0–10.0, measured against this player's own typical game on the hero.
+   * Computed by the backend; never recomputed here.
+   */
+  rating: number;
+  /**
+   * Estimated ladder movement in MMR, or `null` for a game that cannot move a
+   * medal — which is a different statement from zero.
+   *
+   * Valve publishes no per-match MMR, so this is a disclosed estimate and every
+   * rendering of it has to say so.
+   */
+  mmr_delta_estimate: number | null;
 }
+
+/** Which kind of game a page shows. Slugs the backend accepts verbatim. */
+export type MatchesMode = "all" | "ranked" | "turbo";
 
 /** How a listed page is ordered. Slugs the backend accepts verbatim. */
 export type MatchSort =
@@ -335,11 +351,23 @@ export interface MatchListResponse {
   total_pages: number;
   /** Which population this page was drawn from. */
   scope: "all" | "competitive";
-  /** True when a hero, role or result filter narrowed this page. */
+  /** True when a hero, role, result or mode filter narrowed this page. */
   filtered: boolean;
   sort: MatchSort;
+  mode: MatchesMode;
   /** Drawn from the player's own matches — never a hardcoded hero list. */
   filters: FilterOptions;
+  /**
+   * Every stored match, whatever mode, hero or result.
+   *
+   * The denominator behind "20 of 143": `total` describes the filtered list,
+   * this describes the history it came from. Only what has been synced — not a
+   * Dota lifetime total, which no provider publishes.
+   */
+  lifetime_games: number;
+  last_synced_at: string | null;
+  /** True when this request started a background sync of stale history. */
+  syncing: boolean;
 }
 
 export interface MatchResponse {

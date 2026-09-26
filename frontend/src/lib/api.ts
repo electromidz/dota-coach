@@ -17,6 +17,7 @@ import type {
   HeroIntelligenceResponse,
   HeroPoolResponse,
   MatchComparisonResponse,
+  MatchesMode,
   MatchListResponse,
   MatchResponse,
   MatchResultFilter,
@@ -284,6 +285,8 @@ export interface MatchListParams {
   heroId?: number;
   role?: CoachableRole;
   result?: MatchResultFilter;
+  /** Ranked matchmaking only, Turbo only, or every kind of game. */
+  mode?: MatchesMode;
   sort?: MatchSort;
 }
 
@@ -316,6 +319,7 @@ export function getMatches(
   if (params.result && params.result !== "all") {
     query.set("result", params.result);
   }
+  if (params.mode && params.mode !== "all") query.set("mode", params.mode);
   if (params.sort && params.sort !== "newest") query.set("sort", params.sort);
 
   return apiFetch<MatchListResponse>(`/api/matches?${query.toString()}`);
