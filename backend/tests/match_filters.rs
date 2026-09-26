@@ -296,6 +296,8 @@ async fn an_unusable_filter_value_is_rejected_rather_than_ignored() {
         "?sort=best",
         "?hero_id=0",
         "?hero_id=-3",
+        "?mode=unranked",
+        "?mode=Turbo",
     ] {
         let response = app
             .get(&format!("/api/matches{query}"), Some(&session.token))
@@ -333,6 +335,119 @@ async fn the_unfiltered_list_is_unchanged() {
     assert_eq!(bare["filtered"], false);
     assert_eq!(neutral["filtered"], false);
     assert_eq!(bare["matches"][0]["id"], neutral["matches"][0]["id"]);
+}
+
+#[tokio::test]
+async fn the_mode_filter_narrows_the_total_and_not_only_the_page() {
+    let Some(db) = support::pool().await else {
+        return skip("the_mode_filter_narrows_the_total_and_not_only_the_page");
+    };
+    let (app, session) = seed_app(db, history(), 100).await;
+
+    // Eight stored games: seven ranked (4 Luna + 3 Lion) and one Turbo.
+    let ranked = app
+        .get("/api/matches?mode=ranked", Some(&session.token))
+        .await
+        .json();
+    assert_eq!(ranked["total"], 7, "every ranked game, not just this page");
+    assert_eq!(ranked["mode"], "ranked");
+    assert_eq!(ranked["filtered"], true);
+    assert!(ranked["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|m| m["lobby_type"] == 7));
+
+    let turbo = app
+        .get("/api/matches?mode=turbo", Some(&session.token))
+        .await
+        .json();
+    assert_eq!(turbo["total"], 1);
+    assert_eq!(turbo["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(turbo["matches"][0]["game_mode"], 23);
+    assert_eq!(turbo["matches"][0]["eligible"], false);
+
+    // The neutral position is the list that was always there.
+    let all = app
+        .get("/api/matches?mode=all", Some(&session.token))
+        .await
+        .json();
+    assert_eq!(all["total"], 8);
+    assert_eq!(all["mode"], "all");
+    assert_eq!(all["filtered"], false);
+}
+
+#[tokio::test]
+async fn a_mode_combines_with_the_other_filters() {
+    let Some(db) = support::pool().await else {
+        return skip("a_mode_combines_with_the_other_filters");
+    };
+    let (app, session) = seed_app(db, history(), 100).await;
+
+    // Five Luna games, but only four of them ranked: the mode must not be
+    // dropped to find the fifth.
+    let ranked_luna = app
+        .get("/api/matches?mode=ranked&hero_id=35", Some(&session.token))
+        .await
+        .json();
+    assert_eq!(ranked_luna["total"], 4);
+
+    // The Turbo game was a win, so asking for Turbo losses is an empty page
+    // rather than an error.
+    let turbo_losses = app
+        .get("/api/matches?mode=turbo&result=loss", Some(&session.token))
+        .await;
+    assert_eq!(turbo_losses.status, StatusCode::OK);
+    assert_eq!(turbo_losses.json()["total"], 0);
+}
+
+/// The two derived columns the rank tab prints, over a real page.
+///
+/// `mmr_delta_estimate` is the load-bearing assertion: absent for a game that
+/// cannot move a medal, rather than a zero a reader would take for "you gained
+/// nothing".
+#[tokio::test]
+async fn every_row_carries_a_rating_and_only_ranked_rows_carry_an_estimate() {
+    let Some(db) = support::pool().await else {
+        return skip("every_row_carries_a_rating_and_only_ranked_rows_carry_an_estimate");
+    };
+    let (app, session) = seed_app(db, history(), 100).await;
+
+    let body = app.get("/api/matches", Some(&session.token)).await.json();
+
+    for m in body["matches"].as_array().unwrap() {
+        let rating = m["rating"].as_f64().expect("every row is rated");
+        assert!(
+            (1.0..=10.0).contains(&rating),
+            "rating {rating} is off the scale"
+        );
+
+        let estimate = &m["mmr_delta_estimate"];
+        if m["lobby_type"] == 7 {
+            let value = estimate.as_i64().expect("a ranked game moves a medal");
+            assert_eq!(
+                value > 0,
+                m["won"].as_bool().unwrap(),
+                "the estimate should follow the result"
+            );
+        } else {
+            assert!(
+                estimate.is_null(),
+                "a game that cannot move a medal has no estimate"
+            );
+        }
+    }
+
+    // The denominator behind "20 of N", and it describes the whole history
+    // rather than the filtered page.
+    assert_eq!(body["lifetime_games"], 8);
+
+    let turbo_only = app
+        .get("/api/matches?mode=turbo", Some(&session.token))
+        .await
+        .json();
+    assert_eq!(turbo_only["total"], 1);
+    assert_eq!(turbo_only["lifetime_games"], 8);
 }
 
 #[tokio::test]

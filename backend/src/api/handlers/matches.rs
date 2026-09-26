@@ -7,11 +7,13 @@ use std::collections::HashMap;
 
 use axum::extract::State;
 use axum::Json;
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::extract::{AppPath, AppQuery, CurrentUser};
-use crate::api::handlers::benchmark;
+use crate::api::handlers::{benchmark, players};
+use crate::config::CalibrationConfig;
 use crate::domain::benchmark::{BenchmarkContext, ResolvedBracket};
 use crate::domain::eligibility;
 use crate::domain::match_comparison::{MatchComparison, Standing};
@@ -22,8 +24,9 @@ use crate::domain::scope::MatchScope;
 use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
-use crate::repositories::r#match::{MatchFilter, MatchSort};
-use crate::services::match_comparison;
+use crate::repositories::r#match::{MatchFilter, MatchSort, ModeFilter};
+use crate::services::metrics::rating;
+use crate::services::{calibration, match_comparison, sync};
 use crate::state::AppState;
 use utoipa::ToSchema;
 
@@ -41,6 +44,8 @@ pub struct PageQuery {
     pub role: Option<String>,
     /// `win`, `loss`, or `all`.
     pub result: Option<String>,
+    /// One of the [`ModeFilter`] slugs: `all`, `ranked` or `turbo`.
+    pub mode: Option<String>,
     /// One of the [`MatchSort`] slugs. Defaults to `newest`.
     pub sort: Option<String>,
 }
@@ -78,6 +83,15 @@ impl PageQuery {
             }
         };
 
+        let mode = match self.mode.as_deref().map(str::trim) {
+            None | Some("") => ModeFilter::default(),
+            Some(slug) => ModeFilter::parse(slug).ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "Unknown mode '{slug}'. Use 'all', 'ranked' or 'turbo'."
+                ))
+            })?,
+        };
+
         let sort = match self.sort.as_deref().map(str::trim) {
             None | Some("") => MatchSort::default(),
             Some(slug) => MatchSort::parse(slug).ok_or_else(|| {
@@ -98,6 +112,7 @@ impl PageQuery {
             hero_id: self.hero_id,
             won,
             role,
+            mode,
             sort,
         })
     }
@@ -178,15 +193,64 @@ pub struct MatchView {
     pub eligible: bool,
     /// What it was: `Ranked All Pick`, `Turbo`, `Other mode`…
     pub mode_label: &'static str,
+    /// How this game went, 1.0–10.0, against the player's own typical game on
+    /// this hero. Computed here, never by the model — see
+    /// [`crate::services::metrics::rating`].
+    pub rating: f32,
+    /// Estimated ladder movement, in MMR.
+    ///
+    /// `null` for a game that cannot move a medal — Turbo, an unranked lobby —
+    /// which is a different statement from zero. Where it is present it is the
+    /// *same* disclosed estimate the calibrating screen's momentum curve plots,
+    /// and every rendering of it has to say it is an estimate: Valve publishes
+    /// no per-match MMR.
+    pub mmr_delta_estimate: Option<i32>,
 }
 
 impl MatchView {
-    fn of(match_: Match) -> Self {
+    fn of(match_: Match, context: &RowContext, config: &CalibrationConfig) -> Self {
         Self {
             eligible: eligibility::is_eligible(match_.game_mode, match_.lobby_type),
             mode_label: eligibility::mode_label(match_.game_mode, match_.lobby_type),
+            rating: rating::rating(&match_, &context.baselines.for_match(&match_)),
+            mmr_delta_estimate: calibration::estimated_mmr_delta(
+                &match_,
+                context.median_kda,
+                config,
+            ),
             match_,
         }
+    }
+}
+
+/// The two player-wide figures every row on a page is measured against.
+///
+/// Loaded once per request rather than per row: a page of twenty matches would
+/// otherwise be forty queries, and — worse — rows would be comparable only to
+/// themselves. Both figures are about the player, not about the page, so they do
+/// not change as someone flips through it.
+struct RowContext {
+    baselines: rating::RatingBaselines,
+    /// The median KDA of the newest ranked window, which is exactly what the
+    /// momentum curve measures against. Shared so a row's delta and its point on
+    /// that curve are one number.
+    median_kda: f32,
+}
+
+impl RowContext {
+    async fn load(state: &AppState, dota_player_id: Uuid) -> AppResult<Self> {
+        let baselines = repositories::metrics::rating_baselines(&state.db, dota_player_id).await?;
+        let ranked = repositories::r#match::recent_ranked(
+            &state.db,
+            dota_player_id,
+            calibration::MOMENTUM_WINDOW,
+        )
+        .await?;
+
+        Ok(Self {
+            baselines: rating::RatingBaselines::from_rows(&baselines),
+            median_kda: calibration::recent_ranked_median_kda(&ranked),
+        })
     }
 }
 
@@ -203,14 +267,36 @@ pub struct MatchListResponse {
     /// tell a page it asked for from one it inherited.
     pub filtered: bool,
     pub sort: &'static str,
+    /// Which kind of game this page shows: `all`, `ranked` or `turbo`.
+    pub mode: &'static str,
     /// What this population *can* be filtered by, from the player's own rows.
     pub filters: FilterOptions,
+    /// Every match stored for this player, whatever mode, hero or result.
+    ///
+    /// The denominator behind "20 of 143": `total` describes the filtered list,
+    /// this describes the history it was drawn from. Not a Dota lifetime total —
+    /// the provider does not publish one, and this is only what has been synced.
+    pub lifetime_games: i64,
+    pub last_synced_at: Option<DateTime<Utc>>,
+    /// True when this request started a background sync because the stored
+    /// history had gone stale. The rows served are the cached ones either way;
+    /// a client seeing this can come back for the newer page shortly.
+    pub syncing: bool,
 }
 
 /// `GET /api/matches?page=1&limit=20`
 #[utoipa::path(
     get, path = "/api/matches", tag = "matches",
     summary = "Stored match history",
+    description = "One page of the player's stored matches, with two derived figures per row.\n\n\
+`rating` is 1.0–10.0 and is measured against **this player's own** typical game on that hero, \
+not against an absolute scale or a peer distribution; Turbo games are rated only against Turbo \
+games. `mmr_delta_estimate` is the same disclosed model the calibrating screen's momentum curve \
+plots — Valve publishes no per-match MMR, so it is an estimate and must be labelled as one, and \
+it is `null` for any game that cannot move a medal.\n\n\
+A read never waits on the Dota provider. When the stored history has gone stale this answers \
+`syncing: true` and refreshes behind the response, under the same cooldown \
+`POST /api/players/me/sync` enforces.",
     security(("session" = [])),
     params(
         ("page" = Option<i64>, Query,
@@ -234,6 +320,11 @@ the five are excluded by any role filter rather than guessed at.",
         ("result" = Option<String>, Query,
             description = "`win`, `loss`, or `all` (default).",
             example = "loss"),
+        ("mode" = Option<String>, Query,
+            description = "`all` (default), `ranked` — ranked matchmaking only, the lobby that \
+moves a medal — or `turbo`. Narrower than `scope` and a different question: this is which games \
+you want to *look at*, not which games may be analysed.",
+            example = "ranked"),
         ("sort" = Option<String>, Query,
             description = "`newest` (default), `oldest`, `gpm_desc`, `gpm_asc` or `kda_desc`. \
 Matches with no computed metrics sort last under `kda_desc` rather than counting as zero.",
@@ -241,7 +332,7 @@ Matches with no computed metrics sort last under `kda_desc` rather than counting
     ),
     responses(
         (status = 200, description = "One page of matches, newest first unless sorted otherwise", body = MatchListResponse),
-        (status = 400, description = "An unknown scope, role, result or sort value", body = crate::error::ErrorBody),
+        (status = 400, description = "An unknown scope, role, result, mode or sort value", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
@@ -284,8 +375,23 @@ pub async fn list(
         )
     };
 
+    // An unfiltered career page has already counted exactly this, so the
+    // denominator is free in the common case.
+    let lifetime_games = if window.is_career() && filter.is_empty() {
+        total
+    } else {
+        repositories::r#match::count_by_player(&state.db, player.id, &MatchFilter::default())
+            .await?
+    };
+
+    let context = RowContext::load(&state, player.id).await?;
+    let syncing = refresh_in_background(&state, &user, &player);
+
     Ok(Json(MatchListResponse {
-        matches: matches.into_iter().map(MatchView::of).collect(),
+        matches: matches
+            .into_iter()
+            .map(|m| MatchView::of(m, &context, &state.config.calibration))
+            .collect(),
         page,
         limit,
         total,
@@ -293,8 +399,78 @@ pub async fn list(
         scope: scope.slug(),
         filtered: !filter.is_empty(),
         sort: filter.sort.slug(),
+        mode: filter.mode.slug(),
         filters: filter_options(&state, player.id, &window).await?,
+        lifetime_games,
+        last_synced_at: player.last_synced_at,
+        syncing,
     }))
+}
+
+/// Pull newer matches behind this response, if the stored history has gone stale.
+///
+/// Returns whether a sync was started. Reading a match list is the one moment
+/// the product knows the player is looking at their history, which makes it the
+/// right moment to notice it is a day old — but a read must not *wait* on a
+/// provider, so the cached rows are served either way.
+///
+/// Three gates, and all three matter:
+///
+///   * staleness, so a page view does not mean a provider call;
+///   * the existing sync cooldown, so this can never exceed the rate limit that
+///     `POST /api/players/me/sync` enforces — one limiter, not two;
+///   * an in-flight set, so twenty tabs open at once are one sync.
+///
+/// Deliberately *only* the sync. Unlike the explicit endpoint, this does not
+/// checkpoint a coaching session: a GET that quietly created one would make the
+/// coaching history depend on who opened which page.
+fn refresh_in_background(state: &AppState, user: &User, player: &DotaPlayer) -> bool {
+    let stale_after_seconds = state.config.dota.stale_after_seconds;
+    if stale_after_seconds <= 0 {
+        // Turned off: the explicit endpoint is the only path to the provider.
+        return false;
+    }
+
+    // A player who has never synced has nothing stored to be fresh.
+    let stale_after = Duration::seconds(stale_after_seconds);
+    let fresh_enough = player
+        .last_synced_at
+        .is_some_and(|at| Utc::now().signed_duration_since(at) < stale_after);
+
+    if fresh_enough || players::cooldown_remaining_for(state, player).is_some() {
+        return false;
+    }
+
+    // Claimed before the task starts, so a burst of requests produces one sync.
+    if !state.sync_in_flight.claim(player.id) {
+        return false;
+    }
+
+    let state = state.clone();
+    let user_id = user.id;
+    let player = player.clone();
+
+    tokio::spawn(async move {
+        let result = sync::sync_player(
+            &state.db,
+            state.dota.as_ref(),
+            user_id,
+            &player,
+            state.config.dota.sync_match_limit,
+            state.config.roles.analysis_match_limit,
+        )
+        .await;
+
+        // Never fatal and never surfaced: the response this was spawned from is
+        // long gone, and the player's stored history is unharmed either way.
+        if let Err(e) = result {
+            tracing::warn!(error = %e, "background match sync failed");
+        }
+
+        state.sync_in_flight.release(player.id);
+    });
+
+    true
 }
 
 /// The values the filters can take in this population.
@@ -378,8 +554,10 @@ pub async fn get(
         .await?
         .ok_or_else(|| AppError::NotFound("Match not found.".into()))?;
 
+    let context = RowContext::load(&state, player.id).await?;
+
     Ok(Json(MatchResponse {
-        match_: MatchView::of(match_),
+        match_: MatchView::of(match_, &context, &state.config.calibration),
     }))
 }
 
@@ -668,6 +846,61 @@ mod tests {
         assert!(ListScope::parse(Some("ranked")).is_err());
         assert!(ListScope::parse(Some("turbo")).is_err());
         assert!(ListScope::parse(Some("Competitive")).is_err());
+    }
+
+    fn query(mode: Option<&str>) -> PageQuery {
+        PageQuery {
+            page: None,
+            limit: None,
+            scope: None,
+            hero_id: None,
+            role: None,
+            result: None,
+            mode: mode.map(str::to_string),
+            sort: None,
+        }
+    }
+
+    #[test]
+    fn the_default_mode_is_every_kind_of_game() {
+        assert_eq!(query(None).filter().unwrap().mode, ModeFilter::All);
+        assert_eq!(query(Some("")).filter().unwrap().mode, ModeFilter::All);
+        assert_eq!(query(Some("all")).filter().unwrap().mode, ModeFilter::All);
+    }
+
+    #[test]
+    fn ranked_and_turbo_are_requested_by_name() {
+        assert_eq!(
+            query(Some("ranked")).filter().unwrap().mode,
+            ModeFilter::Ranked
+        );
+        assert_eq!(
+            query(Some(" turbo ")).filter().unwrap().mode,
+            ModeFilter::Turbo
+        );
+    }
+
+    /// Same rule as every other filter: a value the server does not understand
+    /// is rejected, never quietly replaced with a population the caller did not
+    /// ask for.
+    #[test]
+    fn an_unknown_mode_is_rejected() {
+        assert!(query(Some("Ranked")).filter().is_err());
+        assert!(query(Some("unranked")).filter().is_err());
+        assert!(query(Some("all_pick")).filter().is_err());
+    }
+
+    #[test]
+    fn a_mode_narrows_the_list_so_the_page_reports_itself_as_filtered() {
+        assert!(query(None).filter().unwrap().is_empty());
+        assert!(!query(Some("turbo")).filter().unwrap().is_empty());
+    }
+
+    #[test]
+    fn every_mode_slug_round_trips() {
+        for mode in [ModeFilter::All, ModeFilter::Ranked, ModeFilter::Turbo] {
+            assert_eq!(ModeFilter::parse(mode.slug()), Some(mode));
+        }
     }
 
     #[test]

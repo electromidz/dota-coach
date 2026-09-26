@@ -633,6 +633,10 @@ pub fn test_config() -> Config {
             // Disabled by default so a test can sync twice in a row; the
             // cooldown itself is unit-tested.
             sync_cooldown_seconds: 0,
+            // Off, so reading a list is a pure read here: the fixtures are
+            // seeded directly and a background refresh would race them. The
+            // tests that want a sync ask for one.
+            stale_after_seconds: 0,
             request_timeout_seconds: 5,
             benchmark_ttl_hours: 24,
             significant_only: false,

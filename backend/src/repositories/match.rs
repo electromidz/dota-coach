@@ -83,6 +83,54 @@ impl MatchSort {
     }
 }
 
+/// Which kind of game a listed page shows.
+///
+/// Narrower and blunter than [`MatchScope`], and deliberately so: the scope
+/// answers "which games may be *analysed*", while this answers "which games do
+/// I want to look at". A player checking their ladder session wants their ranked
+/// games; a player wondering how their Turbo night went wants the Turbo ones.
+/// Neither question is the coaching population.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModeFilter {
+    #[default]
+    All,
+    /// Ranked matchmaking only — the lobby that moves a medal.
+    Ranked,
+    Turbo,
+}
+
+impl ModeFilter {
+    pub fn slug(self) -> &'static str {
+        match self {
+            ModeFilter::All => "all",
+            ModeFilter::Ranked => "ranked",
+            ModeFilter::Turbo => "turbo",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        [ModeFilter::All, ModeFilter::Ranked, ModeFilter::Turbo]
+            .into_iter()
+            .find(|mode| mode.slug() == value)
+    }
+
+    /// The `AND` clause this mode adds, or nothing at all.
+    ///
+    /// Interpolated rather than bound because every value here is a constant
+    /// from [`eligibility`] — the same generated-from-one-list approach
+    /// `eligibility::sql_predicate` uses, so the ids cannot drift from the ones
+    /// the Rust side classifies with. Nothing a caller supplies reaches the SQL.
+    fn sql_clause(self) -> String {
+        match self {
+            ModeFilter::All => String::new(),
+            ModeFilter::Ranked => {
+                format!("AND m.lobby_type = {}", eligibility::lobby_type::RANKED)
+            }
+            ModeFilter::Turbo => format!("AND m.game_mode = {}", eligibility::game_mode::TURBO),
+        }
+    }
+}
+
 /// Which of a player's matches a listed page shows, and in what order.
 ///
 /// Applied *on top of* whatever [`MatchScope`] the caller chose, never instead
@@ -99,6 +147,8 @@ pub struct MatchFilter {
     /// `Some(true)` for wins, `Some(false)` for losses.
     pub won: Option<bool>,
     pub role: Option<CoachableRole>,
+    /// Which kind of game. `All` by default, which is every stored match.
+    pub mode: ModeFilter,
     pub sort: MatchSort,
 }
 
@@ -116,18 +166,25 @@ impl MatchFilter {
     ///
     /// Each clause is a no-op when its parameter is `NULL`, so one SQL string
     /// serves every combination of filters and the bind positions never shift.
+    /// The mode adds a constant clause rather than a fourth slot, so callers
+    /// keep binding the same three values.
     fn predicate(&self, first: usize) -> String {
         let (hero, won, roles) = (first, first + 1, first + 2);
         format!(
             "AND (${hero}::int IS NULL OR m.hero_id = ${hero})
              AND (${won}::bool IS NULL OR m.won = ${won})
-             AND (${roles}::text[] IS NULL OR m.role = ANY(${roles}))"
+             AND (${roles}::text[] IS NULL OR m.role = ANY(${roles}))
+             {mode}",
+            mode = self.mode.sql_clause(),
         )
     }
 
     /// True when this would list exactly what an unfiltered query would.
     pub fn is_empty(&self) -> bool {
-        self.hero_id.is_none() && self.won.is_none() && self.role.is_none()
+        self.hero_id.is_none()
+            && self.won.is_none()
+            && self.role.is_none()
+            && self.mode == ModeFilter::All
     }
 }
 
