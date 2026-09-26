@@ -392,6 +392,34 @@ pub fn momentum(matches: &[Match], config: &CalibrationConfig) -> Momentum {
     }
 }
 
+/// The yardstick [`momentum`] measures a match against.
+///
+/// Exposed so a caller outside this module — the match list, which prints a
+/// delta per row — measures against the *same* window, and a row's estimate
+/// therefore equals its point on the curve. Computing a median over some other
+/// population would put two different numbers for one match on one screen.
+pub fn recent_ranked_median_kda(matches: &[Match]) -> f32 {
+    let window: Vec<&Match> = ranked_newest_first(matches)
+        .into_iter()
+        .take(MOMENTUM_WINDOW as usize)
+        .collect();
+
+    median_kda(&window)
+}
+
+/// One match's estimated ladder movement, rounded to whole MMR.
+///
+/// `None` for a match that did not move a medal — Turbo, an unranked lobby, a
+/// mode the provider never reported. That is a different statement from zero,
+/// and a UI that renders it as "0" should be saying "no ranked movement", not
+/// "you gained nothing".
+///
+/// Still the disclosed model the rest of this module documents: the magnitude is
+/// ours, not Valve's, and every rendering of it has to say so.
+pub fn estimated_mmr_delta(m: &Match, median_kda: f32, config: &CalibrationConfig) -> Option<i32> {
+    is_ranked(m).then(|| modeled_delta(m, median_kda, config).round() as i32)
+}
+
 /// Rank over time: real snapshots, with a modeled path between them.
 ///
 /// Real `rank_snapshots` rows are the only points carrying `estimated: false`.

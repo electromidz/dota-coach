@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, PgPool};
 use uuid::Uuid;
 
+use crate::domain::eligibility;
 use crate::domain::r#match::{Match, NewMatch};
 use crate::domain::role::CoachableRole;
 use crate::domain::scope::MatchScope;
@@ -461,6 +462,41 @@ pub async fn list_since(
     ))
     .bind(dota_player_id)
     .bind(since)
+    .fetch_all(pool)
+    .await
+}
+
+/// The player's most recent ranked matches, newest first.
+///
+/// Exists for one caller: the estimated MMR delta on a match row needs the same
+/// yardstick the momentum curve uses, which is the median KDA of this window.
+/// Pulling the window instead of the whole career keeps a page of matches to two
+/// short queries.
+///
+/// The mode predicate is `eligibility`'s, generated rather than written out, and
+/// the ranked lobby is required on top of it — the narrower population
+/// `services::calibration` documents, because unranked public games do not move
+/// a medal.
+pub async fn recent_ranked(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    limit: i64,
+) -> Result<Vec<Match>, sqlx::Error> {
+    sqlx::query_as::<_, Match>(AssertSqlSafe(format!(
+        "SELECT {cols}, mm.kda AS metrics_kda
+           FROM matches m
+           LEFT JOIN match_metrics mm ON mm.match_id = m.id
+          WHERE m.dota_player_id = $1
+            AND m.lobby_type = {ranked}
+            AND {eligible}
+          ORDER BY m.started_at DESC
+          LIMIT $2",
+        cols = columns!(),
+        ranked = eligibility::lobby_type::RANKED,
+        eligible = eligibility::sql_predicate("m"),
+    )))
+    .bind(dota_player_id)
+    .bind(limit)
     .fetch_all(pool)
     .await
 }

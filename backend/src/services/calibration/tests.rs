@@ -625,6 +625,92 @@ fn momentum_never_reports_an_absolute_rating() {
 }
 
 // ---------------------------------------------------------------------------
+// estimated_mmr_delta
+// ---------------------------------------------------------------------------
+
+/// The property the match list depends on: a row's printed delta and the same
+/// match's point on the momentum curve are one number, not two models.
+#[test]
+fn the_per_match_estimate_equals_that_match_on_the_momentum_curve() {
+    let matches: Vec<Match> = (1..=20).map(|i| ranked(i, i % 3 != 0, day(i))).collect();
+    let curve = momentum(&matches, &config());
+    let median = recent_ranked_median_kda(&matches);
+
+    for point in &curve.points {
+        let m = matches
+            .iter()
+            .find(|m| m.match_id == point.match_id)
+            .expect("every point comes from a stored match");
+
+        assert_eq!(
+            estimated_mmr_delta(m, median, &config()),
+            Some(point.delta.round() as i32),
+            "match {} disagrees with its own curve point",
+            point.match_id
+        );
+    }
+}
+
+#[test]
+fn a_game_that_cannot_move_a_medal_has_no_estimate_rather_than_zero() {
+    let median = 3.0;
+
+    let mut turbo = ranked(1, true, day(1));
+    turbo.game_mode = Some(game_mode::TURBO);
+    assert_eq!(estimated_mmr_delta(&turbo, median, &config()), None);
+
+    let mut unranked = ranked(2, true, day(2));
+    unranked.lobby_type = Some(lobby_type::NORMAL);
+    assert_eq!(estimated_mmr_delta(&unranked, median, &config()), None);
+
+    let mut unknown = ranked(3, true, day(3));
+    unknown.game_mode = None;
+    unknown.lobby_type = None;
+    assert_eq!(estimated_mmr_delta(&unknown, median, &config()), None);
+}
+
+#[test]
+fn the_estimate_follows_the_result() {
+    let median = 3.0;
+
+    let win = estimated_mmr_delta(&ranked(1, true, day(1)), median, &config()).unwrap();
+    let loss = estimated_mmr_delta(&ranked(2, false, day(2)), median, &config()).unwrap();
+
+    assert!(win > 0, "got {win}");
+    assert!(loss < 0, "got {loss}");
+}
+
+#[test]
+fn the_median_of_an_account_with_no_ranked_games_is_no_adjustment() {
+    // Zero is what `performance_factor` reads as "no basis to adjust", so an
+    // empty history still produces the configured base value.
+    assert_eq!(recent_ranked_median_kda(&[]), 0.0);
+
+    let delta = estimated_mmr_delta(
+        &ranked(1, true, day(1)),
+        recent_ranked_median_kda(&[]),
+        &config(),
+    );
+    assert_eq!(delta, Some(config().win_base_mmr.round() as i32));
+}
+
+#[test]
+fn the_median_reads_only_the_newest_window() {
+    // Thirty ranked games, with the older ten made deliberately unlike the
+    // newest twenty: the median must describe the window the curve plots.
+    let mut matches: Vec<Match> = (1..=30).map(|i| ranked(i, true, day(i))).collect();
+    for m in matches.iter_mut().take(10) {
+        m.kills = 40;
+        m.deaths = 1;
+    }
+
+    let all = recent_ranked_median_kda(&matches);
+    let window_only = recent_ranked_median_kda(&matches[10..]);
+
+    assert_eq!(all, window_only);
+}
+
+// ---------------------------------------------------------------------------
 // bracket placement
 // ---------------------------------------------------------------------------
 

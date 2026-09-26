@@ -408,12 +408,7 @@ mod tests {
         assert!(value.is_finite() && (MIN_RATING..=MAX_RATING).contains(&value));
     }
 
-    fn row(
-        hero_id: Option<i32>,
-        turbo: bool,
-        sample: i64,
-        avg_gpm: f32,
-    ) -> MatchRatingBaseline {
+    fn row(hero_id: Option<i32>, turbo: bool, sample: i64, avg_gpm: f32) -> MatchRatingBaseline {
         MatchRatingBaseline {
             hero_id,
             turbo,
