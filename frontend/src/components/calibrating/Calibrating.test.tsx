@@ -20,6 +20,13 @@ vi.mock("@/lib/session-context", () => ({
   }),
 }));
 
+// The match history reads its own endpoint and the URL's page number, and has
+// its own tests. Stubbed here so these stay about the calibration panels — and
+// so a table failure could not be mistaken for one of them.
+vi.mock("@/components/calibrating/MatchHistoryTable", () => ({
+  MatchHistoryTable: () => <div data-testid="match-history" />,
+}));
+
 const RESPONSE: CalibrationResponse = {
   established_rank: {
     rank_tier: 45,

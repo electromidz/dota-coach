@@ -9,6 +9,8 @@
 //! arrived), the output is `None`. It is never defaulted to zero: a missing
 //! last-hit count and a genuine zero mean very different things to a coach.
 
+pub mod rating;
+
 use crate::domain::metrics::MatchMetrics;
 use crate::domain::r#match::Match;
 

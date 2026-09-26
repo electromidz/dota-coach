@@ -38,6 +38,8 @@ function match(overrides: Partial<MatchView> = {}): MatchView {
     updated_at: new Date().toISOString(),
     eligible: true,
     mode_label: "Ranked All Pick",
+    rating: 7.2,
+    mmr_delta_estimate: 29,
     ...overrides,
   };
 }

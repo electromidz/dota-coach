@@ -73,6 +73,14 @@ pub struct DotaConfig {
     pub sync_match_limit: u32,
     /// Minimum gap between two syncs of the same player, in seconds.
     pub sync_cooldown_seconds: i64,
+    /// How old stored match history may get before reading it refreshes it in
+    /// the background.
+    ///
+    /// Distinct from the cooldown above, which is the floor: this is when a
+    /// refresh becomes *worth* doing, and the cooldown still decides whether it
+    /// is allowed. Zero or less turns the background refresh off, leaving the
+    /// explicit sync endpoint as the only path that calls the provider.
+    pub stale_after_seconds: i64,
     pub request_timeout_seconds: u64,
     /// How long a cached peer distribution stays fresh. These move slowly —
     /// a day-old distribution is still a fair comparison.
@@ -639,6 +647,7 @@ impl Config {
                 // own timeout — raising it is an operator's decision.
                 sync_match_limit: parsed("SYNC_MATCH_LIMIT", 20)?.clamp(1, 500),
                 sync_cooldown_seconds: parsed("SYNC_COOLDOWN_SECONDS", 30)?,
+                stale_after_seconds: parsed("DOTA_STALE_AFTER_SECONDS", 900)?,
                 request_timeout_seconds: parsed("DOTA_API_TIMEOUT_SECONDS", 10)?,
                 benchmark_ttl_hours: parsed("BENCHMARK_TTL_HOURS", 24)?,
                 significant_only: parsed("DOTA_SIGNIFICANT_ONLY", false)?,
@@ -847,6 +856,7 @@ mod tests {
                 api_key: None,
                 sync_match_limit: 20,
                 sync_cooldown_seconds: 30,
+                stale_after_seconds: 900,
                 request_timeout_seconds: 10,
                 benchmark_ttl_hours: 24,
                 significant_only: false,

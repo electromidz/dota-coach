@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, PgPool};
 use uuid::Uuid;
 
+use crate::domain::eligibility;
 use crate::domain::r#match::{Match, NewMatch};
 use crate::domain::role::CoachableRole;
 use crate::domain::scope::MatchScope;
@@ -82,6 +83,54 @@ impl MatchSort {
     }
 }
 
+/// Which kind of game a listed page shows.
+///
+/// Narrower and blunter than [`MatchScope`], and deliberately so: the scope
+/// answers "which games may be *analysed*", while this answers "which games do
+/// I want to look at". A player checking their ladder session wants their ranked
+/// games; a player wondering how their Turbo night went wants the Turbo ones.
+/// Neither question is the coaching population.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModeFilter {
+    #[default]
+    All,
+    /// Ranked matchmaking only — the lobby that moves a medal.
+    Ranked,
+    Turbo,
+}
+
+impl ModeFilter {
+    pub fn slug(self) -> &'static str {
+        match self {
+            ModeFilter::All => "all",
+            ModeFilter::Ranked => "ranked",
+            ModeFilter::Turbo => "turbo",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        [ModeFilter::All, ModeFilter::Ranked, ModeFilter::Turbo]
+            .into_iter()
+            .find(|mode| mode.slug() == value)
+    }
+
+    /// The `AND` clause this mode adds, or nothing at all.
+    ///
+    /// Interpolated rather than bound because every value here is a constant
+    /// from [`eligibility`] — the same generated-from-one-list approach
+    /// `eligibility::sql_predicate` uses, so the ids cannot drift from the ones
+    /// the Rust side classifies with. Nothing a caller supplies reaches the SQL.
+    fn sql_clause(self) -> String {
+        match self {
+            ModeFilter::All => String::new(),
+            ModeFilter::Ranked => {
+                format!("AND m.lobby_type = {}", eligibility::lobby_type::RANKED)
+            }
+            ModeFilter::Turbo => format!("AND m.game_mode = {}", eligibility::game_mode::TURBO),
+        }
+    }
+}
+
 /// Which of a player's matches a listed page shows, and in what order.
 ///
 /// Applied *on top of* whatever [`MatchScope`] the caller chose, never instead
@@ -98,6 +147,8 @@ pub struct MatchFilter {
     /// `Some(true)` for wins, `Some(false)` for losses.
     pub won: Option<bool>,
     pub role: Option<CoachableRole>,
+    /// Which kind of game. `All` by default, which is every stored match.
+    pub mode: ModeFilter,
     pub sort: MatchSort,
 }
 
@@ -115,18 +166,25 @@ impl MatchFilter {
     ///
     /// Each clause is a no-op when its parameter is `NULL`, so one SQL string
     /// serves every combination of filters and the bind positions never shift.
+    /// The mode adds a constant clause rather than a fourth slot, so callers
+    /// keep binding the same three values.
     fn predicate(&self, first: usize) -> String {
         let (hero, won, roles) = (first, first + 1, first + 2);
         format!(
             "AND (${hero}::int IS NULL OR m.hero_id = ${hero})
              AND (${won}::bool IS NULL OR m.won = ${won})
-             AND (${roles}::text[] IS NULL OR m.role = ANY(${roles}))"
+             AND (${roles}::text[] IS NULL OR m.role = ANY(${roles}))
+             {mode}",
+            mode = self.mode.sql_clause(),
         )
     }
 
     /// True when this would list exactly what an unfiltered query would.
     pub fn is_empty(&self) -> bool {
-        self.hero_id.is_none() && self.won.is_none() && self.role.is_none()
+        self.hero_id.is_none()
+            && self.won.is_none()
+            && self.role.is_none()
+            && self.mode == ModeFilter::All
     }
 }
 
@@ -461,6 +519,41 @@ pub async fn list_since(
     ))
     .bind(dota_player_id)
     .bind(since)
+    .fetch_all(pool)
+    .await
+}
+
+/// The player's most recent ranked matches, newest first.
+///
+/// Exists for one caller: the estimated MMR delta on a match row needs the same
+/// yardstick the momentum curve uses, which is the median KDA of this window.
+/// Pulling the window instead of the whole career keeps a page of matches to two
+/// short queries.
+///
+/// The mode predicate is `eligibility`'s, generated rather than written out, and
+/// the ranked lobby is required on top of it — the narrower population
+/// `services::calibration` documents, because unranked public games do not move
+/// a medal.
+pub async fn recent_ranked(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    limit: i64,
+) -> Result<Vec<Match>, sqlx::Error> {
+    sqlx::query_as::<_, Match>(AssertSqlSafe(format!(
+        "SELECT {cols}, mm.kda AS metrics_kda
+           FROM matches m
+           LEFT JOIN match_metrics mm ON mm.match_id = m.id
+          WHERE m.dota_player_id = $1
+            AND m.lobby_type = {ranked}
+            AND {eligible}
+          ORDER BY m.started_at DESC
+          LIMIT $2",
+        cols = columns!(),
+        ranked = eligibility::lobby_type::RANKED,
+        eligible = eligibility::sql_predicate("m"),
+    )))
+    .bind(dota_player_id)
+    .bind(limit)
     .fetch_all(pool)
     .await
 }

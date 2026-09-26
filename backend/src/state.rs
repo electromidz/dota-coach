@@ -1,6 +1,8 @@
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::config::Config;
 use crate::services::auth::steam_openid::{SteamOpenId, SteamVerifier};
@@ -41,6 +43,13 @@ pub struct AppState {
     /// Per-user abuse guard for `POST /api/subscribe/redeem`. In-memory, not
     /// a provider: nothing external to swap, so no trait.
     pub redeem_rate_limiter: Arc<RateLimiter>,
+    /// Which players already have a background sync running.
+    ///
+    /// In-memory and not a provider, for the same reason `redeem_rate_limiter`
+    /// is not: there is nothing external to swap. It keeps a player with several
+    /// tabs open from firing several syncs at the same provider; the cooldown in
+    /// `players::cooldown_remaining_for` is what bounds the rate over time.
+    pub sync_in_flight: Arc<SyncGuard>,
     /// Read-through cache for the coaching context.
     ///
     /// Chosen from configuration rather than injected like the providers,
@@ -49,6 +58,37 @@ pub struct AppState {
     /// what a Redis implementation would land behind if a second instance
     /// ever existed.
     pub cache: Arc<dyn CoachingCache>,
+}
+
+/// Who is already syncing, so the same work is not started twice.
+///
+/// A set behind a `std::sync::Mutex` rather than an async one on purpose: the
+/// lock is held for a set insert and nothing else, and it must never be held
+/// across an `await` — the sync itself runs outside it.
+#[derive(Debug, Default)]
+pub struct SyncGuard {
+    players: Mutex<HashSet<Uuid>>,
+}
+
+impl SyncGuard {
+    /// Take the slot for this player. `false` means somebody else already has it,
+    /// and the caller must not start a second sync.
+    pub fn claim(&self, dota_player_id: Uuid) -> bool {
+        self.lock().insert(dota_player_id)
+    }
+
+    /// Give the slot back. Must run however the sync ended, or that player never
+    /// syncs again for the lifetime of the process.
+    pub fn release(&self, dota_player_id: Uuid) {
+        self.lock().remove(&dota_player_id);
+    }
+
+    /// A poisoned lock cannot corrupt a set of ids: the worst a panicking holder
+    /// can leave behind is a stale id, and refusing to serve match lists for the
+    /// rest of the process is the worse failure.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashSet<Uuid>> {
+        self.players.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 /// Every external dependency, chosen once at startup.
@@ -83,6 +123,7 @@ impl AppState {
             llm: providers.llm,
             payments: providers.payments,
             redeem_rate_limiter: Arc::new(RateLimiter::new()),
+            sync_in_flight: Arc::new(SyncGuard::default()),
             cache: if config_cache_enabled {
                 PostgresCoachingCache::new(db_for_cache, cache_ttl)
             } else {

@@ -162,16 +162,26 @@ async fn load_linked_player(state: &AppState, user: &User) -> AppResult<DotaPlay
 }
 
 fn enforce_sync_cooldown(state: &AppState, player: &DotaPlayer) -> AppResult<()> {
-    match cooldown_remaining(
-        state.config.dota.sync_cooldown_seconds,
-        player.last_synced_at,
-        Utc::now(),
-    ) {
+    match cooldown_remaining_for(state, player) {
         None => Ok(()),
         Some(wait) => Err(AppError::TooManyRequests(format!(
             "Already synced recently. Try again in {wait}s."
         ))),
     }
+}
+
+/// Seconds this player must still wait before another sync, or `None` if one is
+/// allowed now.
+///
+/// Shared with the match list, which refreshes stale history behind a read: one
+/// cooldown for every path that calls the provider, so a second entry point
+/// cannot quietly double the request rate the configuration allows.
+pub fn cooldown_remaining_for(state: &AppState, player: &DotaPlayer) -> Option<i64> {
+    cooldown_remaining(
+        state.config.dota.sync_cooldown_seconds,
+        player.last_synced_at,
+        Utc::now(),
+    )
 }
 
 /// Seconds the caller must still wait, or `None` if a sync is allowed now.

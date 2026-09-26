@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 
 import { EstablishedRankPanel } from "@/components/calibrating/EstablishedRankPanel";
+import { MatchHistoryTable } from "@/components/calibrating/MatchHistoryTable";
 import { MethodologyNote } from "@/components/calibrating/MethodologyNote";
 import { MomentumChart } from "@/components/calibrating/MomentumChart";
 import { RankCard } from "@/components/calibrating/RankCard";
@@ -78,15 +79,28 @@ export function Calibrating() {
     return <Alert title="Cannot reach the service">{session.message}</Alert>;
   }
 
+  // The panels below need a calibration; the match history does not. It reads
+  // its own endpoint, so a rank that cannot be calibrated yet — or a calibration
+  // that failed outright — must not take the player's games down with it.
   if (needsSync) {
     return (
-      <Alert title="Nothing to calibrate yet">
-        Sync your matches from the overview, and your rank history starts
-        building from the next one.
-      </Alert>
+      <div className="flex flex-col gap-4">
+        <Alert title="Nothing to calibrate yet">
+          Sync your matches from the overview, and your rank history starts
+          building from the next one.
+        </Alert>
+        <MatchHistoryCard />
+      </div>
     );
   }
-  if (error) return <Alert>{error}</Alert>;
+  if (error) {
+    return (
+      <div className="flex flex-col gap-4">
+        <Alert>{error}</Alert>
+        <MatchHistoryCard />
+      </div>
+    );
+  }
   if (!data) return <PageSkeleton />;
 
   return (
@@ -162,6 +176,48 @@ export function Calibrating() {
           <RolePreferenceBars roles={data.role_preference} />
         </Card>
       </div>
+
+      <MatchHistoryCard />
+    </div>
+  );
+}
+
+/**
+ * The games behind everything above.
+ *
+ * Deliberately at the bottom: the screen answers "where does my rank sit" first
+ * and "which games got me here" second. The MMR column is the same modeled
+ * estimate the momentum curve plots, and the note says so — a table of precise
+ * numbers is exactly where a disclosed model would otherwise start reading as
+ * Valve's own.
+ *
+ * `Suspense` is not optional here: the table reads the page number from the URL
+ * with `useSearchParams`, and Next requires a boundary around a component that
+ * does so on a prerendered page.
+ */
+function MatchHistoryCard() {
+  return (
+    <Card className="flex flex-col gap-4">
+      <div>
+        <p className="font-semibold text-ink">Match history</p>
+        <p className="mt-1 text-sm text-ink-muted">
+          Every game we have stored. Rating compares each match against your own
+          usual game on that hero; the MMR column is the same estimate as the
+          momentum curve, not a figure Valve publishes.
+        </p>
+      </div>
+
+      <Suspense fallback={<TableFallback />}>
+        <MatchHistoryTable />
+      </Suspense>
+    </Card>
+  );
+}
+
+function TableFallback() {
+  return (
+    <div className="h-64 animate-pulse rounded bg-surface-2/60" aria-busy="true">
+      <span className="sr-only">Loading matches…</span>
     </div>
   );
 }

@@ -57,6 +57,32 @@ pub struct PlayerStats {
     pub parsed_matches: i64,
 }
 
+/// The player's own typical figures for one hero, as stored.
+///
+/// The yardstick behind a match rating: what this account usually does, so a
+/// single game can be judged against it instead of against an absolute scale
+/// nobody's account matches.
+///
+/// Turbo is a separate row rather than folded in. Its economy curve is a
+/// different game, and rating a Turbo stomp against an All Pick average would
+/// report a figure neither population supports.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct MatchRatingBaseline {
+    /// `None` on the player-wide fallback row, used when one hero has too few
+    /// matches behind it to be a yardstick of its own.
+    pub hero_id: Option<i32>,
+    pub turbo: bool,
+    pub sample: i64,
+    /// The median rather than the mean: one 30-kill game should not move what
+    /// counts as a normal game for this player.
+    pub median_kda: Option<f32>,
+    pub avg_gpm: Option<f32>,
+    pub avg_xpm: Option<f32>,
+    /// Averaged only over matches that carry hero damage at all — most public
+    /// matches arrive without it.
+    pub avg_hero_damage_per_min: Option<f32>,
+}
+
 /// Per-hero rollup.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
 pub struct HeroStats {

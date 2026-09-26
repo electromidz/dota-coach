@@ -52,6 +52,8 @@ function match(overrides: Partial<MatchView> = {}): MatchView {
     updated_at: "2026-01-01T12:00:00Z",
     eligible: true,
     mode_label: "Ranked All Pick",
+    rating: 7.2,
+    mmr_delta_estimate: 29,
     ...overrides,
   };
 }
@@ -66,6 +68,10 @@ function page(overrides: Partial<MatchListResponse> = {}): MatchListResponse {
     scope: "all",
     filtered: false,
     sort: "newest",
+    mode: "all",
+    lifetime_games: 1,
+    last_synced_at: "2026-01-01T12:05:00Z",
+    syncing: false,
     filters: {
       heroes: [
         { value: "35", label: "Luna", matches: 6 },

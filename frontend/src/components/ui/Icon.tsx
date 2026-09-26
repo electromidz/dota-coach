@@ -23,6 +23,7 @@ export type IconName =
   | "skull"
   | "clock"
   | "spark"
+  | "star"
   | "gauge"
   | "shield"
   | "users"
@@ -130,6 +131,12 @@ const PATHS: Record<IconName, React.ReactNode> = {
   ),
   spark: (
     <path d="M12 3v3m0 12v3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1M3 12h3m12 0h3M5.6 18.4l2.1-2.1m8.6-8.6 2.1-2.1" />
+  ),
+  // Outline by default. Add `fill-current` to the className for a filled star:
+  // CSS wins over the `fill="none"` presentation attribute below, so one path
+  // serves both halves of a rating's star row.
+  star: (
+    <path d="M11.5 2.6a.5.5 0 0 1 .9 0l2.4 5 5.4.8a.5.5 0 0 1 .3.9l-3.9 3.8.9 5.4a.5.5 0 0 1-.8.5L12 16.5l-4.8 2.5a.5.5 0 0 1-.8-.5l.9-5.4-3.9-3.8a.5.5 0 0 1 .3-.9l5.4-.8z" />
   ),
   gauge: (
     <>
