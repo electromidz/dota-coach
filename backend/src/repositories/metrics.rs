@@ -4,8 +4,10 @@ use sqlx::{AssertSqlSafe, PgPool};
 use uuid::Uuid;
 
 use crate::domain::benchmark::BenchmarkMetric;
-use crate::domain::eligibility::ModeCount;
-use crate::domain::metrics::{HeroStats, MatchMetrics, PlayerStats, RoleStats};
+use crate::domain::eligibility::{self, ModeCount};
+use crate::domain::metrics::{
+    HeroStats, MatchMetrics, MatchRatingBaseline, PlayerStats, RoleStats,
+};
 use crate::domain::role::RoleTotals;
 use crate::domain::scope::MatchScope;
 
@@ -520,6 +522,51 @@ pub async fn match_figures(
     )))
     .bind(match_id)
     .fetch_optional(pool)
+    .await
+}
+
+/// Every yardstick a page of match ratings needs, in one statement.
+///
+/// One row per `(hero, turbo)` pair the player has actually played, plus one
+/// player-wide row per `turbo` value as the fallback for a hero they have
+/// barely touched. A page of twenty matches can therefore be rated without a
+/// query per row — and without rating a Rubick game against a Phantom
+/// Assassin average.
+///
+/// Career-wide on purpose: this is "what you usually do", which is not a
+/// question about the analysis window. A match with no reported game mode is
+/// grouped as non-Turbo rather than becoming a third population of one.
+pub async fn rating_baselines(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+) -> Result<Vec<MatchRatingBaseline>, sqlx::Error> {
+    sqlx::query_as::<_, MatchRatingBaseline>(
+        "WITH played AS (
+             SELECT
+                 m.hero_id,
+                 COALESCE(m.game_mode = $2, FALSE) AS turbo,
+                 mm.kda,
+                 m.gpm,
+                 m.xpm,
+                 mm.hero_damage_per_min
+               FROM matches m
+               JOIN match_metrics mm ON mm.match_id = m.id
+              WHERE m.dota_player_id = $1
+         )
+         SELECT
+             hero_id,
+             turbo,
+             COUNT(*)                                                  AS sample,
+             (percentile_cont(0.5) WITHIN GROUP (ORDER BY kda))::real   AS median_kda,
+             AVG(gpm)::real                                            AS avg_gpm,
+             AVG(xpm)::real                                            AS avg_xpm,
+             AVG(hero_damage_per_min)::real                            AS avg_hero_damage_per_min
+           FROM played
+          GROUP BY GROUPING SETS ((hero_id, turbo), (turbo))",
+    )
+    .bind(dota_player_id)
+    .bind(eligibility::game_mode::TURBO)
+    .fetch_all(pool)
     .await
 }
 

@@ -17,6 +17,10 @@
 //! against, and a first game that reads as a 2.6 would be the fabricated
 //! precision the product exists to avoid.
 
+use std::collections::HashMap;
+
+use crate::domain::eligibility;
+use crate::domain::metrics::MatchRatingBaseline;
 use crate::domain::r#match::Match;
 use crate::services::metrics;
 
@@ -81,6 +85,61 @@ impl RatingBaseline {
     /// Whether this baseline is built on enough matches to be worth using.
     pub fn is_usable(&self) -> bool {
         self.sample >= MIN_BASELINE_SAMPLE
+    }
+}
+
+/// Every baseline a page of matches might need, with the resolution rule.
+///
+/// Built once per request from [`MatchRatingBaseline`] rows and asked per row,
+/// so twenty matches on twelve heroes cost one query. The resolution order is
+/// the whole point of the type: the hero's own figures when there are enough of
+/// them, the player's overall figures otherwise, and nothing at all for an
+/// account with no computed metrics yet.
+#[derive(Debug, Default)]
+pub struct RatingBaselines {
+    /// Keyed by `(hero_id, turbo)`; the `None` hero is the player-wide row.
+    by_key: HashMap<(Option<i32>, bool), RatingBaseline>,
+}
+
+impl RatingBaselines {
+    pub fn from_rows(rows: &[MatchRatingBaseline]) -> Self {
+        Self {
+            by_key: rows
+                .iter()
+                .map(|row| {
+                    (
+                        (row.hero_id, row.turbo),
+                        RatingBaseline {
+                            sample: row.sample,
+                            median_kda: row.median_kda,
+                            avg_gpm: row.avg_gpm,
+                            avg_xpm: row.avg_xpm,
+                            avg_hero_damage_per_min: row.avg_hero_damage_per_min,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// The yardstick this match should be measured against.
+    ///
+    /// Turbo matches only ever resolve to Turbo baselines and standard matches
+    /// only to standard ones, at both levels — that separation is why the
+    /// fallback is safe to take.
+    pub fn for_match(&self, m: &Match) -> RatingBaseline {
+        let turbo = m.game_mode == Some(eligibility::game_mode::TURBO);
+
+        let hero = self.by_key.get(&(Some(m.hero_id), turbo));
+        if let Some(baseline) = hero.filter(|b| b.is_usable()) {
+            return *baseline;
+        }
+
+        self.by_key
+            .get(&(None, turbo))
+            .filter(|b| b.is_usable())
+            .copied()
+            .unwrap_or_else(RatingBaseline::empty)
     }
 }
 
@@ -347,6 +406,87 @@ mod tests {
         m.duration_seconds = 0;
         let value = rating(&m, &matching_baseline(&sample()));
         assert!(value.is_finite() && (MIN_RATING..=MAX_RATING).contains(&value));
+    }
+
+    fn row(
+        hero_id: Option<i32>,
+        turbo: bool,
+        sample: i64,
+        avg_gpm: f32,
+    ) -> MatchRatingBaseline {
+        MatchRatingBaseline {
+            hero_id,
+            turbo,
+            sample,
+            median_kda: Some(3.0),
+            avg_gpm: Some(avg_gpm),
+            avg_xpm: Some(500.0),
+            avg_hero_damage_per_min: Some(600.0),
+        }
+    }
+
+    #[test]
+    fn a_hero_with_enough_games_is_rated_against_itself() {
+        let baselines = RatingBaselines::from_rows(&[
+            row(Some(26), false, 12, 380.0),
+            row(None, false, 200, 520.0),
+        ]);
+
+        assert_eq!(baselines.for_match(&sample()).avg_gpm, Some(380.0));
+    }
+
+    #[test]
+    fn a_hero_with_too_few_games_falls_back_to_the_player() {
+        let baselines = RatingBaselines::from_rows(&[
+            row(Some(26), false, MIN_BASELINE_SAMPLE - 1, 380.0),
+            row(None, false, 200, 520.0),
+        ]);
+
+        assert_eq!(baselines.for_match(&sample()).avg_gpm, Some(520.0));
+    }
+
+    #[test]
+    fn turbo_is_never_rated_against_standard_games() {
+        let baselines = RatingBaselines::from_rows(&[
+            row(Some(26), false, 12, 380.0),
+            row(None, false, 200, 520.0),
+            row(Some(26), true, 8, 900.0),
+            row(None, true, 30, 880.0),
+        ]);
+
+        let mut turbo = sample();
+        turbo.game_mode = Some(eligibility::game_mode::TURBO);
+        assert_eq!(baselines.for_match(&turbo).avg_gpm, Some(900.0));
+
+        // And a standard game never borrows the Turbo figures.
+        assert_eq!(baselines.for_match(&sample()).avg_gpm, Some(380.0));
+    }
+
+    #[test]
+    fn a_turbo_game_with_no_turbo_history_gets_no_baseline_rather_than_the_standard_one() {
+        let baselines = RatingBaselines::from_rows(&[
+            row(Some(26), false, 12, 380.0),
+            row(None, false, 200, 520.0),
+        ]);
+
+        let mut turbo = sample();
+        turbo.game_mode = Some(eligibility::game_mode::TURBO);
+        assert_eq!(baselines.for_match(&turbo), RatingBaseline::empty());
+    }
+
+    #[test]
+    fn an_account_with_no_computed_metrics_resolves_to_nothing() {
+        let baselines = RatingBaselines::default();
+        assert_eq!(baselines.for_match(&sample()), RatingBaseline::empty());
+    }
+
+    #[test]
+    fn a_match_with_no_reported_mode_is_rated_as_a_standard_game() {
+        let baselines = RatingBaselines::from_rows(&[row(None, false, 200, 520.0)]);
+
+        let mut unknown = sample();
+        unknown.game_mode = None;
+        assert_eq!(baselines.for_match(&unknown).avg_gpm, Some(520.0));
     }
 
     #[test]
