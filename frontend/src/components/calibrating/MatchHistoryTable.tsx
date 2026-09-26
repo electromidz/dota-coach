@@ -210,9 +210,16 @@ export function MatchHistoryTable() {
         {data?.syncing ? " · checking for newer games" : ""}
       </p>
 
-      {/* Its own scroll container: a wide table must never make the page scroll
+      {/* A header row above nothing is furniture, so an empty page drops the
+          table and keeps only the explanation below.
+          Its own scroll container: a wide table must never make the page scroll
           sideways. */}
-      <div className="-mx-1 overflow-x-auto">
+      <div
+        className={cn(
+          "-mx-1 overflow-x-auto",
+          data && data.total === 0 && "hidden",
+        )}
+      >
         <table className="w-full min-w-[34rem] border-collapse text-left">
           <thead>
             <tr className="text-[0.625rem] uppercase tracking-wider text-ink-faint">
