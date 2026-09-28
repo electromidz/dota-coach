@@ -21,16 +21,29 @@ use utoipa::ToSchema;
 
 /// Bumped whenever the instructions change in a way that should produce a
 /// different answer for identical evidence.
-pub const PROMPT_VERSION: u32 = 4;
+///
+/// 5: single-match analysis asks for the three-part form (what happened, why it
+/// matters, what to do instead), a severity, and a timestamp — and is told that
+/// timestamps are verified against the evidence as strings.
+pub const PROMPT_VERSION: u32 = 5;
 
-/// The instructions. Fixed text: the only things that vary are the caps, which
-/// are configuration.
-pub fn system(max_insights: usize, max_plan_steps: usize) -> String {
+/// The instructions.
+///
+/// Scope-aware, because the three scopes are three different jobs. A career
+/// analysis is asked to describe where a player stands; a single match is asked
+/// to name the decisions that cost them the game. The shared rules — no
+/// arithmetic, cite everything, nothing unverified survives — are identical, and
+/// are stated once.
+pub fn system(scope: AnalysisScope, max_insights: usize, max_plan_steps: usize) -> String {
     let kinds = InsightKind::ALL
         .map(|k| format!("\"{}\"", k.slug()))
         .join(", ");
+    // "at most 1 plan steps" reads as a formatting bug, and a model that is
+    // reading the sentence to find out how many to write deserves a sentence
+    // that agrees with itself.
+    let steps = if max_plan_steps == 1 { "step" } else { "steps" };
 
-    format!(
+    let shared = format!(
         "You are a Dota 2 coach reading one player's measured performance data.
 
 WHAT YOU ARE READING
@@ -57,7 +70,7 @@ back. The player can already read it. Your job is the interpretation they \
 cannot read.
 6. If the evidence is thin or the samples are small, say so plainly. Never \
 assert a recurring pattern from a single match.
-7. At most {max_insights} insights and at most {max_plan_steps} plan steps, \
+7. At most {max_insights} insights and at most {max_plan_steps} plan {steps}, \
 most important first. Fewer is better than padding.
 8. Evidence ids beginning \"progress.\" describe how the player has changed \
 since their previous coaching session. Everything else describes where they \
@@ -68,7 +81,15 @@ got worse\" are different claims, and only the second needs a progress id.
 player has nothing to be compared against yet — say so if it is relevant, and \
 make no claim about change in either direction. An insight of kind \
 \"improvement\" that cites no \"progress.\" id is discarded.
+10. Reply with one JSON object and nothing else, with exactly three keys: \
+\"summary\" (a string), \"insights\" (an array) and \"plan\" (an array). Every \
+insight has a \"kind\" from [{kinds}], a \"title\", and an \"evidence\" array; \
+the rest of its fields depend on what you are being asked, below."
+    );
 
+    let specific = match scope {
+        AnalysisScope::Player | AnalysisScope::Role => {
+            "
 WHAT A GOOD ANSWER COVERS
 Where the player stands in this role, what they are doing well, what is \
 holding them back, and what to change. The plan turns that into work: each \
@@ -76,21 +97,18 @@ step names one thing to do in the next few games, tied to the measured \
 weakness it exists to fix. Do not write a plan step that no evidence supports.
 
 OUTPUT
-Reply with one JSON object and nothing else, with exactly three keys: \
-\"summary\" (a string), \"insights\" (an array) and \"plan\" (an array). \
-Each insight has \"kind\", \"title\", \"explanation\" and \"evidence\". \
-\"kind\" must be one of [{kinds}]. Each plan step has \"title\", \
+Each insight also has an \"explanation\". Each plan step has \"title\", \
 \"action\" and \"evidence\".
 
 This is a complete, correctly shaped answer for a player whose evidence \
 included ids \"overall.deaths\" and \"benchmark.gold_per_min\":
 
-{{
+{
   \"summary\": \"You farm at your bracket's average but die too often to hold \
 the lead it buys you. Dying less is worth more to you right now than farming \
 faster.\",
   \"insights\": [
-    {{
+    {
       \"kind\": \"weakness\",
       \"title\": \"You die too often for a core\",
       \"explanation\": \"Each death costs both the gold you carry and the map \
@@ -98,27 +116,128 @@ control your team holds while you are down. Before you take a fight, check \
 whether your buyback is available and whether anyone is missing from the \
 minimap.\",
       \"evidence\": [\"overall.deaths\"]
-    }},
-    {{
+    },
+    {
       \"kind\": \"strength\",
       \"title\": \"Your farming rate is not the problem\",
       \"explanation\": \"You keep pace with the median on this hero, so time \
 spent grinding last hits is time not spent on the thing that is actually \
 costing you games.\",
       \"evidence\": [\"benchmark.gold_per_min\"]
-    }}
+    }
   ],
   \"plan\": [
-    {{
+    {
       \"title\": \"Leave fights you have not set up\",
       \"action\": \"For your next few games, only commit to a fight when you \
 know where the enemy support is. Walking away is the cheapest way to move the \
 death rate the evidence shows.\",
       \"evidence\": [\"overall.deaths\"]
-    }}
+    }
   ]
-}}"
-    )
+}"
+        }
+
+        // A single game is a different job. The reader wants to know which
+        // decisions cost them this game, in the order they cost the most — not a
+        // description of where they stand, which they can read on the coach page.
+        AnalysisScope::Match => {
+            "
+WHAT A GOOD ANSWER COVERS
+You are reading ONE match. Name the decisions that cost this game, hardest \
+first, and nothing else. This is not a report card: a statistic the player can \
+read off the scoreboard is not an insight, and \"you had 5 deaths\" is a number \
+rather than a mistake. The coachable version names the decision — which fight, \
+at which minute, with what unavailable.
+
+Some of the evidence is a timeline: ids beginning \"match.timeline.\" carry the \
+seconds at which things actually happened. Those are what make an insight \
+checkable, so prefer them, and quote the timestamp of the moment you are \
+describing.
+
+TIMESTAMPS
+Every timestamp you write is matched, character for character, against the \
+evidence you cited for that same statement. \"18:42\" survives only if \"18:42\" \
+appears in that evidence. There is no tolerance: one second out is discarded, \
+and so is the insight carrying it. If the evidence contains \
+\"match.timeline.unavailable\", no timeline was measured for this match — say \
+nothing about when anything happened, and make no claim you would need a \
+replay to support.
+
+Do not describe an action the evidence does not record. You know what the \
+player bought and when, when they died and to whom, and when objectives fell. \
+You do not know what they were thinking, where they walked, what they had on \
+cooldown, or what their team said.
+
+SEVERITY
+Mark each insight \"major\" or \"minor\". Major means it plausibly changed the \
+result of this game. Expect one to three majors in a normal game; a list where \
+everything is major has not ranked anything.
+
+THE PLAN
+Exactly one step. It is the single thing this player should work on next, drawn \
+from the mistake that cost them the most here, and it is the last thing they \
+read — so make it the one change worth making. The \"action\" is what to \
+actually check or do in the next few games.
+
+OUTPUT
+Each insight has \"kind\", \"title\", \"severity\", \"timestamp\" (omit it when \
+the moment is not in the evidence), \"what_happened\", \"why_it_matters\", \
+\"better_action\" and \"evidence\". Use those three fields instead of \
+\"explanation\": what happened, what it cost, what to do instead. The plan step \
+has \"title\", \"action\" and \"evidence\".
+
+This is a complete, correctly shaped answer for a match whose evidence \
+included ids \"match.timeline.deaths\", \"match.timeline.repeat_deaths\" and \
+\"match.timeline.items\":
+
+{
+  \"summary\": \"You lost this game between your first death and your second: \
+both came in the same fight, and the second one came before you had anything to \
+survive it with.\",
+  \"insights\": [
+    {
+      \"kind\": \"weakness\",
+      \"title\": \"You walked back into the fight you had just lost\",
+      \"severity\": \"major\",
+      \"timestamp\": \"10:45\",
+      \"what_happened\": \"You died, respawned, and were killed again 25 \
+seconds later in the same fight.\",
+      \"why_it_matters\": \"The second death was free for them and expensive \
+for you: they were already grouped and at full strength, and you arrived alone \
+with nothing your team could follow up on.\",
+      \"better_action\": \"After a death, treat the fight as lost and buy the \
+time back instead — take the safe lane's wave or the nearest jungle camp, and \
+rejoin when your team is moving together.\",
+      \"evidence\": [\"match.timeline.repeat_deaths\"]
+    },
+    {
+      \"kind\": \"weakness\",
+      \"title\": \"Your defensive item arrived after the fights that needed it\",
+      \"severity\": \"minor\",
+      \"what_happened\": \"Your Black King Bar was finished well after the \
+fights that decided the mid game.\",
+      \"why_it_matters\": \"Without it you cannot be in a fight you are the \
+target of, which is most of them in this part of the game.\",
+      \"better_action\": \"Cut a component out of the build before it and take \
+the item that lets you participate first; the rest can wait.\",
+      \"evidence\": [\"match.timeline.items\"]
+    }
+  ],
+  \"plan\": [
+    {
+      \"title\": \"Fight selection\",
+      \"action\": \"For your next few games, after every death, farm one full \
+wave or camp before you walk toward your team. Losing a fight twice is what \
+turned this game around.\",
+      \"evidence\": [\"match.timeline.repeat_deaths\"]
+    }
+  ]
+}"
+        }
+    };
+
+    format!("{shared}{specific}")
 }
 
 /// What the model is shown, as JSON.
@@ -233,7 +352,7 @@ mod tests {
 
     #[test]
     fn the_system_prompt_forbids_arithmetic_and_names_every_kind() {
-        let system = system(5, 4);
+        let system = system(AnalysisScope::Role, 5, 4);
 
         assert!(system.contains("must NOT calculate"));
         assert!(system.contains("At most 5 insights"));
@@ -248,7 +367,7 @@ mod tests {
     /// to a rule it had no way to follow.
     #[test]
     fn the_system_prompt_states_that_figures_are_verified_afterwards() {
-        let system = system(5, 4);
+        let system = system(AnalysisScope::Role, 5, 4);
 
         assert!(system.contains("checked after you answer"));
         assert!(system.contains("discarded"));
@@ -258,7 +377,7 @@ mod tests {
 
     #[test]
     fn the_system_prompt_explains_that_the_evidence_is_already_scoped() {
-        let system = system(5, 4);
+        let system = system(AnalysisScope::Role, 5, 4);
 
         // The architectural guarantee, stated as a fact rather than a request:
         // the model is not being asked to ignore anything, because nothing that
@@ -269,7 +388,7 @@ mod tests {
 
     #[test]
     fn the_system_prompt_asks_for_a_training_plan() {
-        let system = system(5, 4);
+        let system = system(AnalysisScope::Role, 5, 4);
 
         assert!(system.contains("\"plan\""));
         assert!(system.contains("\"action\""));

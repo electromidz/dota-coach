@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "A match whose replay was never parsed. `parsedDateTime` is null.",
+    "The event lists below are populated on purpose: the normalizer must drop",
+    "them rather than trust them, because without a parse they are not a",
+    "measurement of anything. A match that reads as 'nobody died at any",
+    "particular time' is worse than one that says the timeline is missing."
+  ],
+  "data": {
+    "match": {
+      "id": 7500000002,
+      "didRadiantWin": false,
+      "durationSeconds": 1980,
+      "startDateTime": 1700100000,
+      "parsedDateTime": null,
+      "towerDeaths": [],
+      "playbackData": null,
+      "players": [
+        {
+          "steamAccountId": 86745912,
+          "isRadiant": true,
+          "isVictory": false,
+          "heroId": 35,
+          "lane": "UNKNOWN",
+          "position": "UNKNOWN",
+          "kills": 2,
+          "deaths": 7,
+          "assists": 4,
+          "goldPerMinute": 388,
+          "experiencePerMinute": 455,
+          "numLastHits": 180,
+          "numDenies": null,
+          "networth": 13900,
+          "level": 18,
+          "heroDamage": 15600,
+          "towerDamage": 800,
+          "heroHealing": 0,
+          "stats": {
+            "networthPerMinute": [0, 210, 520],
+            "lastHitsPerMinute": [0, 3, 4],
+            "deathEvents": [
+              {
+                "time": 480,
+                "attacker": 26,
+                "goldLost": 180,
+                "goldFed": 140,
+                "timeDead": 14,
+                "isBurst": null,
+                "hasHealAvailable": null,
+                "isEngagedOnDeath": null,
+                "isAttemptTpOut": null
+              }
+            ],
+            "itemPurchases": [{ "time": 600, "itemId": 1 }]
+          }
+        }
+      ]
+    }
+  }
+}

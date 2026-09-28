@@ -17,6 +17,7 @@ pub mod event;
 pub mod hero_meta;
 pub mod hero_pool;
 pub mod r#match;
+pub mod match_facts;
 pub mod metrics;
 pub mod player_model;
 pub mod rank_snapshots;

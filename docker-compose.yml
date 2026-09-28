@@ -44,6 +44,18 @@ services:
       # invisibly, which makes a Turbo player's sync find nothing forever.
       DOTA_SIGNIFICANT_ONLY: ${DOTA_SIGNIFICANT_ONLY:-false}
       SYNC_COOLDOWN_SECONDS: ${SYNC_COOLDOWN_SECONDS:-30}
+      # STRATZ: one match's second-by-second record, for single-match analysis.
+      # Unset, single-match analysis degrades to the stored match totals and says
+      # so; it does not fail.
+      STRATZ_API_URL: ${STRATZ_API_URL:-https://api.stratz.com/graphql}
+      STRATZ_API_TOKEN: ${STRATZ_API_TOKEN:-}
+      STRATZ_USER_AGENT: ${STRATZ_USER_AGENT:-STRATZ_API}
+      STRATZ_API_TIMEOUT_SECONDS: ${STRATZ_API_TIMEOUT_SECONDS:-20}
+      # A parsed match is immutable; an unparsed one may be parsed later, so its
+      # "no timeline" answer is re-checked far sooner. Mind the rate limit when
+      # lowering the second one: it is ~2,000 calls/hour per token, deployment-wide.
+      STRATZ_CACHE_TTL_HOURS: ${STRATZ_CACHE_TTL_HOURS:-720}
+      STRATZ_UNPARSED_CACHE_TTL_HOURS: ${STRATZ_UNPARSED_CACHE_TTL_HOURS:-6}
       # Cache lifetimes for the two provider-backed layers.
       BENCHMARK_TTL_HOURS: ${BENCHMARK_TTL_HOURS:-24}
       HERO_META_TTL_HOURS: ${HERO_META_TTL_HOURS:-24}

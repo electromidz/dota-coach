@@ -21,7 +21,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use dota_coach_backend::api;
 use dota_coach_backend::config::{
     AuthConfig, BillingConfig, CalibrationConfig, CoachConfig, Config, DotaConfig, HeroConfig,
-    LlmConfig, RoleConfig, TrainingConfig,
+    LlmConfig, RoleConfig, StratzConfig, TrainingConfig,
 };
 use dota_coach_backend::domain::benchmark::{
     BenchmarkContext, BenchmarkMetric, Bucket, ResolvedBracket, Segment,
@@ -29,6 +29,9 @@ use dota_coach_backend::domain::benchmark::{
 use dota_coach_backend::domain::billing::PaymentStatus;
 use dota_coach_backend::domain::hero::FitWeights;
 use dota_coach_backend::domain::hero::{HeroMeta, HeroMetaContext, RankBracket};
+use dota_coach_backend::domain::match_facts::{
+    DeathEvent, MatchFacts, MatchFactsPlayer, PurchaseEvent, TowerEvent,
+};
 use dota_coach_backend::domain::r#match::NormalizedMatch;
 use dota_coach_backend::domain::role::RoleScoreWeights;
 use dota_coach_backend::domain::session::{hash_token, NewToken};
@@ -39,6 +42,7 @@ use dota_coach_backend::services::dota::{DotaDataProvider, ProviderError, Provid
 use dota_coach_backend::services::hero_meta::strength::MetaWeights;
 use dota_coach_backend::services::hero_meta::{HeroMetaError, HeroMetaProvider, HeroMetaSet};
 use dota_coach_backend::services::llm::{LlmCompletion, LlmError, LlmProvider, LlmRequest};
+use dota_coach_backend::services::match_facts::MatchFactsProvider;
 use dota_coach_backend::services::payments::{
     CheckoutRequest, CheckoutSession, PaymentError, PaymentProvider, PaymentUpdate,
 };
@@ -408,6 +412,160 @@ impl HeroMetaProvider for StubHeroMeta {
 }
 
 // ---------------------------------------------------------------------------
+// Stub match-facts provider
+// ---------------------------------------------------------------------------
+
+/// Stands in for STRATZ.
+///
+/// The default across the suite is [`StubMatchFacts::unconfigured`], which is the
+/// state a deployment without a token is in. That is deliberate: every existing
+/// test then proves the analysis path works with no second provider at all, so a
+/// STRATZ outage cannot be the reason a match page stops loading.
+pub struct StubMatchFacts {
+    answer: Option<MatchFacts>,
+    configured: bool,
+    error: Option<ProviderError>,
+    /// How many times the handler actually asked. The real provider caches in
+    /// Postgres behind the trait, so this counts handler calls rather than
+    /// network calls — which is the number a caller can get wrong.
+    pub calls: AtomicUsize,
+}
+
+impl StubMatchFacts {
+    /// No token. Answers nothing, and reports as much.
+    pub fn unconfigured() -> Arc<Self> {
+        Arc::new(Self {
+            answer: None,
+            configured: false,
+            error: None,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    /// Configured, and serving this reading for every match it is asked about.
+    pub fn serving(answer: MatchFacts) -> Arc<Self> {
+        Arc::new(Self {
+            answer: Some(answer),
+            configured: true,
+            error: None,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    /// Configured and broken.
+    pub fn failing(error: ProviderError) -> Arc<Self> {
+        Arc::new(Self {
+            answer: None,
+            configured: true,
+            error: Some(error),
+            calls: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl MatchFactsProvider for StubMatchFacts {
+    fn is_configured(&self) -> bool {
+        self.configured
+    }
+
+    fn name(&self) -> &'static str {
+        "STRATZ"
+    }
+
+    async fn get_match_facts(
+        &self,
+        _match_id: i64,
+        _account_id: i64,
+    ) -> Result<MatchFacts, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+
+        match (&self.error, &self.answer) {
+            (Some(ProviderError::NotFound), _) => Err(ProviderError::NotFound),
+            (Some(ProviderError::RateLimited), _) => Err(ProviderError::RateLimited),
+            (Some(ProviderError::Unavailable(d)), _) => Err(ProviderError::Unavailable(d.clone())),
+            (Some(ProviderError::Decode(d)), _) => Err(ProviderError::Decode(d.clone())),
+            (None, Some(answer)) => Ok(answer.clone()),
+            (None, None) => Err(ProviderError::Unavailable("no stub answer".into())),
+        }
+    }
+}
+
+/// One parsed match, with a timeline worth coaching on.
+///
+/// Deaths at 10:00 and 10:45 — the second 25 seconds after respawning from the
+/// first — so the repeat-death finding fires, plus one item timing and one lost
+/// tower shortly after a death.
+pub fn parsed_match_facts(match_id: i64, account_id: i64) -> MatchFacts {
+    let death = |time: i32| DeathEvent {
+        time_seconds: time,
+        killer_hero_id: Some(5),
+        killer_hero_name: Some("Crystal Maiden".into()),
+        gold_lost: Some(300),
+        gold_fed: Some(200),
+        time_dead_seconds: Some(20),
+        was_burst: Some(true),
+        had_heal_available: Some(false),
+        was_in_a_fight: Some(false),
+        attempted_to_escape: Some(false),
+    };
+
+    MatchFacts {
+        match_id,
+        duration_seconds: 2400,
+        started_at: Utc::now(),
+        won: false,
+        parsed: true,
+        player: MatchFactsPlayer {
+            account_id,
+            hero_id: 35,
+            hero_name: Some("Luna".into()),
+            is_radiant: true,
+            lane: Some("Safe lane".into()),
+            position: Some("POSITION_1".into()),
+            kills: 4,
+            deaths: 2,
+            assists: 6,
+            gpm: 480,
+            xpm: 520,
+            last_hits: 240,
+            denies: Some(8),
+            net_worth: Some(18_000),
+            level: Some(22),
+            hero_damage: Some(20_000),
+            tower_damage: Some(2_000),
+            hero_healing: Some(0),
+            net_worth_per_minute: vec![0, 300, 700],
+            last_hits_per_minute: vec![0, 4, 6],
+        },
+        deaths: vec![death(600), death(645)],
+        purchases: vec![PurchaseEvent {
+            time_seconds: 862,
+            item_id: 1,
+            item_name: Some("Blink Dagger".into()),
+        }],
+        towers: vec![TowerEvent {
+            time_seconds: 670,
+            was_radiant_tower: true,
+        }],
+        roshan_kills: vec![1_500],
+    }
+}
+
+/// The same match, as it looks when Valve never parsed the replay.
+pub fn unparsed_match_facts(match_id: i64, account_id: i64) -> MatchFacts {
+    let mut facts = parsed_match_facts(match_id, account_id);
+    facts.parsed = false;
+    facts.deaths = Vec::new();
+    facts.purchases = Vec::new();
+    facts.towers = Vec::new();
+    facts.roshan_kills = Vec::new();
+    facts.player.net_worth_per_minute = Vec::new();
+    facts.player.last_hits_per_minute = Vec::new();
+    facts
+}
+
+// ---------------------------------------------------------------------------
 // Stub LLM provider
 // ---------------------------------------------------------------------------
 
@@ -641,6 +799,17 @@ pub fn test_config() -> Config {
             benchmark_ttl_hours: 24,
             significant_only: false,
         },
+        // No token: the integration suite must prove the analysis path works
+        // without STRATZ, degrading to the stored aggregate and saying so. The
+        // tests that want a timeline inject a stub provider.
+        stratz: StratzConfig {
+            base_url: "https://stratz.example/graphql".into(),
+            api_token: None,
+            user_agent: "STRATZ_API".into(),
+            request_timeout_seconds: 5,
+            cache_ttl_hours: 720,
+            unparsed_cache_ttl_hours: 6,
+        },
         coach: CoachConfig {
             // Disabled by default so a test can analyse twice in a row; the
             // limiter has its own test that turns it back on.
@@ -807,6 +976,7 @@ pub fn app_with_providers(
         hero_meta,
         llm,
         StubPayments::taking_payments(),
+        StubMatchFacts::unconfigured(),
         config,
     )
 }
@@ -827,6 +997,7 @@ pub fn app_with_payments(
         StubHeroMeta::serving(),
         StubLlm::answering(),
         payments,
+        StubMatchFacts::unconfigured(),
         config,
     )
 }
@@ -840,6 +1011,7 @@ fn build(
     hero_meta: Arc<dyn HeroMetaProvider>,
     llm: Arc<dyn LlmProvider>,
     payments: Arc<dyn PaymentProvider>,
+    match_facts: Arc<dyn MatchFactsProvider>,
     config: Config,
 ) -> TestApp {
     let steam = Arc::new(SteamOpenId::new(reqwest::Client::new(), &config.auth));
@@ -853,6 +1025,7 @@ fn build(
             steam_verifier: verifier,
             benchmarks,
             hero_meta,
+            match_facts,
             llm,
             payments,
         },
@@ -862,6 +1035,30 @@ fn build(
         router: api::routes::build(state, &config),
         db,
     }
+}
+
+/// The default harness with a specific coaching model and a specific
+/// match-facts provider — the two dependencies the single-match analysis tests
+/// need to steer.
+pub fn app_with_match_facts(
+    db: PgPool,
+    dota: Arc<MockDota>,
+    verifier: Arc<dyn SteamVerifier>,
+    llm: Arc<dyn LlmProvider>,
+    match_facts: Arc<dyn MatchFactsProvider>,
+    config: Config,
+) -> TestApp {
+    build(
+        db,
+        dota,
+        verifier,
+        StubBenchmarks::serving(),
+        StubHeroMeta::serving(),
+        llm,
+        StubPayments::taking_payments(),
+        match_facts,
+        config,
+    )
 }
 
 pub fn app_with_config(

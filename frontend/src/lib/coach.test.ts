@@ -14,12 +14,18 @@ function evidence(id: string, kind: Evidence["kind"] = "overall"): Evidence {
   };
 }
 
+/** The paragraph form: a career or role insight, as the coach page renders it. */
 function insight(refs: string[]): Insight {
   return {
     kind: "weakness",
     kind_label: "Weakness",
     title: "Your farm trails your peers",
     explanation: "Closing the gap is your biggest lever.",
+    severity: null,
+    timestamp: null,
+    what_happened: null,
+    why_it_matters: null,
+    better_action: null,
     evidence: refs,
   };
 }

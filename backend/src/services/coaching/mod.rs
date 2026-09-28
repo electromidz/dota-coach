@@ -23,7 +23,9 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::CoachConfig;
-use crate::domain::coaching::{AnalysisScope, Evidence, Insight, InsightKind, PlanStep};
+use crate::domain::coaching::{
+    AnalysisScope, Evidence, Insight, InsightKind, InsightSeverity, PlanStep,
+};
 use crate::services::llm::{LlmError, LlmProvider, LlmRequest};
 
 #[derive(Debug, thiserror::Error)]
@@ -71,8 +73,10 @@ pub async fn generate(
         return Err(CoachingError::NoEvidence);
     }
 
+    let plan_steps = plan_cap(scope, config.max_plan_steps);
+
     let request = LlmRequest {
-        system: prompt::system(config.max_insights, config.max_plan_steps),
+        system: prompt::system(scope, config.max_insights, plan_steps),
         user: prompt::user(scope, evidence),
         // A structured analysis is one question, not a conversation.
         history: Vec::new(),
@@ -82,12 +86,7 @@ pub async fn generate(
     };
 
     let completion = llm.generate(&request).await?;
-    let draft = parse_analysis(
-        &completion.text,
-        evidence,
-        config.max_insights,
-        config.max_plan_steps,
-    )?;
+    let draft = parse_analysis(&completion.text, evidence, config.max_insights, plan_steps)?;
 
     Ok(Generated {
         summary: draft.summary,
@@ -95,6 +94,22 @@ pub async fn generate(
         plan: draft.plan,
         model: completion.model,
     })
+}
+
+/// How many plan steps a scope is allowed to produce.
+///
+/// One for a single match, and that is the whole feature: the output of reading
+/// one game is **one** thing to work on next. A player handed four things to
+/// change from a forty-minute game changes none of them, and the specification
+/// is explicit that the match analysis ends in a single primary training focus.
+///
+/// A career or role analysis is a different question — it covers many games and a
+/// staged plan is the right answer there — so it keeps the configured cap.
+pub fn plan_cap(scope: AnalysisScope, configured: usize) -> usize {
+    match scope {
+        AnalysisScope::Match => 1,
+        AnalysisScope::Player | AnalysisScope::Role => configured,
+    }
 }
 
 #[derive(Debug)]
@@ -139,6 +154,22 @@ struct RawInsight {
     title: String,
     #[serde(default)]
     explanation: String,
+    /// `major` or `minor`. Anything else is discarded rather than coerced.
+    #[serde(default)]
+    severity: String,
+    /// `m:ss`, and only kept if the cited evidence contains it verbatim.
+    #[serde(default, alias = "time", alias = "at")]
+    timestamp: String,
+    /// The three-part form single-match analysis asks for. `camelCase` aliases
+    /// throughout: the keys are snake_case to match the rest of the API, and a
+    /// model reading a JSON example will still reach for camelCase often enough
+    /// to be worth accepting.
+    #[serde(default, alias = "whatHappened")]
+    what_happened: String,
+    #[serde(default, alias = "whyItMatters")]
+    why_it_matters: String,
+    #[serde(default, alias = "betterAction", alias = "better_play")]
+    better_action: String,
     /// Accepts the key the prompt asks for, plus the two shapes models most
     /// often substitute for it.
     #[serde(default, alias = "evidence_ids", alias = "evidence_id")]
@@ -214,14 +245,39 @@ pub fn parse_analysis(
 
             let title = clamp(raw.title.trim(), 80);
             let explanation = clamp(raw.explanation.trim(), 600);
-            if title.is_empty() || explanation.is_empty() {
+
+            // The three-part form. Each part is shorter than a lone paragraph
+            // would be, because three short answers are the point of splitting
+            // it — a 600-character "what happened" is a paragraph again.
+            let what_happened = optional(&raw.what_happened, 400);
+            let why_it_matters = optional(&raw.why_it_matters, 400);
+            let better_action = optional(&raw.better_action, 400);
+
+            // One shape or the other, and the split form is only a split form
+            // when all three parts are there: two thirds of it is a paragraph
+            // with a heading missing, and the missing third is always the one
+            // the player came for.
+            let structured =
+                what_happened.is_some() && why_it_matters.is_some() && better_action.is_some();
+            if title.is_empty() || (explanation.is_empty() && !structured) {
                 return None;
             }
 
             // A citation says where a claim came from; this says the claim is
             // true to it. Both are needed — a real id attached to an invented
             // figure reads exactly like a verified one.
-            if let Some(invented) = invented_figure(&[&title, &explanation], &refs, evidence) {
+            let prose: Vec<&str> = [
+                Some(title.as_str()),
+                Some(explanation.as_str()),
+                what_happened.as_deref(),
+                why_it_matters.as_deref(),
+                better_action.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+
+            if let Some(invented) = invented_figure(&prose, &refs, evidence) {
                 tracing::warn!(
                     kind = kind.slug(),
                     figure = invented,
@@ -230,11 +286,44 @@ pub fn parse_analysis(
                 return None;
             }
 
+            // And the same rule for timestamps, checked as strings. A moment the
+            // evidence never recorded is a fabricated reading of a replay, which
+            // is worse than a wrong number: a player cannot tell it from a real
+            // one without opening the game.
+            if let Some(invented) = invented_clock(&prose, &refs, evidence) {
+                tracing::warn!(
+                    kind = kind.slug(),
+                    timestamp = invented,
+                    "insight dropped: named a moment the evidence does not contain",
+                );
+                return None;
+            }
+
+            // Stripped rather than fatal: the prose above is already verified, so
+            // an unsupported heading loses the heading and keeps the coaching.
+            let timestamp = optional(&raw.timestamp, 12).filter(|stated| {
+                let grounded = cited_statements(&refs, evidence)
+                    .iter()
+                    .any(|source| source.contains(stated.as_str()));
+                if !grounded {
+                    tracing::warn!(
+                        timestamp = %stated,
+                        "insight timestamp dropped: not present in the cited evidence"
+                    );
+                }
+                grounded
+            });
+
             Some(Insight {
                 kind,
                 kind_label: kind.label(),
                 title,
                 explanation,
+                severity: InsightSeverity::parse(&raw.severity),
+                timestamp,
+                what_happened,
+                why_it_matters,
+                better_action,
                 evidence: refs,
             })
         })
@@ -267,6 +356,14 @@ pub fn parse_analysis(
                 tracing::warn!(
                     figure = invented,
                     "plan step dropped: stated a figure the evidence does not contain",
+                );
+                return None;
+            }
+
+            if let Some(invented) = invented_clock(&[&title, &action], &refs, evidence) {
+                tracing::warn!(
+                    timestamp = invented,
+                    "plan step dropped: named a moment the evidence does not contain",
                 );
                 return None;
             }
@@ -329,17 +426,43 @@ fn cited(refs: EvidenceRefs, known: &HashSet<&str>) -> Vec<String> {
         .collect()
 }
 
-/// The first figure in `texts` that the cited evidence does not contain.
-fn invented_figure(texts: &[&str], refs: &[String], evidence: &[Evidence]) -> Option<f64> {
-    let sources: Vec<&str> = evidence
+/// The statements behind a set of citations.
+fn cited_statements<'a>(refs: &[String], evidence: &'a [Evidence]) -> Vec<&'a str> {
+    evidence
         .iter()
         .filter(|e| refs.iter().any(|id| id == &e.id))
         .map(|e| e.statement.as_str())
-        .collect();
+        .collect()
+}
+
+/// The first figure in `texts` that the cited evidence does not contain.
+fn invented_figure(texts: &[&str], refs: &[String], evidence: &[Evidence]) -> Option<f64> {
+    let sources = cited_statements(refs, evidence);
 
     texts
         .iter()
         .find_map(|text| numbers::unverifiable(text, &sources).first().copied())
+}
+
+/// The first `m:ss` in `texts` that the cited evidence does not contain.
+fn invented_clock(texts: &[&str], refs: &[String], evidence: &[Evidence]) -> Option<String> {
+    let sources = cited_statements(refs, evidence);
+
+    texts.iter().find_map(|text| {
+        numbers::unverifiable_clocks(text, &sources)
+            .into_iter()
+            .next()
+    })
+}
+
+/// A trimmed, clamped field, or `None` when the model left it blank.
+///
+/// `None` rather than an empty string so the absence survives serialization:
+/// a stored `""` and a stored `null` render the same in a template and mean
+/// different things to a reader of the JSON.
+fn optional(value: &str, max_chars: usize) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| clamp(trimmed, max_chars))
 }
 
 /// Find the JSON object in a model answer.
@@ -758,6 +881,227 @@ mod tests {
             draft.summary,
         );
         assert_eq!(draft.insights.len(), 1, "the verified work survives");
+    }
+
+    // -----------------------------------------------------------------------
+    // Single-match analysis: the three-part form, severity, and timestamps
+    // -----------------------------------------------------------------------
+
+    /// Evidence with a timeline in it, as a single-match analysis is given.
+    fn timeline_evidence() -> Vec<Evidence> {
+        [
+            (
+                "match.timeline.deaths",
+                "You died 3 times, at 10:12 to Lion, 18:42 to Axe, and 27:04 to Lion.",
+            ),
+            (
+                "match.timeline.items",
+                "You completed Blink Dagger at 14:22, Black King Bar at 21:44.",
+            ),
+        ]
+        .into_iter()
+        .map(|(id, statement)| Evidence {
+            id: id.to_string(),
+            kind: EvidenceKind::Match,
+            label: "Timeline".into(),
+            statement: statement.to_string(),
+            sample: 1,
+            confidence: Confidence::Insufficient,
+        })
+        .collect()
+    }
+
+    const STRUCTURED: &str = r#"{
+        "kind": "weakness",
+        "title": "You took the fight alone",
+        "severity": "major",
+        "timestamp": "18:42",
+        "what_happened": "You engaged without your team nearby.",
+        "why_it_matters": "They were grouped and you were the only target, so the trade was free for them.",
+        "better_action": "Wait for your team to move together before you commit.",
+        "evidence": ["match.timeline.deaths"]
+    }"#;
+
+    #[test]
+    fn a_match_insight_keeps_its_three_parts_severity_and_timestamp() {
+        let draft = parse_analysis(&answer(STRUCTURED), &timeline_evidence(), 5, 1).unwrap();
+        let insight = &draft.insights[0];
+
+        assert_eq!(insight.severity, Some(InsightSeverity::Major));
+        assert_eq!(insight.timestamp.as_deref(), Some("18:42"));
+        assert_eq!(
+            insight.what_happened.as_deref(),
+            Some("You engaged without your team nearby.")
+        );
+        assert!(insight.why_it_matters.is_some());
+        assert!(insight.better_action.is_some());
+        // The three-part form replaces the paragraph rather than duplicating it.
+        assert!(insight.explanation.is_empty());
+    }
+
+    /// The failure the string match exists for. Both halves of `18:45` appear in
+    /// the cited statement as bare numbers, so the figure checker is satisfied by
+    /// a moment that never happened.
+    #[test]
+    fn a_match_insight_naming_a_moment_the_evidence_never_recorded_is_dropped() {
+        // 18 and 45 both appear in the cited statement as bare numbers (18 from
+        // "18:42", 45 from nothing in particular), so the figure checker passes
+        // this and only the string match catches it.
+        let fabricated = STRUCTURED.replace(
+            "You engaged without your team nearby.",
+            "At 18:45 you engaged without your team nearby.",
+        );
+
+        let error = parse_analysis(&answer(&fabricated), &timeline_evidence(), 5, 1).unwrap_err();
+        assert!(matches!(error, CoachingError::Unusable(_)));
+    }
+
+    /// A timestamp is a heading, not the coaching. Losing it must not lose the
+    /// three verified paragraphs under it.
+    #[test]
+    fn an_unsupported_timestamp_field_is_stripped_without_dropping_the_insight() {
+        // "9:03" is clock-shaped and absent from the evidence, but it appears
+        // only in the `timestamp` field — no prose claims it.
+        let raw = STRUCTURED.replace("\"timestamp\": \"18:42\"", "\"timestamp\": \"9:03\"");
+
+        let draft = parse_analysis(&answer(&raw), &timeline_evidence(), 5, 1).unwrap();
+
+        assert_eq!(draft.insights.len(), 1);
+        assert_eq!(draft.insights[0].timestamp, None);
+        assert!(draft.insights[0].better_action.is_some());
+    }
+
+    #[test]
+    fn a_timestamp_quoted_from_the_evidence_survives_in_the_prose_too() {
+        let quoting = STRUCTURED.replace(
+            "You engaged without your team nearby.",
+            "At 18:42 you engaged without your team nearby.",
+        );
+
+        let draft = parse_analysis(&answer(&quoting), &timeline_evidence(), 5, 1).unwrap();
+        assert!(draft.insights[0]
+            .what_happened
+            .as_deref()
+            .unwrap()
+            .contains("18:42"));
+    }
+
+    /// Two thirds of the three-part form is a paragraph with a heading missing,
+    /// and the missing third is always the advice the player came for.
+    #[test]
+    fn a_partial_three_part_insight_is_not_accepted_as_one() {
+        let no_advice = r#"{
+            "kind": "weakness",
+            "title": "You took the fight alone",
+            "severity": "major",
+            "what_happened": "You engaged without your team nearby.",
+            "why_it_matters": "The trade was free for them.",
+            "evidence": ["match.timeline.deaths"]
+        }"#;
+
+        let error = parse_analysis(&answer(no_advice), &timeline_evidence(), 5, 1).unwrap_err();
+        assert!(matches!(error, CoachingError::Unusable(_)));
+    }
+
+    /// The other shape still works, unchanged: a stored analysis and a
+    /// player-wide answer both use `explanation`.
+    #[test]
+    fn the_paragraph_form_is_unaffected_and_leaves_the_new_fields_empty() {
+        let draft = parse_analysis(&answer(GOOD), &evidence(), 5, 4).unwrap();
+        let insight = &draft.insights[0];
+
+        assert!(!insight.explanation.is_empty());
+        assert_eq!(insight.severity, None);
+        assert_eq!(insight.what_happened, None);
+        assert_eq!(insight.timestamp, None);
+    }
+
+    /// Absent is not "minor". A severity the model did not supply must not be
+    /// invented on its behalf, in either direction.
+    #[test]
+    fn an_unrecognised_severity_is_dropped_rather_than_defaulted() {
+        for value in ["critical", "MODERATE", ""] {
+            let raw = STRUCTURED.replace(
+                "\"severity\": \"major\"",
+                &format!("\"severity\": \"{value}\""),
+            );
+            let draft = parse_analysis(&answer(&raw), &timeline_evidence(), 5, 1).unwrap();
+
+            assert_eq!(
+                draft.insights[0].severity, None,
+                "\"{value}\" should not become a severity"
+            );
+        }
+
+        // And the two real ones are read, case- and padding-insensitively.
+        let minor = STRUCTURED.replace("\"major\"", "\" Minor \"");
+        let draft = parse_analysis(&answer(&minor), &timeline_evidence(), 5, 1).unwrap();
+        assert_eq!(draft.insights[0].severity, Some(InsightSeverity::Minor));
+    }
+
+    #[test]
+    fn camel_cased_keys_are_accepted_because_models_reach_for_them() {
+        let camel = r#"{
+            "kind": "weakness",
+            "title": "You took the fight alone",
+            "severity": "major",
+            "whatHappened": "You engaged without your team nearby.",
+            "whyItMatters": "The trade was free for them.",
+            "betterAction": "Move with your team.",
+            "evidence": ["match.timeline.deaths"]
+        }"#;
+
+        let draft = parse_analysis(&answer(camel), &timeline_evidence(), 5, 1).unwrap();
+        assert!(draft.insights[0].better_action.is_some());
+    }
+
+    /// A plan step that invents a moment is dropped for the same reason an
+    /// insight is: a fabricated replay reading is unfalsifiable to the reader.
+    #[test]
+    fn a_plan_step_naming_an_invented_moment_is_dropped() {
+        let plan = r#"{
+            "title": "Fight selection",
+            "action": "Do not repeat the 31:15 mistake.",
+            "evidence": ["match.timeline.deaths"]
+        }"#;
+
+        let draft = parse_analysis(
+            &answer_with_plan(STRUCTURED, plan),
+            &timeline_evidence(),
+            5,
+            1,
+        )
+        .unwrap();
+
+        assert!(draft.plan.is_empty());
+        assert_eq!(draft.insights.len(), 1, "the verified insight survives");
+    }
+
+    /// The single primary training focus, enforced as a number rather than asked
+    /// for in the prompt: a player handed four things to change from one game
+    /// changes none of them.
+    #[test]
+    fn a_match_analysis_produces_exactly_one_plan_step() {
+        let step = r#"{"title": "T", "action": "A", "evidence": ["match.timeline.deaths"]}"#;
+        let many = std::iter::repeat_n(step, 4).collect::<Vec<_>>().join(",");
+
+        let draft = parse_analysis(
+            &answer_with_plan(STRUCTURED, &many),
+            &timeline_evidence(),
+            5,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(draft.plan.len(), 1);
+        assert_eq!(draft.plan[0].position, 1);
+    }
+
+    #[test]
+    fn the_plan_cap_is_one_for_a_match_and_configured_for_everything_else() {
+        assert_eq!(plan_cap(AnalysisScope::Match, 4), 1);
+        assert_eq!(plan_cap(AnalysisScope::Role, 4), 4);
+        assert_eq!(plan_cap(AnalysisScope::Player, 4), 4);
     }
 
     #[test]

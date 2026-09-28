@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
 
 import { EvidenceList } from "@/components/coach/EvidenceList";
 import { InsightCard } from "@/components/coach/InsightCard";
@@ -9,9 +8,9 @@ import { TrainingPlan } from "@/components/coach/TrainingPlan";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { ApiError } from "@/lib/api";
 import { formatGeneratedAt } from "@/lib/coach";
 import type { CoachResponse } from "@/lib/types";
+import { useGeneration } from "@/lib/useGeneration";
 
 /**
  * A coaching analysis, with the control that generates one.
@@ -31,30 +30,10 @@ export function Analysis({
   generateLabel: string;
   emptyHint: string;
 }) {
-  const [current, setCurrent] = useState(data);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  /** A lapsed trial is a state, not a failure, and gets its own treatment. */
-  const [paywalled, setPaywalled] = useState(false);
-
-  async function generate() {
-    setBusy(true);
-    setError(null);
-    setPaywalled(false);
-    try {
-      setCurrent(await onGenerate());
-    } catch (e) {
-      if (e instanceof ApiError && e.isPaymentRequired) {
-        setPaywalled(true);
-        return;
-      }
-      setError(
-        e instanceof ApiError ? e.message : "Could not reach the coach.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
+  const { current, busy, error, paywalled, generate } = useGeneration(
+    data,
+    onGenerate,
+  );
 
   const { analysis } = current;
 

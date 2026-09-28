@@ -40,8 +40,10 @@ use crate::services::coaching::{
     CoachingError,
 };
 use crate::services::coaching_session;
+use crate::services::dota::ProviderError;
 use crate::services::events;
 use crate::services::llm::LlmError;
+use crate::services::match_analysis;
 use crate::services::player_model::{self, patterns, ModelInputs};
 use crate::services::progress as progress_engine;
 use crate::services::training::{self, SelectionInputs};
@@ -1515,7 +1517,69 @@ async fn match_evidence(
         focus_metrics: metrics.as_ref(),
     });
 
+    // The timeline last, after the totals it explains. Order is deliberate: the
+    // model reads the list top to bottom, and "you finished 8/3/12" is the
+    // context for "you died at 10:45, twenty-five seconds after respawning"
+    // rather than the other way round.
+    let mut evidence = evidence;
+    evidence.extend(timeline(state, player, match_).await);
+
     Ok((evidence, detected))
+}
+
+/// The second-by-second half of one match's evidence.
+///
+/// Never fails. Every way this can go wrong produces a statement saying so, in
+/// the same voice as a measurement, because that is the only way the absence
+/// reaches the model at all — and a model handed match totals and silence will
+/// narrate a timeline it was never shown.
+///
+/// This is also why a STRATZ outage cannot break a match page. The provider is
+/// asked here and nowhere else in the request, and the worst answer it can give
+/// is one sentence explaining that the deep reading is missing.
+async fn timeline(state: &AppState, player: &DotaPlayer, match_: &Match) -> Vec<Evidence> {
+    let provider = state.match_facts.as_ref();
+    let name = provider.name();
+
+    if !provider.is_configured() {
+        return vec![match_analysis::unavailable(
+            match_analysis::Unavailable::NotConfigured,
+            name,
+        )];
+    }
+
+    // Valve's match id, not our row id: the provider keys matches the way Valve
+    // does, and the account id is the player's own at the provider.
+    let reason = match provider
+        .get_match_facts(match_.match_id, player.dota_account_id)
+        .await
+    {
+        Ok(facts) if facts.has_timeline() => return match_analysis::build(&facts),
+        // The provider has the match and Valve never parsed the replay, which is
+        // the common case for public games rather than an error.
+        Ok(_) => match_analysis::Unavailable::NotParsed,
+        // Not a 404 for this request. The match is the player's own and this
+        // application has it; only the second provider does not.
+        Err(ProviderError::NotFound) => {
+            tracing::info!(
+                match_id = match_.match_id,
+                provider = name,
+                "provider does not carry this match for this player"
+            );
+            match_analysis::Unavailable::NotFound
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                match_id = match_.match_id,
+                provider = name,
+                "match timeline unavailable; falling back to the stored totals"
+            );
+            match_analysis::Unavailable::ProviderFailed
+        }
+    };
+
+    vec![match_analysis::unavailable(reason, name)]
 }
 
 /// Translate a coaching failure into the HTTP answer it deserves.

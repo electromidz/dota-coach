@@ -3,7 +3,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::domain::coaching::{
-    AnalysisScope, CoachingAnalysis, Evidence, Insight, InsightKind, PlanStep,
+    AnalysisScope, CoachingAnalysis, Evidence, Insight, InsightKind, InsightSeverity, PlanStep,
 };
 use crate::domain::role::CoachableRole;
 
@@ -83,14 +83,21 @@ pub async fn insert(pool: &PgPool, analysis: &NewAnalysis<'_>) -> Result<Uuid, s
     for (position, insight) in analysis.insights.iter().enumerate() {
         sqlx::query(
             "INSERT INTO coaching_insights
-                 (analysis_id, position, kind, title, explanation, evidence_refs)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+                 (analysis_id, position, kind, title, explanation, severity,
+                  timestamp, what_happened, why_it_matters, better_action,
+                  evidence_refs)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(id)
         .bind(position as i32)
         .bind(insight.kind.slug())
         .bind(&insight.title)
         .bind(&insight.explanation)
+        .bind(insight.severity.map(InsightSeverity::slug))
+        .bind(&insight.timestamp)
+        .bind(&insight.what_happened)
+        .bind(&insight.why_it_matters)
+        .bind(&insight.better_action)
         .bind(&insight.evidence)
         .execute(&mut *tx)
         .await?;
@@ -229,6 +236,11 @@ struct InsightRow {
     kind: String,
     title: String,
     explanation: String,
+    severity: Option<String>,
+    timestamp: Option<String>,
+    what_happened: Option<String>,
+    why_it_matters: Option<String>,
+    better_action: Option<String>,
     evidence_refs: Vec<String>,
 }
 
@@ -242,7 +254,8 @@ async fn hydrate(
     };
 
     let insights = sqlx::query_as::<_, InsightRow>(
-        "SELECT kind, title, explanation, evidence_refs
+        "SELECT kind, title, explanation, severity, timestamp,
+                what_happened, why_it_matters, better_action, evidence_refs
            FROM coaching_insights
           WHERE analysis_id = $1
           ORDER BY position",
@@ -282,6 +295,16 @@ async fn hydrate(
                     kind_label: kind.label(),
                     title: i.title,
                     explanation: i.explanation,
+                    // A stored severity outside the two the domain knows is
+                    // dropped rather than mapped, the same as an unknown kind:
+                    // the column constraint makes it impossible, and inventing a
+                    // value for the impossible case is how a bad write becomes a
+                    // confident display.
+                    severity: i.severity.as_deref().and_then(InsightSeverity::parse),
+                    timestamp: i.timestamp,
+                    what_happened: i.what_happened,
+                    why_it_matters: i.why_it_matters,
+                    better_action: i.better_action,
                     evidence: i.evidence_refs,
                 })
             })

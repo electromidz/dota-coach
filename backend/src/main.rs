@@ -12,6 +12,10 @@ use dota_coach_backend::services::billing;
 use dota_coach_backend::services::dota::opendota::OpenDotaProvider;
 use dota_coach_backend::services::hero_meta::opendota::OpenDotaHeroMetaProvider;
 use dota_coach_backend::services::llm::openai::OpenAiLlmProvider;
+use dota_coach_backend::services::match_facts::stratz::StratzMatchFactsProvider;
+use dota_coach_backend::services::match_facts::{
+    MatchFactsProvider, UnconfiguredMatchFactsProvider,
+};
 use dota_coach_backend::services::payments::nowpayments::NowPaymentsProvider;
 use dota_coach_backend::services::payments::{PaymentProvider, UnconfiguredPaymentProvider};
 use dota_coach_backend::state::{AppState, Providers};
@@ -84,6 +88,25 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.heroes.meta_weights,
     );
 
+    // Single-match analysis is the only caller. Optional in the same way billing
+    // is: without a token the product runs in full and one section of one page
+    // is shallower, which is a better failure than a match page that cannot
+    // load because a second provider is unreachable.
+    let match_facts: Arc<dyn MatchFactsProvider> =
+        match StratzMatchFactsProvider::new(&config.stratz, pool.clone())? {
+            Some(provider) => {
+                tracing::info!(url = %config.stratz.base_url, "stratz match-facts provider ready");
+                provider
+            }
+            None => {
+                tracing::warn!(
+                    "STRATZ_API_TOKEN not set - single-match analysis will fall back to stored \
+                     match totals and will say that no timeline is available"
+                );
+                Arc::new(UnconfiguredMatchFactsProvider)
+            }
+        };
+
     let llm = OpenAiLlmProvider::new(
         &config.llm,
         std::time::Duration::from_secs(config.coach.request_timeout_seconds),
@@ -132,6 +155,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             steam_verifier: steam,
             benchmarks,
             hero_meta,
+            match_facts,
             llm,
             payments,
         },

@@ -969,11 +969,43 @@ export interface Evidence {
   confidence: Confidence;
 }
 
+/**
+ * How much a single-match mistake appears to have cost.
+ *
+ * `null` means the model did not say, which is deliberately not the same as
+ * `"minor"` — the backend refuses to invent one.
+ */
+export type InsightSeverity = "major" | "minor";
+
+/**
+ * One interpreted observation, in one of two shapes.
+ *
+ * `explanation` is the paragraph form, used by the career and role analyses.
+ * A single-match insight instead splits the same claim into `what_happened`,
+ * `why_it_matters` and `better_action`, because those are three different
+ * questions and a paragraph answering all of them answers the third one worst.
+ *
+ * Exactly one shape is present. The backend drops an insight carrying neither,
+ * and an insight carrying only part of the split form, so a renderer does not
+ * have to handle a half-filled one.
+ */
 export interface Insight {
   kind: InsightKind;
   kind_label: string;
   title: string;
+  /** Empty when the three fields below carry the interpretation instead. */
   explanation: string;
+  severity: InsightSeverity | null;
+  /**
+   * The moment this is about, as `m:ss`.
+   *
+   * Only ever a timestamp that appeared verbatim in the cited evidence — the
+   * backend strips one it cannot ground. So this is safe to render as a fact.
+   */
+  timestamp: string | null;
+  what_happened: string | null;
+  why_it_matters: string | null;
+  better_action: string | null;
   /** Evidence ids, every one guaranteed to exist in the analysis. */
   evidence: string[];
 }

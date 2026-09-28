@@ -47,7 +47,12 @@ pub enum EvidenceKind {
 }
 
 /// One measured fact, with a stable id the model can cite.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+///
+/// `PartialEq` so a test can assert that identical inputs compose identical
+/// evidence. That is not a convenience: the stored analysis is keyed by a hash
+/// of these statements, so evidence that is not a pure function of its inputs
+/// would quietly make every cache lookup a miss.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Evidence {
     /// Stable and human-readable — `benchmark.gold_per_min`, `match.deaths`.
     /// Stability matters: it is what a stored insight refers to.
@@ -115,13 +120,94 @@ impl InsightKind {
     }
 }
 
+/// How much a single-match mistake appears to have cost.
+///
+/// A judgement, and labelled as one. It exists because a list in which every
+/// item is equally urgent is a list nobody acts on — the product's job is to say
+/// which three things mattered, not to enumerate everything that happened.
+///
+/// Deliberately two values, not five. A scale finer than "this is the thing to
+/// fix" versus "this is worth knowing" would be precision the evidence cannot
+/// support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InsightSeverity {
+    Major,
+    Minor,
+}
+
+impl InsightSeverity {
+    pub const ALL: [InsightSeverity; 2] = [InsightSeverity::Major, InsightSeverity::Minor];
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            InsightSeverity::Major => "major",
+            InsightSeverity::Minor => "minor",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            InsightSeverity::Major => "Major",
+            InsightSeverity::Minor => "Minor",
+        }
+    }
+
+    /// `None` for anything that is not one of the two. Never coerced to a
+    /// default: an unrecognised severity means the model did not answer the
+    /// question, and inventing "minor" on its behalf is a claim of its own.
+    pub fn parse(value: &str) -> Option<Self> {
+        let normalized = value.trim().to_lowercase();
+        Self::ALL.into_iter().find(|s| s.slug() == normalized)
+    }
+}
+
 /// One interpreted observation.
+///
+/// # The two shapes
+///
+/// `explanation` is the original, and is what a player-wide or role analysis
+/// produces: one paragraph of interpretation.
+///
+/// Single-match analysis asks the same model for the same claim split into three
+/// — what happened, why it mattered, what to do instead — because those are
+/// three different questions and a paragraph answering all of them usually
+/// answers the third one worst. The fields are optional rather than a second
+/// type: an insight is an insight, and a stored analysis written before the split
+/// existed must keep deserializing.
+///
+/// Exactly one of the two shapes has to be present; the validator drops an
+/// insight carrying neither.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Insight {
     pub kind: InsightKind,
     pub kind_label: &'static str,
     pub title: String,
+    /// The single-paragraph form. May be empty when the three fields below carry
+    /// the interpretation instead.
+    #[serde(default)]
     pub explanation: String,
+    /// How much this appears to have cost. `None` when the model did not say,
+    /// which is not the same as "minor".
+    #[serde(default)]
+    pub severity: Option<InsightSeverity>,
+    /// The moment this is about, as `m:ss`.
+    ///
+    /// Verified, not trusted: a timestamp that does not appear verbatim in the
+    /// cited evidence is stripped before the insight is stored. An invented
+    /// timestamp is the single most convincing kind of fabrication this pipeline
+    /// can emit, because it looks exactly like a reading from a replay.
+    #[serde(default)]
+    pub timestamp: Option<String>,
+    /// The concrete event.
+    #[serde(default)]
+    pub what_happened: Option<String>,
+    /// The gameplay consequence.
+    #[serde(default)]
+    pub why_it_matters: Option<String>,
+    /// The practical alternative.
+    #[serde(default)]
+    pub better_action: Option<String>,
     /// Evidence ids, every one of which is guaranteed to exist in the analysis
     /// it belongs to. An insight with none is never stored.
     pub evidence: Vec<String>,

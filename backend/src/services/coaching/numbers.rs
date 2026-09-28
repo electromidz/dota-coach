@@ -135,6 +135,72 @@ pub fn unverifiable(text: &str, sources: &[&str]) -> Vec<f64> {
         .collect()
 }
 
+/// Every `m:ss` timestamp in `text` that does not appear verbatim in `sources`.
+///
+/// # Why this exists on top of [`unverifiable`]
+///
+/// The figure check above splits a timestamp into its parts: `18:42` reads as
+/// the two numbers 18 and 42, because a colon is a token boundary. That is fine
+/// for arithmetic and useless for timestamps — the evidence for a single match is
+/// full of small integers (a death count, a threshold, a percentage), so a
+/// fabricated `18:45` will frequently find both of its halves somewhere in the
+/// cited text and pass.
+///
+/// A timestamp is the most convincing thing this pipeline can fabricate. "You
+/// died at 18:42 with no defensive cooldown" is indistinguishable, to a reader,
+/// from a genuine reading of a replay, and a player who checks it and finds
+/// nothing there has been told a confident falsehood about their own game. So
+/// timestamps are matched as strings, exactly, against the evidence that was
+/// cited — no rounding, no nearest-match, no tolerance.
+pub fn unverifiable_clocks(text: &str, sources: &[&str]) -> Vec<String> {
+    clocks(text)
+        .into_iter()
+        .filter(|stated| {
+            !sources
+                .iter()
+                .any(|source| source.contains(stated.as_str()))
+        })
+        .collect()
+}
+
+/// Pull every `m:ss` out of a piece of text.
+///
+/// One or more digits, a colon, then exactly two digits — the shape every
+/// timestamp in the evidence is composed at, by `domain::match_facts::clock`. A
+/// stricter reading than the figure scanner uses, because a false positive here
+/// would discard honest work.
+fn clocks(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if !chars[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+
+        let start = i;
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            i += 1;
+        }
+
+        // `m:ss` and nothing looser. Three trailing digits or one are not a
+        // clock, and treating them as one would reject text that is fine.
+        let has_clock = chars.get(i) == Some(&':')
+            && chars.get(i + 1).is_some_and(char::is_ascii_digit)
+            && chars.get(i + 2).is_some_and(char::is_ascii_digit)
+            && !chars.get(i + 3).is_some_and(char::is_ascii_digit);
+
+        if has_clock {
+            out.push(chars[start..i + 3].iter().collect());
+            i += 3;
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +277,64 @@ mod tests {
         assert_eq!(unverifiable("You die 4.14 times.", &[]), vec![4.14]);
         // Except when it states no figure at all.
         assert!(unverifiable("You die too often.", &[]).is_empty());
+    }
+
+    const TIMELINE: &[&str] = &[
+        "You died 3 times, at 10:12 to Lion, 18:42 to Axe, and 27:04 to Lion.",
+        "You completed Blink Dagger at 14:22, Black King Bar at 21:44.",
+    ];
+
+    #[test]
+    fn a_timestamp_quoted_from_the_evidence_is_verified() {
+        assert!(unverifiable_clocks("At 18:42 you took a fight alone.", TIMELINE).is_empty());
+        assert!(
+            unverifiable_clocks("Your Blink at 14:22 came after the 10:12 death.", TIMELINE)
+                .is_empty()
+        );
+    }
+
+    /// The failure the string match exists for: both halves of `18:45` appear in
+    /// the evidence as bare numbers (18 from `18:42`, 45 from nowhere in
+    /// particular), so the figure checker can be satisfied by a timestamp that
+    /// describes no event in the match.
+    #[test]
+    fn a_timestamp_the_evidence_never_stated_is_caught() {
+        assert_eq!(
+            unverifiable_clocks("You died at 18:45 without buyback.", TIMELINE),
+            vec!["18:45".to_string()],
+        );
+        assert_eq!(
+            unverifiable_clocks("The fight at 32:10 decided it.", TIMELINE),
+            vec!["32:10".to_string()],
+        );
+    }
+
+    /// No tolerance and no nearest-match. A timestamp one second off describes a
+    /// different moment, and "close enough" is how a fabrication gets through.
+    #[test]
+    fn a_timestamp_near_a_real_one_is_not_close_enough() {
+        assert_eq!(
+            unverifiable_clocks("At 18:41 you were caught.", TIMELINE),
+            vec!["18:41".to_string()],
+        );
+    }
+
+    #[test]
+    fn only_clock_shaped_text_is_read_as_a_timestamp() {
+        // Plain numbers, ratios and scorelines are the figure checker's problem,
+        // not this one — reading them as clocks would discard honest prose.
+        assert!(unverifiable_clocks("You finished 8/3/12 with 612 GPM.", TIMELINE).is_empty());
+        assert!(unverifiable_clocks("Around 40% of the game.", TIMELINE).is_empty());
+        assert!(unverifiable_clocks("", TIMELINE).is_empty());
+        // Three trailing digits are not seconds.
+        assert!(unverifiable_clocks("Version 1:234 of the build.", TIMELINE).is_empty());
+    }
+
+    #[test]
+    fn a_claim_citing_nothing_can_verify_no_timestamp() {
+        assert_eq!(
+            unverifiable_clocks("You died at 18:42.", &[]),
+            vec!["18:42".to_string()],
+        );
     }
 }

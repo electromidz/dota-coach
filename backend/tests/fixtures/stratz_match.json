@@ -1,0 +1,144 @@
+{
+  "data": {
+    "match": {
+      "id": 7500000001,
+      "didRadiantWin": true,
+      "durationSeconds": 2520,
+      "startDateTime": 1700000000,
+      "parsedDateTime": 1700003000,
+      "towerDeaths": [
+        { "time": 1140, "isRadiant": false },
+        { "time": 1680, "isRadiant": true },
+        { "time": 2280, "isRadiant": false }
+      ],
+      "playbackData": {
+        "roshanEvents": [{ "time": 2100 }, { "time": 1500 }]
+      },
+      "players": [
+        {
+          "steamAccountId": 86745912,
+          "isRadiant": true,
+          "isVictory": true,
+          "heroId": 35,
+          "lane": "SAFE_LANE",
+          "position": "POSITION_1",
+          "kills": 8,
+          "deaths": 3,
+          "assists": 12,
+          "goldPerMinute": 612,
+          "experiencePerMinute": 701,
+          "numLastHits": 380,
+          "numDenies": 14,
+          "networth": 24500,
+          "level": 25,
+          "heroDamage": 41200,
+          "towerDamage": 6200,
+          "heroHealing": 0,
+          "stats": {
+            "networthPerMinute": [0, 320, 880, 1540, 2210, 2980],
+            "lastHitsPerMinute": [0, 4, 7, 9, 8, 11],
+            "deathEvents": [
+              {
+                "time": 612,
+                "attacker": 26,
+                "goldLost": 320,
+                "goldFed": 240,
+                "timeDead": 18,
+                "isBurst": true,
+                "hasHealAvailable": false,
+                "isEngagedOnDeath": false,
+                "isAttemptTpOut": false
+              },
+              {
+                "time": 1122,
+                "attacker": 2,
+                "goldLost": 610,
+                "goldFed": 410,
+                "timeDead": 31,
+                "isBurst": false,
+                "hasHealAvailable": true,
+                "isEngagedOnDeath": true,
+                "isAttemptTpOut": true
+              },
+              {
+                "time": 1871,
+                "attacker": 999,
+                "goldLost": 980,
+                "goldFed": 520,
+                "timeDead": 48,
+                "isBurst": false,
+                "hasHealAvailable": false,
+                "isEngagedOnDeath": true,
+                "isAttemptTpOut": false
+              }
+            ],
+            "itemPurchases": [
+              { "time": 862, "itemId": 1 },
+              { "time": -90, "itemId": 44 },
+              { "time": 1304, "itemId": 116 }
+            ]
+          }
+        },
+        {
+          "steamAccountId": 99999999,
+          "isRadiant": false,
+          "isVictory": false,
+          "heroId": 26,
+          "lane": "MID_LANE",
+          "position": "POSITION_2",
+          "kills": 4,
+          "deaths": 9,
+          "assists": 6,
+          "goldPerMinute": 402,
+          "experiencePerMinute": 498,
+          "numLastHits": 210,
+          "numDenies": 6,
+          "networth": 16300,
+          "level": 21,
+          "heroDamage": 22800,
+          "towerDamage": 900,
+          "heroHealing": 0,
+          "stats": {
+            "networthPerMinute": [0, 280, 640, 1100],
+            "lastHitsPerMinute": [0, 3, 5, 6],
+            "deathEvents": [
+              {
+                "time": 705,
+                "attacker": 35,
+                "goldLost": 210,
+                "goldFed": 180,
+                "timeDead": 16,
+                "isBurst": false,
+                "hasHealAvailable": false,
+                "isEngagedOnDeath": true,
+                "isAttemptTpOut": false
+              }
+            ],
+            "itemPurchases": [{ "time": 540, "itemId": 116 }]
+          }
+        },
+        {
+          "steamAccountId": null,
+          "isRadiant": false,
+          "isVictory": false,
+          "heroId": 2,
+          "lane": "OFF_LANE",
+          "position": "POSITION_3",
+          "kills": 2,
+          "deaths": 7,
+          "assists": 9,
+          "goldPerMinute": 341,
+          "experiencePerMinute": 420,
+          "numLastHits": 150,
+          "numDenies": 3,
+          "networth": 12800,
+          "level": 19,
+          "heroDamage": 18400,
+          "towerDamage": 400,
+          "heroHealing": 0,
+          "stats": null
+        }
+      ]
+    }
+  }
+}

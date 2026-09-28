@@ -14,21 +14,30 @@ import type { Evidence, PlanStep } from "@/lib/types";
 export function TrainingPlan({
   plan,
   evidence,
+  heading = "Your training plan",
 }: {
   plan: PlanStep[];
   evidence: Evidence[];
+  /**
+   * Overridden by the match page, where the backend produces exactly one step
+   * and it is the single primary training focus rather than the first of
+   * several. Calling that "step 1" of a one-step plan implies a step 2.
+   */
+  heading?: string;
 }) {
   if (plan.length === 0) return null;
 
   const labels = new Map(evidence.map((item) => [item.id, item.label]));
+  /** A single step is *the* focus, so it is not numbered. */
+  const numbered = plan.length > 1;
 
   return (
     <section className="flex flex-col gap-3">
       <h3 className="font-display text-sm uppercase tracking-[0.2em] text-ink-faint">
-        Your training plan
+        {heading}
       </h3>
 
-      <Card className="flex flex-col gap-0 p-0">
+      <Card className="flex flex-col gap-0 p-0" glow={numbered ? undefined : "function"}>
         <ol className="flex flex-col">
           {plan.map((step, index) => (
             <li
@@ -38,15 +47,25 @@ export function TrainingPlan({
               }
             >
               <div className="flex gap-3">
-                <span
-                  aria-hidden
-                  className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full border border-keyword/40 font-mono text-xs text-keyword"
-                >
-                  {step.position}
-                </span>
+                {numbered ? (
+                  <span
+                    aria-hidden
+                    className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full border border-keyword/40 font-mono text-xs text-keyword"
+                  >
+                    {step.position}
+                  </span>
+                ) : null}
 
                 <div className="flex min-w-0 flex-col gap-1">
-                  <p className="text-sm text-ink">{step.title}</p>
+                  <p
+                    className={
+                      numbered
+                        ? "text-sm text-ink"
+                        : "font-display text-base text-ink"
+                    }
+                  >
+                    {step.title}
+                  </p>
                   <p className="text-xs leading-relaxed text-ink-muted">
                     {step.action}
                   </p>

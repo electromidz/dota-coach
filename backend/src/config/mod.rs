@@ -21,6 +21,7 @@ pub struct Config {
     pub cors_origins: Vec<String>,
     pub auth: AuthConfig,
     pub dota: DotaConfig,
+    pub stratz: StratzConfig,
     pub heroes: HeroConfig,
     pub roles: RoleConfig,
     pub coach: CoachConfig,
@@ -453,6 +454,47 @@ fn validate_focus_weights(weights: &FocusWeights) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// STRATZ, the source of truth for a single match's timeline.
+///
+/// Separate from [`DotaConfig`] rather than folded into it, because the two are
+/// separate providers with separate credentials, separate rate limits and
+/// separate failure modes — and because a deployment may legitimately run with
+/// one and not the other. Without a token the product keeps working; single-match
+/// analysis falls back to the stored aggregate and says so.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct StratzConfig {
+    /// The GraphQL endpoint. One URL, not a base path: GraphQL has one.
+    pub base_url: String,
+    /// Bearer token from <https://stratz.com/api>. Absent means the provider is
+    /// not configured, which is a supported state rather than a broken one.
+    pub api_token: Option<String>,
+    /// STRATZ identifies API traffic by user agent. Configurable because it is
+    /// the provider's requirement to change, not ours.
+    pub user_agent: String,
+    pub request_timeout_seconds: u64,
+    /// How long a *parsed* match's timeline may be reused before it is fetched
+    /// again.
+    ///
+    /// Generous on purpose: a finished, parsed match is immutable, so this only
+    /// bounds how long a normalization bug survives in storage. The short TTL
+    /// that matters is the one below.
+    pub cache_ttl_hours: i64,
+    /// How long an *unparsed* match's reading may be reused.
+    ///
+    /// Much shorter, because this is the one answer that can improve on its own:
+    /// Valve parses replays after the fact, so "no timeline available" is a
+    /// statement about now rather than about the match. Re-asking occasionally
+    /// is how a match that has since been parsed gets its timeline.
+    pub unparsed_cache_ttl_hours: i64,
+}
+
+impl StratzConfig {
+    pub fn is_configured(&self) -> bool {
+        self.api_token.as_ref().is_some_and(|t| !t.is_empty())
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct LlmConfig {
@@ -651,6 +693,17 @@ impl Config {
                 request_timeout_seconds: parsed("DOTA_API_TIMEOUT_SECONDS", 10)?,
                 benchmark_ttl_hours: parsed("BENCHMARK_TTL_HOURS", 24)?,
                 significant_only: parsed("DOTA_SIGNIFICANT_ONLY", false)?,
+            },
+            stratz: StratzConfig {
+                base_url: optional("STRATZ_API_URL", "https://api.stratz.com/graphql"),
+                api_token: env::var("STRATZ_API_TOKEN").ok().filter(|s| !s.is_empty()),
+                user_agent: optional("STRATZ_USER_AGENT", "STRATZ_API"),
+                // Higher than the OpenDota default: one STRATZ call returns a
+                // whole match including ten players' event streams, and it is
+                // fetched once per match rather than on every page.
+                request_timeout_seconds: parsed("STRATZ_API_TIMEOUT_SECONDS", 20)?,
+                cache_ttl_hours: parsed("STRATZ_CACHE_TTL_HOURS", 720)?,
+                unparsed_cache_ttl_hours: parsed("STRATZ_UNPARSED_CACHE_TTL_HOURS", 6)?,
             },
             heroes: HeroConfig::from_env()?,
             roles: RoleConfig::from_env()?,
@@ -860,6 +913,14 @@ mod tests {
                 request_timeout_seconds: 10,
                 benchmark_ttl_hours: 24,
                 significant_only: false,
+            },
+            stratz: StratzConfig {
+                base_url: "https://api.stratz.com/graphql".into(),
+                api_token: None,
+                user_agent: "STRATZ_API".into(),
+                request_timeout_seconds: 20,
+                cache_ttl_hours: 720,
+                unparsed_cache_ttl_hours: 6,
             },
             heroes: HeroConfig::from_env().unwrap(),
             roles: RoleConfig::from_env().unwrap(),

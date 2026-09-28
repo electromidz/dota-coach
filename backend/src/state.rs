@@ -12,6 +12,7 @@ use crate::services::cache::{CoachingCache, NoCache};
 use crate::services::dota::DotaDataProvider;
 use crate::services::hero_meta::HeroMetaProvider;
 use crate::services::llm::LlmProvider;
+use crate::services::match_facts::MatchFactsProvider;
 use crate::services::payments::PaymentProvider;
 use crate::services::voucher::RateLimiter;
 
@@ -34,6 +35,14 @@ pub struct AppState {
     /// What the wider player base is doing. Degradable: Hero Intelligence
     /// still answers from the player's own history when this is down.
     pub hero_meta: Arc<dyn HeroMetaProvider>,
+    /// One match's timeline, second by second. STRATZ in production.
+    ///
+    /// Separate from `dota` on purpose: the two are different providers with
+    /// different credentials and different rate limits, and an outage here must
+    /// cost one section of one page rather than the match list with it. When
+    /// nothing is configured, this is the null implementation and single-match
+    /// analysis says so rather than failing.
+    pub match_facts: Arc<dyn MatchFactsProvider>,
     /// Interpretation only. Every number it is shown was computed here first,
     /// and everything it returns is validated against that evidence.
     pub llm: Arc<dyn LlmProvider>,
@@ -101,6 +110,7 @@ pub struct Providers {
     pub steam_verifier: Arc<dyn SteamVerifier>,
     pub benchmarks: Arc<dyn BenchmarkProvider>,
     pub hero_meta: Arc<dyn HeroMetaProvider>,
+    pub match_facts: Arc<dyn MatchFactsProvider>,
     pub llm: Arc<dyn LlmProvider>,
     pub payments: Arc<dyn PaymentProvider>,
 }
@@ -120,6 +130,7 @@ impl AppState {
             steam_verifier: providers.steam_verifier,
             benchmarks: providers.benchmarks,
             hero_meta: providers.hero_meta,
+            match_facts: providers.match_facts,
             llm: providers.llm,
             payments: providers.payments,
             redeem_rate_limiter: Arc::new(RateLimiter::new()),
