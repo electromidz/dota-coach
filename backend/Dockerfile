@@ -20,6 +20,11 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs \
 # `sqlx::migrate!` embeds this directory at compile time, so it has to be
 # present before the build, not just at runtime.
 COPY migrations ./migrations
+# Copied, not skipped: cargo auto-detects `build.rs` and silently has no build
+# script when the file is absent. Leaving it out would build an image whose
+# embedded migration list is tracked differently from a native `cargo build` —
+# two build paths disagreeing about which migrations exist, with nothing to say so.
+COPY build.rs ./
 COPY src ./src
 # Touch so cargo rebuilds the binary rather than reusing the stub. Only the
 # serving binary is built: src/bin/backfill_subscriptions.rs is a one-off
