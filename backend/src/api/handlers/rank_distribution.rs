@@ -25,7 +25,7 @@
 use axum::extract::State;
 use axum::Json;
 
-use crate::api::extract::CurrentUser;
+use crate::api::extract::EntitledUser;
 use crate::api::handlers::benchmark::player_values;
 use crate::api::handlers::stats::load_linked_player;
 use crate::domain::benchmark::BenchmarkContext;
@@ -47,13 +47,14 @@ use crate::state::AppState;
     responses(
         (status = 200, description = "One placement per bracket, Herald first", body = RankDistribution),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn get(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
 ) -> AppResult<Json<RankDistribution>> {
     let player = load_linked_player(&state, &user).await?;
     let scope = MatchScope::competitive(state.config.roles.analysis_match_limit);

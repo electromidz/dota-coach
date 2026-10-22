@@ -16,7 +16,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::api::extract::{AppPath, AppQuery, CurrentUser};
+use crate::api::extract::{AppPath, AppQuery, EntitledUser};
 use crate::api::handlers::coach;
 use crate::domain::coaching_session::{CoachingSession, SessionSummary};
 use crate::domain::player::DotaPlayer;
@@ -83,13 +83,14 @@ Omit to read the role currently being coached.",
         (status = 200, description = "One page of coaching history, newest first", body = SessionHistoryResponse),
         (status = 400, description = "Invalid pagination or role slug", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked, or no role chosen yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn list(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
     AppQuery(query): AppQuery<HistoryQuery>,
 ) -> AppResult<Json<SessionHistoryResponse>> {
     let player = load_linked_player(&state, &user).await?;
@@ -132,13 +133,14 @@ figures — the numbers it shows are the numbers that were measured when it was 
         (status = 200, description = "The stored snapshot", body = SessionResponse),
         (status = 404, description = "No such session, or it belongs to another player", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn get(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
     AppPath(id): AppPath<Uuid>,
 ) -> AppResult<Json<SessionResponse>> {
     let player = load_linked_player(&state, &user).await?;
@@ -202,13 +204,14 @@ a failure.",
         (status = 200, description = "The comparison and the trend behind it", body = ProgressResponse),
         (status = 400, description = "Unknown role slug", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked, or no role chosen yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn progress(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
     AppQuery(query): AppQuery<ProgressQuery>,
 ) -> AppResult<Json<ProgressResponse>> {
     let player = load_linked_player(&state, &user).await?;

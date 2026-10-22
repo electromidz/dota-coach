@@ -2,6 +2,7 @@
 
 import { Suspense, useEffect, useState } from "react";
 
+import { Paywall } from "@/components/billing/Paywall";
 import { EstablishedRankPanel } from "@/components/calibrating/EstablishedRankPanel";
 import { MatchHistoryTable } from "@/components/calibrating/MatchHistoryTable";
 import { MethodologyNote } from "@/components/calibrating/MethodologyNote";
@@ -35,6 +36,7 @@ export function Calibrating() {
    *  to explain, not a failure to apologise for, so it is kept apart from a
    *  real error. */
   const [needsSync, setNeedsSync] = useState(false);
+  const [paywalled, setPaywalled] = useState(false);
   /** Fetched separately, because it is the only part of this screen that
    *  needs the benchmark provider. A `null` here empties one card; it never
    *  costs the rank, the trajectory or the momentum curve. */
@@ -53,6 +55,10 @@ export function Calibrating() {
 
         if (e instanceof ApiError && e.code === "PRECONDITION_UNMET") {
           setNeedsSync(true);
+          return;
+        }
+        if (e instanceof ApiError && e.isPaymentRequired) {
+          setPaywalled(true);
           return;
         }
         setError(
@@ -89,6 +95,14 @@ export function Calibrating() {
           Sync your matches from the overview, and your rank history starts
           building from the next one.
         </Alert>
+        <MatchHistoryCard />
+      </div>
+    );
+  }
+  if (paywalled) {
+    return (
+      <div className="flex flex-col gap-4">
+        <Paywall message="Rank calibration needs an active trial or subscription." />
         <MatchHistoryCard />
       </div>
     );

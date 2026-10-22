@@ -167,13 +167,14 @@ pub struct SelectRoleRequest {
     responses(
         (status = 200, description = "Role performance, recommendation and stored profile", body = RoleSelectionResponse),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn roles(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
 ) -> AppResult<Json<RoleSelectionResponse>> {
     let player = load_linked_player(&state, &user).await?;
     let (scope, analysis) = stats::competitive_roles(&state, &player).await?;
@@ -202,13 +203,14 @@ pub async fn roles(
         (status = 200, description = "The stored profile and the analysis behind it", body = RoleSelectionResponse),
         (status = 400, description = "Not one of the five coachable roles", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn select_role(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
     AppJson(body): AppJson<SelectRoleRequest>,
 ) -> AppResult<Json<RoleSelectionResponse>> {
     let role = CoachableRole::parse(&body.role).ok_or_else(|| {
@@ -318,13 +320,14 @@ pub(crate) async fn require_scope(
     responses(
         (status = 200, description = "Last generated analysis, or evidence alone if none exists", body = CoachResponse),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn get(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
 ) -> AppResult<Json<CoachResponse>> {
     let player = load_linked_player(&state, &user).await?;
     let scope = require_scope(&state, &player).await?;
@@ -356,13 +359,14 @@ pub async fn get(
     responses(
         (status = 200, description = "Strengths, weaknesses and recurring patterns", body = PlayerModelResponse),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn player_model(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
 ) -> AppResult<Json<PlayerModelResponse>> {
     let player = load_linked_player(&state, &user).await?;
 
@@ -575,10 +579,10 @@ pub async fn training_focus(
 
 /// `POST /api/coach/analyze`
 ///
-/// Premium: generating is the one thing in this API that costs money per call,
-/// so it is the one thing the trial gates. Everything measured — stats,
-/// benchmarks, patterns, the stored analysis — keeps answering after the trial
-/// ends.
+/// Premium for two reasons now: generating spends a model call, and reading
+/// what it produced lives behind the subscription too. The home dashboard's
+/// own `/api/stats`, match sample and training-focus teaser are the only
+/// things that keep answering for a trial-expired account.
 #[utoipa::path(
     post, path = "/api/coach/analyze", tag = "coaching",
     summary = "Generate a new analysis",
@@ -590,6 +594,7 @@ pub async fn training_focus(
         (status = 502, description = "The model failed, timed out, or returned an unusable answer", body = crate::error::ErrorBody),
         (status = 503, description = "No coaching model is configured on this server", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
@@ -671,6 +676,7 @@ pub async fn analyze(
         (status = 502, description = "The model failed, timed out, or returned an unusable answer", body = crate::error::ErrorBody),
         (status = 503, description = "No coaching model is configured on this server", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
@@ -717,13 +723,14 @@ pub async fn analyze_match(
         (status = 200, description = "Stored analysis, or evidence alone if none exists", body = CoachResponse),
         (status = 404, description = "No such match, or it belongs to another player", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn match_analysis(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
     AppPath(id): AppPath<Uuid>,
 ) -> AppResult<Json<CoachResponse>> {
     let player = load_linked_player(&state, &user).await?;

@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::api::extract::{AppPath, AppQuery, CurrentUser};
+use crate::api::extract::{AppPath, AppQuery, CurrentUser, EntitledUser};
 use crate::api::handlers::{benchmark, players};
 use crate::config::CalibrationConfig;
 use crate::domain::benchmark::{BenchmarkContext, ResolvedBracket};
@@ -539,13 +539,14 @@ async fn filter_options(
         (status = 200, description = "The match and its computed metrics", body = MatchResponse),
         (status = 404, description = "No such match, or it belongs to another player", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn get(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
     AppPath(id): AppPath<Uuid>,
 ) -> AppResult<Json<MatchResponse>> {
     let player = load_linked_player(&state, &user).await?;
@@ -596,13 +597,14 @@ provider outage degrades the response to raw values and a `note` rather than fai
         (status = 200, description = "The comparison, possibly degraded with a note", body = MatchComparison),
         (status = 404, description = "No such match, or it belongs to another player", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn comparison(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
     AppPath(id): AppPath<Uuid>,
 ) -> AppResult<Json<MatchComparison>> {
     let player = load_linked_player(&state, &user).await?;

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { Paywall } from "@/components/billing/Paywall";
 import { Analysis } from "@/components/coach/Analysis";
 import { CoachChat } from "@/components/coach/CoachChat";
 import { CoachingFocusHeader } from "@/components/coach/CoachingFocusHeader";
@@ -29,6 +30,7 @@ export function Coach() {
   const [data, setData] = useState<CoachResponse | null>(null);
   const [selection, setSelection] = useState<RoleSelectionResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [paywalled, setPaywalled] = useState(false);
   /** Set when the player asks to revisit a choice they have already made. */
   const [changingRole, setChangingRole] = useState(false);
 
@@ -49,7 +51,12 @@ export function Coach() {
       setData(coach);
       setSelection(roles);
       setError(null);
+      setPaywalled(false);
     } catch (e) {
+      if (e instanceof ApiError && e.isPaymentRequired) {
+        setPaywalled(true);
+        return;
+      }
       setError(e instanceof ApiError ? e.message : "Could not load your coach.");
     }
   }, []);
@@ -64,6 +71,9 @@ export function Coach() {
     return <Alert title="Cannot reach the service">{session.message}</Alert>;
   }
 
+  if (paywalled) {
+    return <Paywall message="Coaching needs an active trial or subscription." />;
+  }
   if (error) return <Alert>{error}</Alert>;
   if (!selection) return <CoachSkeleton />;
 

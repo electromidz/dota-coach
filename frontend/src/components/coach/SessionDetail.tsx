@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { Paywall } from "@/components/billing/Paywall";
 import { formatValue } from "@/components/charts/SeriesChart";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
@@ -16,6 +17,7 @@ type State =
   | { kind: "loading" }
   | { kind: "ready"; session: CoachingSession }
   | { kind: "anonymous" }
+  | { kind: "paywalled" }
   | { kind: "error"; message: string };
 
 /**
@@ -40,6 +42,10 @@ export function SessionDetail({ id }: { id: string }) {
         if (cancelled) return;
         if (error instanceof ApiError && error.isUnauthenticated) {
           setState({ kind: "anonymous" });
+          return;
+        }
+        if (error instanceof ApiError && error.isPaymentRequired) {
+          setState({ kind: "paywalled" });
           return;
         }
         setState({
@@ -71,6 +77,15 @@ export function SessionDetail({ id }: { id: string }) {
       <div className="flex flex-col gap-4">
         <Alert tone="info">Sign in with Steam to view your coaching sessions.</Alert>
         <SteamLoginButton className="w-full" />
+      </div>
+    );
+  }
+
+  if (state.kind === "paywalled") {
+    return (
+      <div className="flex flex-col gap-4">
+        <BackLink />
+        <Paywall message="Coaching session history needs an active trial or subscription." />
       </div>
     );
   }

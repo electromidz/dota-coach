@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { ComparisonContext } from "@/components/benchmark/ComparisonContext";
+import { Paywall } from "@/components/billing/Paywall";
 import { BulletRow } from "@/components/charts/BulletRow";
 import { SignedOut } from "@/components/shell/SignedOut";
 import { Alert } from "@/components/ui/Alert";
@@ -59,6 +60,7 @@ export function Benchmark() {
   const [data, setData] = useState<BenchmarkResponse | null>(null);
   const [selected, setSelected] = useState<number | undefined>();
   const [error, setError] = useState<string | null>(null);
+  const [paywalled, setPaywalled] = useState(false);
   const [loading, setLoading] = useState(false);
   /** `undefined` follows the coaching role; `"all"` opts out of role scoping. */
   const [roleScope, setRoleScope] = useState<CoachableRole | "all" | undefined>();
@@ -80,10 +82,17 @@ export function Benchmark() {
         // bracket's medians under another's heading.
         setData(await getBenchmark(heroId, role, target));
         setError(null);
+        setPaywalled(false);
       } catch (e) {
-        setError(
-          e instanceof ApiError ? e.message : "Could not load your benchmarks.",
-        );
+        if (e instanceof ApiError && e.isPaymentRequired) {
+          setPaywalled(true);
+        } else {
+          setError(
+            e instanceof ApiError
+              ? e.message
+              : "Could not load your benchmarks.",
+          );
+        }
       } finally {
         setLoading(false);
       }
@@ -112,6 +121,11 @@ export function Benchmark() {
     return <Alert title="Cannot reach the service">{session.message}</Alert>;
   }
 
+  if (paywalled) {
+    return (
+      <Paywall message="Benchmarking your figures against other players needs an active trial or subscription." />
+    );
+  }
   if (error) return <Alert>{error}</Alert>;
   if (!data) return <BenchmarkSkeleton />;
 

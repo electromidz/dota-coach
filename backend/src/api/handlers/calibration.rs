@@ -1,10 +1,10 @@
 //! Rank calibration: where the player actually stands, and how sure of it we
 //! are.
 //!
-//! Free, like `/api/stats` and `/api/benchmark`. This is arithmetic over
-//! matches the player already synced — no model call, nothing that costs money
-//! to answer — and a trial-expired account being unable to see its own medal
-//! would be a strange thing to sell.
+//! Gated like `/api/benchmark`: no model call and nothing that costs money to
+//! answer, but part of the subscription's analytical surface rather than the
+//! free home-dashboard snapshot. `/api/stats` and the recent-match strip stay
+//! free for a trial-expired account; this panel does not.
 //!
 //! The population is **ranked matches only**, narrower than the competitive
 //! one the dashboard uses. See `services::calibration` for why.
@@ -23,7 +23,7 @@ use axum::Json;
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use crate::api::extract::CurrentUser;
+use crate::api::extract::EntitledUser;
 use crate::api::handlers::stats::load_linked_player;
 use crate::domain::calibration::{
     estimate_mmr, rank_label, EstablishedRank, Methodology, Momentum, RankConfidence,
@@ -61,13 +61,14 @@ pub struct CalibrationResponse {
     responses(
         (status = 200, description = "Rank, confidence, trajectory, streak and role split", body = CalibrationResponse),
         (status = 409, description = "No Dota account linked, or no matches synced yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn get(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
 ) -> AppResult<Json<CalibrationResponse>> {
     let player = load_linked_player(&state, &user).await?;
     let config = &state.config.calibration;

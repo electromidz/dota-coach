@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { Paywall } from "@/components/billing/Paywall";
 import { SeriesChart } from "@/components/charts/SeriesChart";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
@@ -34,6 +35,7 @@ export function CoachingHistory() {
   const [progress, setProgress] = useState<ProgressResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [needsRole, setNeedsRole] = useState(false);
+  const [paywalled, setPaywalled] = useState(false);
 
   useEffect(() => {
     if (session.kind !== "signed-in") return;
@@ -52,6 +54,10 @@ export function CoachingHistory() {
         // a failure — the player needs a link, not an error.
         if (e instanceof ApiError && e.status === 409) {
           setNeedsRole(true);
+          return;
+        }
+        if (e instanceof ApiError && e.isPaymentRequired) {
+          setPaywalled(true);
           return;
         }
         setError(e instanceof ApiError ? e.message : "Could not load your history.");
@@ -84,6 +90,14 @@ export function CoachingHistory() {
     );
   }
 
+  if (paywalled) {
+    return (
+      <div className="flex flex-col gap-4">
+        <BackLink />
+        <Paywall message="Coaching history needs an active trial or subscription." />
+      </div>
+    );
+  }
   if (error) return <Alert>{error}</Alert>;
   if (!history || !progress) return <HistorySkeleton />;
 

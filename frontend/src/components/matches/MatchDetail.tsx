@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { Paywall } from "@/components/billing/Paywall";
 import { BarList } from "@/components/charts/BarList";
 import { MatchAnalysis } from "@/components/coach/MatchAnalysis";
 import { MatchComparison } from "@/components/matches/MatchComparison";
@@ -20,6 +21,7 @@ type State =
   | { kind: "loading" }
   | { kind: "ready"; match: Match }
   | { kind: "anonymous" }
+  | { kind: "paywalled" }
   | { kind: "error"; message: string };
 
 /**
@@ -43,6 +45,10 @@ export function MatchDetail({ id }: { id: string }) {
 
         if (error instanceof ApiError && error.isUnauthenticated) {
           setState({ kind: "anonymous" });
+          return;
+        }
+        if (error instanceof ApiError && error.isPaymentRequired) {
+          setState({ kind: "paywalled" });
           return;
         }
         setState({
@@ -74,6 +80,15 @@ export function MatchDetail({ id }: { id: string }) {
       <div className="flex flex-col gap-4">
         <Alert tone="info">Sign in with Steam to view your matches.</Alert>
         <SteamLoginButton className="w-full" />
+      </div>
+    );
+  }
+
+  if (state.kind === "paywalled") {
+    return (
+      <div className="flex flex-col gap-4">
+        <BackLink />
+        <Paywall message="Match detail needs an active trial or subscription." />
       </div>
     );
   }

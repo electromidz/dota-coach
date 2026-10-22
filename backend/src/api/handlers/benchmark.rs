@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::api::extract::{AppPath, AppQuery, CurrentUser};
+use crate::api::extract::{AppPath, AppQuery, EntitledUser};
 use crate::domain::benchmark::{
     BenchmarkContext, BenchmarkContextInfo, BenchmarkMetric, BenchmarkResult, Confidence,
     PopulationScope, ResolvedBracket, Segment, TargetComparison, TargetMetric, UnavailableSegment,
@@ -241,13 +241,14 @@ rather than the all-ranks numbers under a bracket's name.",
         (status = 400, description = "An unknown role or rank bracket", body = crate::error::ErrorBody),
         (status = 502, description = "The benchmark provider is unavailable", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn overview(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
     AppQuery(query): AppQuery<BenchmarkQuery>,
 ) -> AppResult<Json<BenchmarkResponse>> {
     let player = load_linked_player(&state, &user).await?;
@@ -332,13 +333,14 @@ target arrives in `target`, narrowed to this same metric.",
         (status = 404, description = "No such metric slug", body = crate::error::ErrorBody),
         (status = 502, description = "The benchmark provider is unavailable", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn metric(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
     AppPath(slug): AppPath<String>,
     AppQuery(query): AppQuery<BenchmarkQuery>,
 ) -> AppResult<Json<BenchmarkResponse>> {

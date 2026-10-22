@@ -15,7 +15,7 @@ use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::api::extract::{AppQuery, CurrentUser};
+use crate::api::extract::{AppQuery, EntitledUser};
 use crate::domain::benchmark::{BenchmarkContext, Segment};
 use crate::domain::hero::{HeroFit, HeroMeta, HeroMetaContext, HeroPoolEntry, RankBracket};
 use crate::domain::player::DotaPlayer;
@@ -87,13 +87,14 @@ pub struct MetaContext {
     responses(
         (status = 200, description = "Every hero played, classified", body = HeroPoolResponse),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn pool(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
 ) -> AppResult<Json<HeroPoolResponse>> {
     let player = load_linked_player(&state, &user).await?;
     let (pool, _) = load_pool(&state, &player, &MatchScope::career()).await?;
@@ -123,13 +124,14 @@ and is clamped to 50 however high it is set.",
         (status = 200, description = "Scored recommendations, best first", body = RecommendationsResponse),
         (status = 502, description = "The hero meta provider is unavailable", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn recommendations(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
     AppQuery(query): AppQuery<HeroQuery>,
 ) -> AppResult<Json<RecommendationsResponse>> {
     let built = build(&state, &user, query.limit, &MatchScope::career(), None).await?;
@@ -155,13 +157,14 @@ and is clamped to 50 however high it is set.",
     responses(
         (status = 200, description = "Combined hero intelligence", body = HeroIntelligenceResponse),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn intelligence(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
     AppQuery(query): AppQuery<HeroQuery>,
 ) -> AppResult<Json<HeroIntelligenceResponse>> {
     let built = build(&state, &user, query.limit, &MatchScope::career(), None).await?;

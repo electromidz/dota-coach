@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { Paywall } from "@/components/billing/Paywall";
 import { HeroPool } from "@/components/heroes/HeroPool";
 import { RecommendationCard } from "@/components/heroes/RecommendationCard";
 import { SignedOut } from "@/components/shell/SignedOut";
@@ -26,6 +27,7 @@ export function HeroIntelligence() {
   const { session } = useSession();
   const [data, setData] = useState<HeroIntelligenceResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [paywalled, setPaywalled] = useState(false);
 
   useEffect(() => {
     if (session.kind !== "signed-in") return;
@@ -35,13 +37,17 @@ export function HeroIntelligence() {
         setData(response);
         setError(null);
       })
-      .catch((e) =>
+      .catch((e) => {
+        if (e instanceof ApiError && e.isPaymentRequired) {
+          setPaywalled(true);
+          return;
+        }
         setError(
           e instanceof ApiError
             ? e.message
             : "Could not load your hero intelligence.",
-        ),
-      );
+        );
+      });
   }, [session.kind]);
 
   if (session.kind === "loading") return <HeroSkeleton />;
@@ -50,6 +56,11 @@ export function HeroIntelligence() {
     return <Alert title="Cannot reach the service">{session.message}</Alert>;
   }
 
+  if (paywalled) {
+    return (
+      <Paywall message="Hero recommendations and your hero pool need an active trial or subscription." />
+    );
+  }
   if (error) return <Alert>{error}</Alert>;
   if (!data) return <HeroSkeleton />;
 

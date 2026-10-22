@@ -1,8 +1,9 @@
 //! Conversational coaching.
 //!
-//! Reading a conversation is free and never calls a model. Asking a question
-//! is the third thing in this service that spends one, and it is gated and
-//! limited like the other two.
+//! Both reading and asking require an active subscription. Asking is gated
+//! because it is the third thing in this service that spends a model call;
+//! reading history is gated too, not for cost but because conversation
+//! history lives behind the same paywall as the rest of the coach surface.
 //!
 //! The analysis is **not** re-run per message. A question reads the same
 //! prepared evidence `GET /api/coach` does, through the same cache, so asking
@@ -15,7 +16,7 @@ use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::api::extract::{AppQuery, CurrentUser, EntitledUser};
+use crate::api::extract::{AppQuery, EntitledUser};
 use crate::api::handlers::coach;
 use crate::domain::conversation::{Conversation, Message, HISTORY_TURNS, MAX_QUESTION_CHARS};
 use crate::domain::event::EventType;
@@ -78,13 +79,14 @@ point at the backend statements its numbers came from.",
         (status = 200, description = "The transcript, oldest first", body = ConversationResponse),
         (status = 400, description = "Unknown role slug", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked, or no role chosen yet", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
     )
 )]
 pub async fn get(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    EntitledUser(user): EntitledUser,
     AppQuery(query): AppQuery<ConversationQuery>,
 ) -> AppResult<Json<ConversationResponse>> {
     let player = load_linked_player(&state, &user).await?;
