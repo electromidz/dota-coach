@@ -22,7 +22,7 @@ vi.mock("@/lib/api", async () => {
 const PLAN: PlanResponse = {
   plan: {
     name: "pro",
-    amount_cents: 998,
+    amount_cents: 499,
     currency: "usd",
     period_days: 30,
     trial_days: 14,
@@ -110,7 +110,7 @@ describe("SignedOut", () => {
 
     // Seeded from the `plan` prop, so these are present on first render
     // rather than after `usePlan` resolves.
-    expect(screen.getByText("$9.98 / month")).toBeDefined();
+    expect(screen.getByText("$4.99 / month")).toBeDefined();
     expect(screen.getByText("14 days")).toBeDefined();
   });
 

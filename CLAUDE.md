@@ -467,7 +467,7 @@ The initial trial is:
 The initial subscription price is:
 
 ```text
-$1/month
+$4.99/month
 ```
 
 But the price must remain configurable.

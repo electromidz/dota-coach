@@ -21,7 +21,7 @@ The product answers:
 > has the evidence, picks **one** training focus with a checkable target and
 > tracks whether it is actually improving, and has an LLM interpret all of it
 > into insights it is **not allowed to make numbers up in** — free for fourteen
-> days, then $9.98/month for the AI coaching, settled in crypto and activated only
+> days, then $4.99/month for the AI coaching, settled in crypto and activated only
 > by a payment the provider signed for. It installs as a PWA, says something
 > useful when it is offline, and tags every request with an id you can quote.
 
@@ -295,7 +295,7 @@ Copy `.env.example` to `.env`. Never commit the real file.
 | `LLM_API_KEY`            | backend  | **Server-side only.** Never prefixed with `NEXT_PUBLIC_`.           |
 | `LLM_MODEL`              | backend  | Model identifier.                                                   |
 | `BILLING_PLAN`           | backend  | Plan name stored on the subscription. Default `pro`.                |
-| `BILLING_PRICE_CENTS`    | backend  | The price, in minor units. Default 100 ($1). Must be > 0.           |
+| `BILLING_PRICE_CENTS`    | backend  | The price, in minor units. Default 499 ($4.99). Must be > 0.        |
 | `BILLING_CURRENCY`       | backend  | ISO-4217 the price is denominated in. Default `usd`.                |
 | `BILLING_TRIAL_DAYS`     | backend  | Trial length, anchored to account creation. Default 14.             |
 | `BILLING_PERIOD_DAYS`    | backend  | Length of one paid period. Default 30.                              |
@@ -1073,7 +1073,7 @@ analysis would — and that is where a queue belongs when it arrives.
 ## Billing: trial, subscription and settlement
 
 Every account gets a **14-day trial** the moment it exists, and after that
-**$9.98/month** buys the part of the product that costs money to run. The price,
+**$4.99/month** buys the part of the product that costs money to run. The price,
 the trial length and the period are configuration (`BILLING_PRICE_CENTS`,
 `BILLING_TRIAL_DAYS`, `BILLING_PERIOD_DAYS`); they appear once, in
 `BillingConfig`, and nowhere else in the system.

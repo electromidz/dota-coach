@@ -57,11 +57,11 @@ describe("LandingJsonLd", () => {
 
   it("uses the backend price rather than a hard-coded one", () => {
     const { container } = render(
-      <LandingJsonLd priceUsd="9.98" currency="USD" />,
+      <LandingJsonLd priceUsd="4.99" currency="USD" />,
     );
 
     expect(node(container, "SoftwareApplication")).toMatchObject({
-      offers: { price: "9.98", priceCurrency: "USD" },
+      offers: { price: "4.99", priceCurrency: "USD" },
     });
   });
 
@@ -71,7 +71,7 @@ describe("LandingJsonLd", () => {
    * temptation to add stars to a landing page outlives any comment.
    */
   it("claims no ratings or reviews", () => {
-    const { container } = render(<LandingJsonLd priceUsd="9.98" />);
+    const { container } = render(<LandingJsonLd priceUsd="4.99" />);
     const serialized = JSON.stringify(graphOf(container));
 
     expect(serialized).not.toMatch(/aggregateRating|"Review"|ratingValue/i);

@@ -6,7 +6,7 @@ import { usePlan } from "@/lib/usePlan";
 
 /**
  * The offer line on the signed-out page: "Start your 14-day free trial. Then
- * $9.98/month."
+ * $4.99/month."
  *
  * Both figures come from the backend, which is the only place they are
  * configured. Until they arrive — or if the API is unreachable, which is

@@ -513,7 +513,7 @@ impl LlmConfig {
 
 /// Trial, price and payment provider.
 ///
-/// The price is configuration in the strongest sense: `$9.98/month` is a launch
+/// The price is configuration in the strongest sense: `$4.99/month` is a launch
 /// decision, not an invariant, and it appears exactly once in the system — in
 /// `BILLING_PRICE_CENTS`. Minor units, because a float price is a rounding bug
 /// waiting for a currency with different conventions.
@@ -562,7 +562,7 @@ impl BillingConfig {
             .filter(|s| !s.is_empty());
         let configured = api_key.is_some() && ipn_secret.is_some();
 
-        let price_cents = checked_price(parsed("BILLING_PRICE_CENTS", 998)?)?;
+        let price_cents = checked_price(parsed("BILLING_PRICE_CENTS", 499)?)?;
 
         Ok(Self {
             plan: optional("BILLING_PLAN", "pro"),
@@ -937,7 +937,7 @@ mod tests {
     fn billing_defaults_to_the_launch_offer() {
         let billing = BillingConfig::from_env().unwrap();
 
-        assert_eq!(billing.price_cents, 998, "$9.98");
+        assert_eq!(billing.price_cents, 499, "$4.99");
         assert_eq!(billing.currency, "usd");
         assert_eq!(billing.trial_days, 14);
         assert_eq!(billing.period_days, 30);
