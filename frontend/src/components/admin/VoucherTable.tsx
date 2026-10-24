@@ -149,7 +149,6 @@ export function VoucherTable() {
 
 function CreateVoucherForm({ onCreated }: { onCreated: (vouchers: Voucher[]) => void }) {
   const [durationDays, setDurationDays] = useState("30");
-  const [maxUses, setMaxUses] = useState("1");
   const [count, setCount] = useState("1");
   const [note, setNote] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
@@ -163,7 +162,6 @@ function CreateVoucherForm({ onCreated }: { onCreated: (vouchers: Voucher[]) => 
     try {
       const response = await createVouchers({
         duration_days: Number(durationDays),
-        max_uses: Number(maxUses),
         count: Number(count),
         note: note.trim() || undefined,
         expires_at: expiresAt ? `${expiresAt}T23:59:59Z` : undefined,
@@ -180,6 +178,7 @@ function CreateVoucherForm({ onCreated }: { onCreated: (vouchers: Voucher[]) => 
   return (
     <Card className="flex flex-col gap-4">
       <h2 className="text-xs uppercase tracking-wider text-ink-faint">Create vouchers</h2>
+      <p className="text-sm text-ink-faint">Each code can be redeemed once, by one account.</p>
 
       {error ? <Alert>{error}</Alert> : null}
 
@@ -191,16 +190,6 @@ function CreateVoucherForm({ onCreated }: { onCreated: (vouchers: Voucher[]) => 
             required
             value={durationDays}
             onChange={(e) => setDurationDays(e.target.value)}
-            className="w-24"
-          />
-        </Field>
-        <Field label="Max uses">
-          <input
-            type="number"
-            min={1}
-            required
-            value={maxUses}
-            onChange={(e) => setMaxUses(e.target.value)}
             className="w-24"
           />
         </Field>

@@ -3766,12 +3766,10 @@ async fn the_daily_series_has_no_gaps_on_a_day_with_no_activity() {
 
 fn new_voucher(
     duration_days: i32,
-    max_uses: i32,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> dota_coach_backend::repositories::voucher::NewVoucher {
     dota_coach_backend::repositories::voucher::NewVoucher {
         duration_days,
-        max_uses,
         expires_at,
         note: None,
         created_by: None,
@@ -3796,7 +3794,7 @@ async fn redeeming_a_valid_code_grants_time_and_records_the_event() {
     let session = app.login_as(steam_id).await;
 
     let voucher =
-        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(30, 1, None))
+        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(30, None))
             .await
             .unwrap();
 
@@ -3837,7 +3835,7 @@ async fn an_expired_voucher_is_refused() {
 
     let voucher = dota_coach_backend::repositories::voucher::create(
         &app.db,
-        &new_voucher(30, 1, Some(rfc3339("2020-01-01T00:00:00Z"))),
+        &new_voucher(30, Some(rfc3339("2020-01-01T00:00:00Z"))),
     )
     .await
     .unwrap();
@@ -3869,7 +3867,7 @@ async fn a_voucher_already_at_its_use_limit_is_refused() {
     let second_session = app.login_as(steam_ids[1]).await;
 
     let voucher =
-        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(7, 1, None))
+        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(7, None))
             .await
             .unwrap();
 
@@ -3911,10 +3909,10 @@ async fn redeeming_the_same_code_twice_is_refused_the_second_time() {
     let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
     let session = app.login_as(steam_id).await;
 
-    // max_uses well above 1, so a rejection here can only be "you already
-    // redeemed this", never "someone else used it up".
+    // The same account retrying is told it already redeemed the code, not
+    // that "someone" used it up.
     let voucher =
-        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(7, 5, None))
+        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(7, None))
             .await
             .unwrap();
 
@@ -3963,7 +3961,7 @@ async fn concurrent_redemption_of_a_single_use_voucher_lets_exactly_one_through(
     }
 
     let voucher =
-        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(7, 1, None))
+        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(7, None))
             .await
             .unwrap();
 
@@ -4035,7 +4033,7 @@ async fn redeeming_extends_an_existing_paid_period_rather_than_replacing_it() {
     .unwrap();
 
     let voucher =
-        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(30, 1, None))
+        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(30, None))
             .await
             .unwrap();
 
@@ -4226,11 +4224,15 @@ async fn an_admin_can_create_single_and_bulk_vouchers() {
     );
     assert_eq!(vouchers[0]["active"], true);
     assert_eq!(vouchers[0]["used_count"], 0);
+    assert_eq!(
+        vouchers[0]["max_uses"], 1,
+        "every code is single-use, whatever the request asks for"
+    );
 
     let bulk = app
         .post_json(
             "/api/admin/vouchers",
-            r#"{"duration_days": 7, "max_uses": 1, "count": 5}"#,
+            r#"{"duration_days": 7, "count": 5}"#,
             Some(&admin_session.token),
         )
         .await;
@@ -4247,7 +4249,7 @@ async fn an_admin_can_create_single_and_bulk_vouchers() {
     let bad = app
         .post_json(
             "/api/admin/vouchers",
-            r#"{"duration_days": 0, "max_uses": 1}"#,
+            r#"{"duration_days": 0}"#,
             Some(&admin_session.token),
         )
         .await;
@@ -4269,7 +4271,7 @@ async fn deactivating_a_voucher_blocks_future_redemption() {
     let target_session = app.login_as(target_steam_id).await;
 
     let voucher =
-        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(14, 5, None))
+        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(14, None))
             .await
             .unwrap();
 
@@ -4312,31 +4314,37 @@ async fn the_voucher_detail_page_lists_who_redeemed_it() {
         return skip("the_voucher_detail_page_lists_who_redeemed_it");
     };
     let admin_steam_id = unique_steam_id();
-    let redeemer_ids = [unique_steam_id(), unique_steam_id()];
+    let redeemer_steam_id = unique_steam_id();
+    let other_steam_id = unique_steam_id();
     let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
     let admin_session = app.login_as(admin_steam_id).await;
     make_admin(&app, admin_steam_id).await;
-
-    let mut sessions = Vec::new();
-    for steam_id in redeemer_ids {
-        sessions.push(app.login_as(steam_id).await);
-    }
+    let redeemer_session = app.login_as(redeemer_steam_id).await;
+    let other_session = app.login_as(other_steam_id).await;
 
     let voucher =
-        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(14, 2, None))
+        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(14, None))
             .await
             .unwrap();
 
-    for session in &sessions {
-        let response = app
-            .post_json(
-                "/api/subscribe/redeem",
-                &format!(r#"{{"code": "{}"}}"#, voucher.code),
-                Some(&session.token),
-            )
-            .await;
-        assert_eq!(response.status, StatusCode::OK);
-    }
+    let first = app
+        .post_json(
+            "/api/subscribe/redeem",
+            &format!(r#"{{"code": "{}"}}"#, voucher.code),
+            Some(&redeemer_session.token),
+        )
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    // Single-use: a second account cannot redeem the same code.
+    let second = app
+        .post_json(
+            "/api/subscribe/redeem",
+            &format!(r#"{{"code": "{}"}}"#, voucher.code),
+            Some(&other_session.token),
+        )
+        .await;
+    assert_eq!(second.status, StatusCode::BAD_REQUEST);
 
     let detail = app
         .get(
@@ -4346,16 +4354,13 @@ async fn the_voucher_detail_page_lists_who_redeemed_it() {
         .await;
     assert_eq!(detail.status, StatusCode::OK);
     let body = detail.json();
-    assert_eq!(body["used_count"], 2);
+    assert_eq!(body["max_uses"], 1);
+    assert_eq!(body["used_count"], 1);
     let redemptions = body["redemptions"].as_array().unwrap();
-    assert_eq!(redemptions.len(), 2);
-    let redeemed_steam_ids: std::collections::HashSet<String> = redemptions
-        .iter()
-        .map(|r| r["steam_id"].as_str().unwrap().to_string())
-        .collect();
+    assert_eq!(redemptions.len(), 1);
     assert_eq!(
-        redeemed_steam_ids,
-        redeemer_ids.iter().map(|id| id.to_string()).collect(),
+        redemptions[0]["steam_id"].as_str().unwrap(),
+        redeemer_steam_id.to_string()
     );
 
     let missing = app
@@ -4366,9 +4371,53 @@ async fn the_voucher_detail_page_lists_who_redeemed_it() {
         .await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
 
-    let mut all_steam_ids = vec![admin_steam_id];
-    all_steam_ids.extend(redeemer_ids);
-    app.cleanup(&all_steam_ids).await;
+    app.cleanup(&[admin_steam_id, redeemer_steam_id, other_steam_id])
+        .await;
+}
+
+#[tokio::test]
+async fn the_database_refuses_a_multi_use_or_over_used_voucher() {
+    let Some(db) = support::pool().await else {
+        return skip("the_database_refuses_a_multi_use_or_over_used_voucher");
+    };
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+
+    // A multi-use voucher cannot be created, even bypassing the API.
+    let multi_use = sqlx::query(
+        "INSERT INTO vouchers (code, duration_days, max_uses) VALUES ($1, 7, 5)",
+    )
+    .bind(format!("TEST-{}", uuid::Uuid::new_v4()))
+    .execute(&app.db)
+    .await;
+    assert!(
+        matches!(&multi_use, Err(sqlx::Error::Database(e)) if e.is_check_violation()),
+        "expected a check violation, got {multi_use:?}"
+    );
+
+    // A single-use voucher cannot be counted as used twice.
+    let voucher =
+        dota_coach_backend::repositories::voucher::create(&app.db, &new_voucher(7, None))
+            .await
+            .unwrap();
+    sqlx::query("UPDATE vouchers SET used_count = 1 WHERE id = $1")
+        .bind(voucher.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    let over_used = sqlx::query("UPDATE vouchers SET used_count = 2 WHERE id = $1")
+        .bind(voucher.id)
+        .execute(&app.db)
+        .await;
+    assert!(
+        matches!(&over_used, Err(sqlx::Error::Database(e)) if e.is_check_violation()),
+        "expected a check violation, got {over_used:?}"
+    );
+
+    sqlx::query("DELETE FROM vouchers WHERE id = $1")
+        .bind(voucher.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -4485,7 +4534,7 @@ async fn every_mutating_admin_action_writes_an_audit_entry() {
     let created = app
         .post_json(
             "/api/admin/vouchers",
-            r#"{"duration_days": 7, "max_uses": 1}"#,
+            r#"{"duration_days": 7}"#,
             Some(&admin_session.token),
         )
         .await;

@@ -18,6 +18,8 @@ pub struct Voucher {
     pub id: Uuid,
     pub code: String,
     pub duration_days: i32,
+    /// Always 1 for vouchers created since migration 0025: every code is
+    /// single-use. Older codes were frozen at their existing use count.
     pub max_uses: i32,
     pub used_count: i32,
     /// `None` means the voucher never expires on its own — `active` is the

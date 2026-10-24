@@ -6,6 +6,10 @@
 //! and `UNIQUE(voucher_id, user_id)` on `voucher_redemptions` is what makes
 //! two simultaneous redemption attempts by the same user resolve to exactly
 //! one success, whatever the pre-checks believed a moment earlier.
+//!
+//! Every voucher is single-use (`max_uses = 1`): one redemption, by one
+//! account. `vouchers_single_use_check` (migration 0025) stops `used_count`
+//! from ever passing `max_uses`, so a second account can never redeem it.
 
 mod rate_limit;
 
@@ -79,11 +83,13 @@ pub async fn redeem(
     {
         return Err(VoucherError::Expired);
     }
-    if voucher.used_count >= voucher.max_uses {
-        return Err(VoucherError::UsedUp);
-    }
+    // Checked before "used up" so the account that already redeemed a
+    // single-use code is told so, not that "someone" used it up.
     if repositories::voucher::has_redeemed(&mut tx, voucher.id, user_id).await? {
         return Err(VoucherError::AlreadyRedeemed);
+    }
+    if voucher.used_count >= voucher.max_uses {
+        return Err(VoucherError::UsedUp);
     }
 
     // The pre-check above is a better error message; this insert is the
@@ -96,7 +102,16 @@ pub async fn redeem(
         Err(e) => return Err(e.into()),
     }
 
-    repositories::voucher::increment_used_count(&mut tx, voucher.id).await?;
+    // `vouchers_single_use_check` refuses to let `used_count` pass
+    // `max_uses`: the database's own backstop against a code being used by
+    // more than one account. The row lock means this should never fire.
+    match repositories::voucher::increment_used_count(&mut tx, voucher.id).await {
+        Ok(()) => {}
+        Err(sqlx::Error::Database(e)) if e.is_check_violation() => {
+            return Err(VoucherError::UsedUp);
+        }
+        Err(e) => return Err(e.into()),
+    }
 
     // Guaranteed to exist by the `ensure_subscription` call above; a miss
     // here would mean the account vanished mid-request.

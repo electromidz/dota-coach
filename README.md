@@ -436,7 +436,7 @@ promotion path; the first admin is set directly in the database.
 | `POST` | `/api/admin/users/:id/extend`          | Extends whichever window governs access — trial end or paid-through date |
 | `POST` | `/api/admin/users/:id/disable`         | Every future request from this account is refused |
 | `POST` | `/api/admin/users/:id/enable`          | Reverses a disable                               |
-| `POST` | `/api/admin/vouchers`                  | Create one voucher, or `count` independent ones sharing the same settings |
+| `POST` | `/api/admin/vouchers`                  | Create one single-use voucher, or `count` independent ones sharing the same settings |
 | `GET`  | `/api/admin/vouchers`                  | Paginated, with usage counts                     |
 | `GET`  | `/api/admin/vouchers/:id`              | One voucher and everyone who has redeemed it     |
 | `POST` | `/api/admin/vouchers/:id/deactivate`   | Existing redemptions are unaffected — only future ones are refused |
@@ -1218,8 +1218,14 @@ extend the subscription             new_end = max(now, current_period_end)
                                      costs days already granted
 ```
 
-The checks that run first (voucher active, not expired, uses remaining, not
-already redeemed by this account) exist for a clear error message, not the
+Every code is single-use: one redemption, by one account. There is no
+configurable use limit — `vouchers_single_use_check` (migration 0025) only
+allows `max_uses = 1` and stops `used_count` from ever passing it, so even a
+bypassed pre-check cannot let a second account redeem a used code. Codes made
+before that migration were frozen at their existing use count.
+
+The checks that run first (voucher active, not expired, not already redeemed
+by this account, not already used) exist for a clear error message, not the
 guarantee — a second, simultaneous redemption attempt can pass every one of
 them and still lose to the unique constraint. `POST /api/subscribe/redeem` is
 rate limited at 5 attempts/minute per account, tracked in an in-memory

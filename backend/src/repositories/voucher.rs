@@ -42,9 +42,10 @@ fn generate_code() -> String {
     format!("DOTA-{}-{}", code_group(&mut rng), code_group(&mut rng))
 }
 
+/// No `max_uses`: every voucher is single-use (one redemption, one account),
+/// enforced by `vouchers_single_use_check` in `0025_single_use_vouchers.sql`.
 pub struct NewVoucher {
     pub duration_days: i32,
-    pub max_uses: i32,
     pub expires_at: Option<DateTime<Utc>>,
     pub note: Option<String>,
     pub created_by: Option<Uuid>,
@@ -58,13 +59,12 @@ pub async fn create(pool: &PgPool, new: &NewVoucher) -> Result<Voucher, sqlx::Er
 
         let result = sqlx::query_as::<_, Voucher>(concat!(
             "INSERT INTO vouchers (code, duration_days, max_uses, expires_at, note, created_by)
-             VALUES ($1, $2, $3, $4, $5, $6)
+             VALUES ($1, $2, 1, $3, $4, $5)
              RETURNING ",
             voucher_columns!()
         ))
         .bind(&code)
         .bind(new.duration_days)
-        .bind(new.max_uses)
         .bind(new.expires_at)
         .bind(&new.note)
         .bind(new.created_by)
@@ -83,7 +83,7 @@ pub async fn create(pool: &PgPool, new: &NewVoucher) -> Result<Voucher, sqlx::Er
     ))
 }
 
-/// `count` independent vouchers sharing the same duration/max-uses/expiry —
+/// `count` independent single-use vouchers sharing the same duration/expiry —
 /// a bulk giveaway batch. Not wrapped in one transaction: each voucher is
 /// useful on its own, so a failure partway through still leaves whatever was
 /// already created as valid, redeemable codes rather than rolling them back.

@@ -330,13 +330,11 @@ pub async fn enable_user(
 // ---------------------------------------------------------------------------
 
 const MAX_VOUCHER_DURATION_DAYS: i32 = 3650;
-const MAX_VOUCHER_USES: i32 = 1_000_000;
 const MAX_VOUCHER_BATCH: i32 = 1000;
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateVoucherRequest {
     pub duration_days: i32,
-    pub max_uses: i32,
     pub expires_at: Option<DateTime<Utc>>,
     pub note: Option<String>,
     /// How many independent codes to generate with these same settings.
@@ -358,12 +356,12 @@ pub struct VoucherListResponse {
 #[utoipa::path(
     post, path = "/api/admin/vouchers", tag = "admin",
     summary = "Create one or more voucher codes",
-    description = "`count` (default 1) generates that many independent codes sharing the same duration, use limit, expiry and note. Always returns a list, even for a single voucher, so the client never branches on shape.",
+    description = "`count` (default 1) generates that many independent codes sharing the same duration, expiry and note. Every code is single-use: one redemption, by one account. Always returns a list, even for a single voucher, so the client never branches on shape.",
     security(("session" = [])),
     request_body = CreateVoucherRequest,
     responses(
         (status = 200, description = "The newly created voucher(s)", body = VoucherListResponse),
-        (status = 400, description = "Invalid duration, use limit, or count", body = crate::error::ErrorBody),
+        (status = 400, description = "Invalid duration or count", body = crate::error::ErrorBody),
         (status = 403, description = "Signed in, but not an admin", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
     )
@@ -380,11 +378,6 @@ pub async fn create_vouchers(
             "duration_days must be between 1 and {MAX_VOUCHER_DURATION_DAYS}."
         )));
     }
-    if !(1..=MAX_VOUCHER_USES).contains(&body.max_uses) {
-        return Err(AppError::BadRequest(format!(
-            "max_uses must be between 1 and {MAX_VOUCHER_USES}."
-        )));
-    }
     if !(1..=MAX_VOUCHER_BATCH).contains(&count) {
         return Err(AppError::BadRequest(format!(
             "count must be between 1 and {MAX_VOUCHER_BATCH}."
@@ -393,7 +386,6 @@ pub async fn create_vouchers(
 
     let new = NewVoucher {
         duration_days: body.duration_days,
-        max_uses: body.max_uses,
         expires_at: body.expires_at,
         note: body.note,
         created_by: Some(admin.id),

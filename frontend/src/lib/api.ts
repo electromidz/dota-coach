@@ -494,9 +494,9 @@ export function enableUser(id: string): Promise<AdminUserSummary> {
   });
 }
 
+/** Every voucher is single-use: one redemption, by one account. */
 export interface CreateVoucherParams {
   duration_days: number;
-  max_uses: number;
   expires_at?: string;
   note?: string;
   /** How many independent codes to generate. Defaults to 1 on the backend —
