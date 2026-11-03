@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { MatchListResponse, MatchView } from "@/lib/types";
@@ -52,6 +52,10 @@ function match(overrides: Partial<MatchView> = {}): MatchView {
     updated_at: "2026-01-01T12:00:00Z",
     eligible: true,
     mode_label: "Ranked All Pick",
+    position: "carry",
+    position_label: "Carry",
+    peer_gpm: 500,
+    peer_xpm: 550,
     rating: 7.2,
     mmr_delta_estimate: 29,
     ...overrides,
@@ -65,10 +69,12 @@ function page(overrides: Partial<MatchListResponse> = {}): MatchListResponse {
     limit: 20,
     total: 1,
     total_pages: 1,
-    scope: "all",
+    mode_total: 1,
+    hidden_turbo: 0,
+    hidden_other: 0,
     filtered: false,
     sort: "newest",
-    mode: "all",
+    mode: "eligible",
     lifetime_games: 1,
     last_synced_at: "2026-01-01T12:05:00Z",
     syncing: false,
@@ -100,41 +106,98 @@ function lastCall() {
   return getMatches.mock.calls[getMatches.mock.calls.length - 1];
 }
 
+/** Open the hero combobox and pick by label. */
+async function pickHero(label: string) {
+  fireEvent.focus(screen.getByRole("combobox", { name: "Hero" }));
+  const list = await screen.findByRole("listbox", { name: "Hero" });
+  fireEvent.click(within(list).getByRole("option", { name: new RegExp(`^${label}`) }));
+}
+
 describe("MatchList filters", () => {
-  it("offers only heroes and roles the backend reported, with counts", async () => {
+  beforeEach(() => window.history.replaceState(null, "", "/matches"));
+
+  it("defaults to Ranked + All Pick and says what it hides", async () => {
+    getMatches.mockResolvedValue(page({ mode_total: 24, hidden_turbo: 88 }));
     render(<MatchList />);
 
-    expect(await screen.findByText("Luna (6)")).toBeTruthy();
-    expect(screen.getByText("Lion (2)")).toBeTruthy();
+    expect(await screen.findByText(/24 matches · Ranked \+ All Pick/)).toBeTruthy();
+    expect(lastCall()[2].mode).toBe("eligible");
+    fireEvent.click(screen.getByRole("button", { name: "Games not shown" }));
+    expect(screen.getByText("+88 Turbo hidden")).toBeTruthy();
+  });
+
+  it("switches mode, mirrors it in the URL, and resets the hero", async () => {
+    render(<MatchList />);
+    await screen.findByRole("radio", { name: "Turbo" });
+
+    await pickHero("Luna");
+    await waitFor(() => expect(lastCall()[2].heroId).toBe(35));
+
+    fireEvent.click(screen.getByRole("radio", { name: "Turbo" }));
+    await waitFor(() => expect(lastCall()[2].mode).toBe("turbo"));
+    expect(lastCall()[2].heroId).toBeUndefined();
+    expect(window.location.search).toBe("?mode=turbo");
+
+    fireEvent.click(screen.getByRole("radio", { name: "Ranked + All Pick" }));
+    await waitFor(() => expect(lastCall()[2].mode).toBe("eligible"));
+    expect(window.location.search).toBe("");
+  });
+
+  it("reads the mode from the URL on arrival", async () => {
+    window.history.replaceState(null, "", "/matches?mode=all");
+    render(<MatchList />);
+    await waitFor(() => expect(lastCall()[2].mode).toBe("all"));
+  });
+
+  it("offers heroes in a searchable box, by games, without zero-game heroes", async () => {
+    getMatches.mockResolvedValue(
+      page({
+        filters: {
+          heroes: [
+            { value: "26", label: "Lion", matches: 2 },
+            { value: "35", label: "Luna", matches: 6 },
+            { value: "1", label: "Anti-Mage", matches: 0 },
+          ],
+          roles: [{ value: "carry", label: "Carry", matches: 5 }],
+        },
+      }),
+    );
+    render(<MatchList />);
+    const box = await screen.findByRole("combobox", { name: "Hero" });
+    fireEvent.focus(box);
+    const listed = () =>
+      within(screen.getByRole("listbox", { name: "Hero" }))
+        .getAllByRole("option")
+        .map((o) => o.textContent);
+    expect(listed()).toEqual(["All heroes", "Luna6", "Lion2"]);
+
+    fireEvent.change(box, { target: { value: "li" } });
+    expect(listed()).toEqual([
+      "All heroes",
+      "Lion2",
+    ]);
     expect(screen.getByText("Carry (5)")).toBeTruthy();
-    expect(screen.getByText("All heroes")).toBeTruthy();
   });
 
   it("sends each filter to the backend rather than trimming the page here", async () => {
     render(<MatchList />);
-    await screen.findByText("Luna (6)");
+    await screen.findByRole("combobox", { name: "Hero" });
 
-    fireEvent.change(screen.getByLabelText("Hero"), { target: { value: "35" } });
-    await waitFor(() => expect(lastCall()[3].heroId).toBe(35));
+    await pickHero("Luna");
+    await waitFor(() => expect(lastCall()[2].heroId).toBe(35));
 
-    fireEvent.change(screen.getByLabelText("Role"), {
-      target: { value: "mid" },
-    });
-    await waitFor(() => expect(lastCall()[3].role).toBe("mid"));
+    fireEvent.change(screen.getByLabelText("Role"), { target: { value: "mid" } });
+    await waitFor(() => expect(lastCall()[2].role).toBe("mid"));
 
-    fireEvent.change(screen.getByLabelText("Result"), {
-      target: { value: "loss" },
-    });
-    await waitFor(() => expect(lastCall()[3].result).toBe("loss"));
+    fireEvent.change(screen.getByLabelText("Result"), { target: { value: "loss" } });
+    await waitFor(() => expect(lastCall()[2].result).toBe("loss"));
 
-    fireEvent.change(screen.getByLabelText("Sort"), {
-      target: { value: "gpm_desc" },
-    });
+    fireEvent.change(screen.getByLabelText("Sort"), { target: { value: "gpm_desc" } });
 
-    // All four travel together: filters combine rather than replacing.
+    // All travel together: filters combine rather than replacing.
     await waitFor(() => {
-      const [, , , params] = lastCall();
-      expect(params).toEqual({
+      expect(lastCall()[2]).toEqual({
+        mode: "eligible",
         heroId: 35,
         role: "mid",
         result: "loss",
@@ -146,50 +209,40 @@ describe("MatchList filters", () => {
   it("returns to page one when a filter changes", async () => {
     getMatches.mockResolvedValue(page({ total: 60, total_pages: 3 }));
     render(<MatchList />);
-    await screen.findByText("Luna (6)");
+    await screen.findByRole("combobox", { name: "Hero" });
 
     fireEvent.click(screen.getByRole("button", { name: /Next/ }));
     await waitFor(() => expect(lastCall()[0]).toBe(2));
 
-    fireEvent.change(screen.getByLabelText("Result"), {
-      target: { value: "win" },
-    });
-
-    // Page two of the unfiltered list is not page two of the filtered one.
+    fireEvent.change(screen.getByLabelText("Result"), { target: { value: "win" } });
     await waitFor(() => expect(lastCall()[0]).toBe(1));
   });
 
   it("issues exactly one request per change", async () => {
     render(<MatchList />);
-    await screen.findByText("Luna (6)");
+    await screen.findByRole("combobox", { name: "Hero" });
     expect(getMatches).toHaveBeenCalledTimes(1);
 
-    fireEvent.change(screen.getByLabelText("Hero"), { target: { value: "35" } });
+    await pickHero("Luna");
     await waitFor(() => expect(getMatches).toHaveBeenCalledTimes(2));
   });
 
-  it("explains an empty filtered list and offers a way out", async () => {
+  it("offers a way out of an empty filtered list", async () => {
     getMatches.mockResolvedValue(
       page({ matches: [], total: 0, total_pages: 0, filtered: true }),
     );
     render(<MatchList />);
-    await screen.findByText("Luna (6)");
+    await screen.findByRole("combobox", { name: "Hero" });
+    await pickHero("Lion");
 
-    fireEvent.change(screen.getByLabelText("Hero"), { target: { value: "26" } });
+    expect(await screen.findByText("No matches for these filters")).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Hero" })).toBeTruthy();
 
-    expect(await screen.findByText("No matches found")).toBeTruthy();
-    // The filter bar stays put — an empty state that hides the controls that
-    // produced it is a dead end.
-    expect(screen.getByLabelText("Hero")).toBeTruthy();
-
-    // One in the filter bar, one in the empty card. The card's is the one a
-    // reader who has just hit the dead end will reach for.
     const clear = screen.getAllByRole("button", { name: "Clear filters" });
-    expect(clear).toHaveLength(2);
-    fireEvent.click(clear[1]);
+    fireEvent.click(clear[clear.length - 1]);
     await waitFor(() => {
-      const [, , , params] = lastCall();
-      expect(params).toEqual({
+      expect(lastCall()[2]).toEqual({
+        mode: "eligible",
         heroId: undefined,
         role: undefined,
         result: "all",
@@ -198,11 +251,12 @@ describe("MatchList filters", () => {
     });
   });
 
-  it("keeps the untouched empty history message when nothing is filtered", async () => {
-    getMatches.mockResolvedValue(page({ matches: [], total: 0, total_pages: 0 }));
+  it("offers every mode when the default view is empty", async () => {
+    getMatches.mockResolvedValue(page({ matches: [], total: 0, total_pages: 0, mode_total: 0 }));
     render(<MatchList />);
 
-    expect(await screen.findByText(/No matches stored yet/)).toBeTruthy();
-    expect(screen.queryByText("No matches found")).toBeNull();
+    expect(await screen.findByText("No Ranked + All Pick games")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show all games" }));
+    await waitFor(() => expect(lastCall()[2].mode).toBe("all"));
   });
 });

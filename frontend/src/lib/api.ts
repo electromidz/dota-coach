@@ -203,11 +203,21 @@ export function getHeroPool(): Promise<HeroPoolResponse> {
 }
 
 /** Pool, meta and scored recommendations in one payload. */
+/**
+ * `role`: "all", a role slug, or absent for the coaching role. The backend
+ * reads the same window Coach does, so records agree across the two pages.
+ */
 export function getHeroIntelligence(
   limit?: number,
+  role?: CoachableRole | "all",
 ): Promise<HeroIntelligenceResponse> {
-  const query = limit === undefined ? "" : `?limit=${limit}`;
-  return apiFetch<HeroIntelligenceResponse>(`/api/hero-intelligence${query}`);
+  const params = new URLSearchParams();
+  if (limit !== undefined) params.set("limit", String(limit));
+  if (role !== undefined) params.set("role", role);
+  const query = params.toString();
+  return apiFetch<HeroIntelligenceResponse>(
+    `/api/hero-intelligence${query ? `?${query}` : ""}`,
+  );
 }
 
 /** Measured evidence plus the last analysis. Never spends a model call. */
@@ -285,7 +295,7 @@ export interface MatchListParams {
   heroId?: number;
   role?: CoachableRole;
   result?: MatchResultFilter;
-  /** Ranked matchmaking only, Turbo only, or every kind of game. */
+  /** Defaults to `eligible`: Ranked + All Pick, what every page reads. */
   mode?: MatchesMode;
   sort?: MatchSort;
 }
@@ -306,20 +316,18 @@ export interface MatchListParams {
 export function getMatches(
   page = 1,
   limit = 20,
-  scope: "all" | "competitive" = "all",
   params: MatchListParams = {},
 ): Promise<MatchListResponse> {
   const query = new URLSearchParams({
     page: String(page),
     limit: String(limit),
   });
-  if (scope !== "all") query.set("scope", scope);
+  if (params.mode && params.mode !== "eligible") query.set("mode", params.mode);
   if (params.heroId !== undefined) query.set("hero_id", String(params.heroId));
   if (params.role) query.set("role", params.role);
   if (params.result && params.result !== "all") {
     query.set("result", params.result);
   }
-  if (params.mode && params.mode !== "all") query.set("mode", params.mode);
   if (params.sort && params.sort !== "newest") query.set("sort", params.sort);
 
   return apiFetch<MatchListResponse>(`/api/matches?${query.toString()}`);

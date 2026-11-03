@@ -117,21 +117,21 @@ describe("getMatches", () => {
     return captured;
   }
 
-  it("asks for the whole history by default", async () => {
+  it("asks for Ranked + All Pick by default, with no mode parameter", async () => {
     const url = captureUrl();
     await getMatches();
 
     expect(url.current).toContain("/api/matches?page=1&limit=20");
+    expect(url.current).not.toContain("mode=");
     expect(url.current).not.toContain("scope=");
   });
 
-  it("asks for the competitive population when told to", async () => {
+  it("asks for Turbo or everything only when told to", async () => {
     const url = captureUrl();
-    await getMatches(1, 20, "competitive");
-
-    // The dashboard's charts depend on this: without it they would plot Turbo
-    // games beside statistics that exclude them.
-    expect(url.current).toContain("scope=competitive");
+    await getMatches(1, 20, { mode: "turbo" });
+    expect(url.current).toContain("mode=turbo");
+    await getMatches(1, 20, { mode: "all" });
+    expect(url.current).toContain("mode=all");
   });
 });
 

@@ -124,7 +124,16 @@ pub async fn sync_player(
     let details_failed = pending.len() - details_enriched;
 
     let heroes = match dota.heroes().await {
-        Ok(map) => map,
+        Ok(map) => {
+            // Keep older matches in step with a rename, so every page shows
+            // one name per hero. Cosmetic: a failure is logged, not fatal.
+            if let Err(e) =
+                repositories::r#match::normalize_hero_names(pool, Some(player.id), &map).await
+            {
+                tracing::warn!(error = %e, "could not normalise stored hero names");
+            }
+            map
+        }
         Err(e) => {
             // Cosmetic only: a sync must not fail because hero names are down.
             tracing::warn!(error = %e, "hero catalogue unavailable, using fallback names");

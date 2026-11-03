@@ -14,12 +14,12 @@ import { Icon } from "@/components/ui/Icon";
 import { SteamLoginButton } from "@/components/ui/SteamLoginButton";
 import { TiltCard } from "@/components/ui/TiltCard";
 import { ApiError, getMatch } from "@/lib/api";
-import type { Match } from "@/lib/types";
+import type { MatchView } from "@/lib/types";
 import { cn, formatDuration } from "@/lib/utils";
 
 type State =
   | { kind: "loading" }
-  | { kind: "ready"; match: Match }
+  | { kind: "ready"; match: MatchView }
   | { kind: "anonymous" }
   | { kind: "paywalled" }
   | { kind: "error"; message: string };
@@ -136,7 +136,7 @@ export function MatchDetail({ id }: { id: string }) {
                   {match.hero_name}
                 </h1>
                 <p className="mt-0.5 text-sm text-ink-muted">
-                  <span className="text-operator">{match.role}</span>
+                  <span className="text-operator">{match.position_label}</span>
                   {" · "}
                   <span className="font-mono tabular-nums">
                     {formatDuration(match.duration_seconds)}

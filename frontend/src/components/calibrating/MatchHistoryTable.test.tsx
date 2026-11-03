@@ -54,6 +54,10 @@ function match(overrides: Partial<MatchView> = {}): MatchView {
     updated_at: "2026-09-24T12:00:00Z",
     eligible: true,
     mode_label: "Ranked All Pick",
+    position: "carry",
+    position_label: "Carry",
+    peer_gpm: 500,
+    peer_xpm: 550,
     rating: 7.4,
     mmr_delta_estimate: 31,
     ...overrides,
@@ -67,7 +71,9 @@ function page(overrides: Partial<MatchListResponse> = {}): MatchListResponse {
     limit: 20,
     total: 43,
     total_pages: 3,
-    scope: "all",
+    mode_total: 1,
+    hidden_turbo: 0,
+    hidden_other: 0,
     filtered: false,
     sort: "newest",
     mode: "all",
@@ -144,11 +150,14 @@ describe("MatchHistoryTable", () => {
     render(<MatchHistoryTable />);
     await screen.findByText("Luna");
 
+    // Ranked + All Pick by default, like every page.
+    expect(lastCall()[2]).toEqual({ mode: "eligible" });
+
     fireEvent.click(screen.getByText("Turbo"));
-    await waitFor(() => expect(lastCall()[3]).toEqual({ mode: "turbo" }));
+    await waitFor(() => expect(lastCall()[2]).toEqual({ mode: "turbo" }));
 
     fireEvent.click(screen.getByText("Ranked"));
-    await waitFor(() => expect(lastCall()[3]).toEqual({ mode: "ranked" }));
+    await waitFor(() => expect(lastCall()[2]).toEqual({ mode: "ranked" }));
   });
 
   it("reads its page from the url and writes the page it moves to", async () => {

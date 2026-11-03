@@ -54,19 +54,36 @@ export function timeAgo(iso: string, now: Date = new Date()): string {
   const then = new Date(iso);
   if (Number.isNaN(then.getTime())) return "unknown";
 
-  const seconds = Math.floor((now.getTime() - then.getTime()) / 1000);
-  if (seconds < 60) return "just now";
+  const diff = Math.floor((now.getTime() - then.getTime()) / 1000);
+  const future = diff < 0;
+  const seconds = Math.abs(diff);
+  if (seconds < 60) return future ? "in a moment" : "just now";
 
+  const say = (n: number, unit: string) => (future ? `in ${n}${unit}` : `${n}${unit} ago`);
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-
+  if (minutes < 60) return say(minutes, "m");
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-
+  if (hours < 24) return say(hours, "h");
   const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
+  if (days < 14) return say(days, "d");
+  const weeks = Math.floor(days / 7);
+  if (days < 60) return say(weeks, "w");
+  const months = Math.floor(days / 30);
+  if (days < 365) return say(months, "mo");
+  return say(Math.floor(days / 365), "y");
+}
 
-  return then.toLocaleDateString();
+/** The full date and time, for the tooltip behind a relative time. */
+export function fullDate(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 /**

@@ -8,15 +8,20 @@ function entry(hero_id: number, tier: HeroTier): HeroPoolEntry {
     hero_id,
     hero_name: `Hero ${hero_id}`,
     role: "Carry",
+    position_label: "Carry",
     matches: 10,
     wins: 5,
     losses: 5,
     win_rate: 0.5,
+    shrunk_win_rate: 0.5,
+    win_rate_delta: 0,
     recent_matches: 10,
     recent_win_rate: 0.5,
     avg_kda: 3,
     avg_gpm: 500,
     last_played_at: new Date().toISOString(),
+    recent_results: [true, false],
+    meta_strength: 55,
     tier,
     tier_label: tier,
     confidence: "adequate",
@@ -41,6 +46,11 @@ function fit(hero_id: number, level: RecommendationLevel): HeroFit {
 }
 
 describe("byTier", () => {
+  it("puts Risk before Stretch so losing heroes are not buried", () => {
+    const groups = byTier([entry(1, "stretch"), entry(2, "risk"), entry(3, "comfort")]);
+    expect(groups.map((g) => g.tier)).toEqual(["comfort", "risk", "stretch"]);
+  });
+
   it("groups strongest first and drops empty tiers", () => {
     const groups = byTier([entry(1, "risk"), entry(2, "signature"), entry(3, "risk")]);
 

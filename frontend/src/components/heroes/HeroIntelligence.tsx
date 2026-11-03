@@ -3,17 +3,19 @@
 import { useEffect, useState } from "react";
 
 import { Paywall } from "@/components/billing/Paywall";
-import { HeroPool } from "@/components/heroes/HeroPool";
-import { RecommendationCard } from "@/components/heroes/RecommendationCard";
+import { FitMetaChart } from "@/components/heroes/FitMetaChart";
+import { MetaBars } from "@/components/heroes/MetaBars";
+import { PoolGrid } from "@/components/heroes/PoolGrid";
+import { RecommendedRow } from "@/components/heroes/RecommendedRow";
 import { SignedOut } from "@/components/shell/SignedOut";
 import { Alert } from "@/components/ui/Alert";
-import { Card } from "@/components/ui/Card";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
+import { InfoTip } from "@/components/ui/InfoTip";
+import { Segmented } from "@/components/ui/Segmented";
 import { ApiError, getHeroIntelligence } from "@/lib/api";
-import { formatScore, splitByLevel } from "@/lib/hero-intel";
+import { formatScore } from "@/lib/hero-intel";
 import { useSession } from "@/lib/session-context";
-import { formatPercent } from "@/lib/stats";
-import type { HeroIntelligenceResponse } from "@/lib/types";
+import type { CoachableRole, HeroIntelligenceResponse } from "@/lib/types";
 
 /**
  * Hero Intelligence.
@@ -28,11 +30,15 @@ export function HeroIntelligence() {
   const [data, setData] = useState<HeroIntelligenceResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [paywalled, setPaywalled] = useState(false);
+  /** Absent follows the coaching role; "all" widens to every role. */
+  const [role, setRole] = useState<CoachableRole | "all" | undefined>();
+  /** Hero picked on the chart, ringed in the pool. */
+  const [highlight, setHighlight] = useState<number | null>(null);
 
   useEffect(() => {
     if (session.kind !== "signed-in") return;
 
-    getHeroIntelligence()
+    getHeroIntelligence(undefined, role)
       .then((response) => {
         setData(response);
         setError(null);
@@ -48,7 +54,7 @@ export function HeroIntelligence() {
             : "Could not load your hero intelligence.",
         );
       });
-  }, [session.kind]);
+  }, [session.kind, role]);
 
   if (session.kind === "loading") return <HeroSkeleton />;
   if (session.kind === "anonymous") return <SignedOut />;
@@ -64,104 +70,118 @@ export function HeroIntelligence() {
   if (error) return <Alert>{error}</Alert>;
   if (!data) return <HeroSkeleton />;
 
-  const { leading, rest } = splitByLevel(data.recommendations);
+  const { scope } = data;
+  const inPool = new Set(data.pool.map((h) => h.hero_id));
+  const plottable = data.pool.filter(
+    (h) => h.win_rate_delta !== null && h.meta_strength !== null,
+  ).length;
+
+  function select(heroId: number) {
+    setHighlight(heroId);
+    document
+      .getElementById(`hero-${heroId}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
 
   return (
     <div className="flex flex-col gap-8 pb-4">
+      <div className="flex flex-wrap items-center gap-3">
+        {scope.coaching_role ? (
+          <Segmented
+            label="Which games"
+            value={scope.role ? "role" : "all"}
+            onChange={(next) => {
+              setData(null);
+              setRole(next === "all" ? "all" : undefined);
+            }}
+            options={[
+              { value: "role", label: scope.coaching_role_label ?? "My role" },
+              { value: "all", label: "All roles" },
+            ]}
+          />
+        ) : null}
+        <p className="font-mono text-xs text-ink-faint">
+          {scope.role_label ?? "All roles"} · {scope.population} · last {scope.window}
+        </p>
+      </div>
+
       {data.note ? <Alert tone="info">{data.note}</Alert> : null}
       {!data.meta.available && data.meta.note ? (
-        <Alert tone="info">{data.meta.note}</Alert>
+        <p className="truncate text-xs text-warn">{data.meta.note}</p>
+      ) : null}
+
+      {plottable > 0 ? (
+        <section className="flex flex-col gap-3" aria-label="Fit vs meta">
+          <h2 className="flex items-center gap-2 font-display text-sm uppercase tracking-[0.2em] text-ink-faint">
+            Fit vs meta
+            <InfoTip label="About this chart">
+              <span>
+                Across: your win rate on the hero against your own average, after
+                small samples are pulled toward that average. Up: how strong the hero
+                is in the current meta. Size: games played.
+              </span>
+              {data.pool.length > plottable ? (
+                <span className="text-ink-faint">
+                  {data.pool.length - plottable} heroes with fewer than 3 games are not
+                  plotted.
+                </span>
+              ) : null}
+            </InfoTip>
+          </h2>
+          <FitMetaChart pool={data.pool} onSelect={select} />
+        </section>
       ) : null}
 
       {data.recommendations.length > 0 ? (
-        <section className="flex flex-col gap-4">
-          <header className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="font-display text-sm uppercase tracking-[0.2em] text-ink-faint">
-              Recommended for you
-            </h2>
-            {data.meta.bracket_label ? (
-              <p className="text-xs text-ink-faint">
-                Scored against {data.meta.bracket_label}
-              </p>
-            ) : null}
-          </header>
-
-          {leading.map((fit) => (
-            <RecommendationCard key={fit.hero_id} fit={fit} />
-          ))}
-
-          {rest.length > 0 ? (
-            <details className="group">
-              <summary className="focus-neon min-h-11 cursor-pointer list-none text-xs uppercase tracking-wider text-ink-faint transition-colors duration-200 hover:text-ink">
-                {rest.length} more, not right now
-              </summary>
-              <div className="mt-4 flex flex-col gap-4">
-                {rest.map((fit) => (
-                  <RecommendationCard key={fit.hero_id} fit={fit} />
-                ))}
-              </div>
-            </details>
-          ) : null}
+        <section className="flex flex-col gap-3" aria-label="Recommended for you">
+          <h2 className="flex items-center gap-2 font-display text-sm uppercase tracking-[0.2em] text-ink-faint">
+            Recommended for you
+            <InfoTip label="How heroes are recommended">
+              Heroes with 5 or more games, ranked by fit score
+              {data.meta.bracket_label ? `, scored against ${data.meta.bracket_label}` : ""}.
+            </InfoTip>
+          </h2>
+          <RecommendedRow fits={data.recommendations} pool={data.pool} />
         </section>
       ) : null}
 
-      {data.pool.length > 0 ? (
-        <HeroPool
-          pool={data.pool}
-          summary={data.summary}
-          recentWindow={data.recent_window}
-        />
+      {data.worth_trying.length > 0 ? (
+        <section className="flex flex-col gap-3" aria-label="Worth trying">
+          <h2 className="flex items-center gap-2 font-display text-sm uppercase tracking-[0.2em] text-ink-faint">
+            Worth trying
+            <InfoTip label="About worth trying">
+              Strong in the meta, but fewer than 5 of your games on them.
+            </InfoTip>
+          </h2>
+          <ul className="flex flex-wrap gap-2">
+            {data.worth_trying.map((fit) => (
+              <li
+                key={fit.hero_id}
+                className="glass flex items-center gap-2 rounded-xl py-1.5 pl-1.5 pr-2.5"
+              >
+                <HeroPortrait heroId={fit.hero_id} heroName={fit.hero_name} size="sm" />
+                <span className="flex min-w-0 flex-col">
+                  <span className="truncate text-xs text-ink">{fit.hero_name}</span>
+                  <span className="text-[0.6875rem] text-ink-faint">
+                    {fit.matches} {fit.matches === 1 ? "game" : "games"}
+                  </span>
+                </span>
+                <span
+                  className="rounded-md bg-you/15 px-1.5 py-0.5 font-mono text-[0.6875rem] tabular-nums text-ink"
+                  title="Meta strength"
+                >
+                  {formatScore(fit.meta_strength)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
       ) : null}
+
+      {data.pool.length > 0 ? <PoolGrid pool={data.pool} highlight={highlight} /> : null}
 
       {data.meta_leaders.length > 0 ? (
-        <section className="flex flex-col gap-4">
-          <h2 className="font-display text-sm uppercase tracking-[0.2em] text-ink-faint">
-            Current meta
-          </h2>
-
-          <Card className="flex flex-col gap-3">
-            <ul className="m-0 flex list-none flex-col gap-3 p-0">
-              {data.meta_leaders.map((hero) => (
-                <li key={hero.hero_id} className="flex items-center gap-3">
-                  <HeroPortrait
-                    heroId={hero.hero_id}
-                    heroName={hero.hero_name}
-                    size="sm"
-                  />
-                  <span className="min-w-0 flex-1 truncate text-sm text-ink">
-                    {hero.hero_name}
-                  </span>
-                  <span className="shrink-0 font-mono text-xs tabular-nums text-ink-muted">
-                    {formatPercent(hero.win_rate)} win ·{" "}
-                    {formatPercent(hero.pick_rate)} pick
-                  </span>
-                  <span className="w-8 shrink-0 text-right font-mono text-sm tabular-nums text-number">
-                    {formatScore(hero.meta_strength)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </Card>
-
-          {/* The honesty note the meta section rests on. */}
-          <Card className="flex flex-col gap-2">
-            <h3 className="text-xs font-semibold uppercase tracking-[0.2em] text-ink-faint">
-              What meta strength means
-            </h3>
-            <p className="text-xs leading-relaxed text-ink-muted">
-              A 0-100 score combining win rate against the rest of the roster,
-              how contested the hero is, and its recent direction — deliberately
-              not the win rate on its own. Heroes with too few recorded games
-              are pulled toward the middle rather than topping the list on a
-              small sample.
-            </p>
-            <p className="text-xs leading-relaxed text-ink-faint">
-              {data.meta.source ? `Source: ${data.meta.source}. ` : ""}
-              Segmented by: {data.meta.segmented_by.join(", ") || "nothing — these are all brackets combined"}.
-              {data.meta.note ? ` ${data.meta.note}` : ""}
-            </p>
-          </Card>
-        </section>
+        <MetaBars leaders={data.meta_leaders} meta={data.meta} inPool={inPool} />
       ) : null}
     </div>
   );
@@ -169,11 +189,34 @@ export function HeroIntelligence() {
 
 function HeroSkeleton() {
   return (
-    <div className="flex flex-col gap-4" aria-busy="true" aria-live="polite">
+    <div className="flex flex-col gap-8" aria-busy="true" aria-live="polite">
       <span className="sr-only">Loading hero intelligence…</span>
-      <div className="h-44 animate-pulse rounded-card bg-surface-2" />
-      <div className="h-44 animate-pulse rounded-card bg-surface-2" />
-      <div className="h-64 animate-pulse rounded-card bg-surface-2" />
+      <div className="h-9 w-72 animate-pulse rounded-xl bg-surface-2" />
+      <div className="relative h-72 w-full animate-pulse rounded-xl bg-surface-2/60 sm:h-80">
+        <span className="absolute inset-y-0 left-1/2 w-px bg-border" />
+        <span className="absolute inset-x-0 top-1/2 h-px bg-border" />
+      </div>
+      <div className="flex gap-3 overflow-hidden">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="glass flex h-36 w-56 shrink-0 flex-col gap-3 rounded-card p-3">
+            <div className="flex items-center gap-2">
+              <div className="h-9 w-16 animate-pulse rounded-lg bg-surface-2" />
+              <div className="h-3 flex-1 animate-pulse rounded bg-surface-2" />
+              <div className="size-11 animate-pulse rounded-full bg-surface-2" />
+            </div>
+            <div className="h-2 w-full animate-pulse rounded-full bg-surface-2" />
+          </div>
+        ))}
+      </div>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+        {Array.from({ length: 10 }, (_, i) => (
+          <div key={i} className="glass flex h-12 items-center gap-2 rounded-xl p-2">
+            <div className="h-7 w-12 animate-pulse rounded bg-surface-2" />
+            <div className="h-2.5 flex-1 animate-pulse rounded bg-surface-2" />
+            <div className="size-8 animate-pulse rounded-full bg-surface-2" />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -24,6 +24,8 @@ pub struct HeroPoolRow {
     pub avg_kda: f32,
     pub avg_gpm: f32,
     pub last_played_at: chrono::DateTime<chrono::Utc>,
+    /// Results inside the recent window, oldest first (true = won).
+    pub recent_results: Vec<bool>,
 }
 
 /// Every hero the player has a stored match on, most-played first.
@@ -69,7 +71,11 @@ pub async fn all(
              COUNT(*) FILTER (WHERE recency <= $2 AND won)          AS recent_wins,
              AVG(kda)::real                                         AS avg_kda,
              AVG(gpm)::real                                         AS avg_gpm,
-             MAX(started_at)                                        AS last_played_at
+             MAX(started_at)                                        AS last_played_at,
+             COALESCE(
+                 ARRAY_AGG(won ORDER BY started_at) FILTER (WHERE recency <= $2),
+                 ARRAY[]::boolean[]
+             )                                                      AS recent_results
            FROM ranked
           GROUP BY hero_id
           ORDER BY matches DESC, last_played_at DESC",

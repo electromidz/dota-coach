@@ -1329,9 +1329,9 @@ async fn evidence_cache_key(
     .flatten()?;
 
     Some(cache::CacheKey::new(
-        // v3: hero kits and evidence figures. Bump whenever the evidence
-        // shape changes, or old entries keep serving the old shape.
-        "coach-evidence-v3",
+        // v5: hero tiers on shrunk win rates, re-estimated roles. Bump whenever the evidence
+        // shape or its rules change, or old entries keep serving the old.
+        "coach-evidence-v5",
         player.id,
         scope.role.slug(),
         &short_hash(&fingerprint),

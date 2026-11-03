@@ -1175,27 +1175,27 @@ async fn a_played_hero_outranks_a_stronger_meta_hero_the_player_has_never_touche
         .json();
 
     let recommendations = body["recommendations"].as_array().unwrap();
-    let position = |hero_id: i64| {
-        recommendations
-            .iter()
-            .position(|r| r["hero_id"] == hero_id)
-            .unwrap_or_else(|| panic!("hero {hero_id} missing from recommendations"))
-    };
+    let worth_trying = body["worth_trying"].as_array().unwrap();
 
-    assert!(
-        position(35) < position(13),
-        "the hero with real history must outrank the stronger meta stranger"
-    );
-
-    let puck = &recommendations[position(13)];
+    // The hero with real history is recommended; the stronger meta stranger
+    // is never ranked beside it, only offered separately as worth trying.
+    let luna = recommendations
+        .iter()
+        .find(|r| r["hero_id"] == 35)
+        .expect("Luna, with 20 games, is recommended");
+    assert!(recommendations.iter().all(|r| r["hero_id"] != 13));
+    let puck = worth_trying
+        .iter()
+        .find(|r| r["hero_id"] == 13)
+        .expect("Puck, strong in the meta, is worth trying");
     assert_ne!(
         puck["level"], "recommended",
         "a hero with no games on it is never a full recommendation"
     );
     assert_eq!(puck["matches"], 0);
+    assert!(recommendations.iter().all(|r| r["matches"].as_i64().unwrap() >= 5));
 
     // And the score explains itself rather than arriving as a bare number.
-    let luna = &recommendations[position(35)];
     assert!(!luna["parts"].as_array().unwrap().is_empty());
     assert!(luna["parts"]
         .as_array()
@@ -1301,7 +1301,12 @@ async fn recommendations_honour_a_limit() {
         .await
         .json();
 
-    assert_eq!(body["recommendations"].as_array().unwrap().len(), 2);
+    // Only heroes with 5+ games are recommended; these six games are all on
+    // one hero, so the limit of two is honoured with one.
+    let recommendations = body["recommendations"].as_array().unwrap();
+    assert!(recommendations.len() <= 2);
+    assert_eq!(recommendations.len(), 1);
+    assert!(body["worth_trying"].as_array().unwrap().len() <= 8);
 
     app.cleanup(&[steam_id]).await;
 }
@@ -1323,9 +1328,11 @@ async fn hero_intelligence_with_no_matches_explains_rather_than_erroring() {
     let body = response.json();
     assert!(body["pool"].as_array().unwrap().is_empty());
     assert!(body["note"].as_str().unwrap().contains("Sync"));
-    // Meta heroes are still scored, and still held back for lack of history.
-    assert!(!body["recommendations"].as_array().unwrap().is_empty());
-    assert!(body["recommendations"]
+    // Nothing is recommended without history; strong meta heroes are still
+    // offered, separately, as worth trying.
+    assert!(body["recommendations"].as_array().unwrap().is_empty());
+    assert!(!body["worth_trying"].as_array().unwrap().is_empty());
+    assert!(body["worth_trying"]
         .as_array()
         .unwrap()
         .iter()
@@ -4940,6 +4947,80 @@ async fn two_days_of_syncing_produce_a_modeled_segment_between_two_real_readings
             "a modeled point outside its anchors' band plus one star: {point}"
         );
     }
+
+    app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn heroes_and_coach_report_the_same_record_and_tier_for_the_same_role() {
+    let Some(db) = support::pool().await else {
+        return skip("heroes_and_coach_report_the_same_record_and_tier_for_the_same_role");
+    };
+    let steam_id = unique_steam_id();
+    let app = app_with_llm(
+        db,
+        MockDota::with_matches(sample_matches(12)),
+        StubVerifier::rejecting(),
+        StubLlm::answering(),
+    );
+    let session = app.login_as(steam_id).await;
+    app.post("/api/players/me/sync", Some(&session.token)).await;
+    // These matches are safe-lane carries.
+    app.choose_role(&session, "carry").await;
+
+    // No role parameter: the Heroes page defaults to the coaching role.
+    let heroes = app.get("/api/hero-intelligence", Some(&session.token)).await.json();
+    assert_eq!(heroes["scope"]["role"], "carry");
+    assert_eq!(heroes["scope"]["coaching_role"], "carry");
+    assert_eq!(heroes["scope"]["population"], "Ranked + All Pick");
+    let luna = heroes["pool"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["hero_id"] == 35)
+        .expect("Luna in the pool");
+
+    let coach = app.get("/api/coach", Some(&session.token)).await.json();
+    let record = coach["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "hero.35")
+        .expect("Luna's record in the coach evidence")["statement"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The last-ten strip: one result per recent game, never more than ten.
+    let recent = luna["recent_results"].as_array().unwrap();
+    assert_eq!(recent.len() as i64, luna["matches"].as_i64().unwrap().min(10));
+    assert_eq!(
+        recent.iter().filter(|r| r.as_bool().unwrap()).count() as f64,
+        (luna["recent_win_rate"].as_f64().unwrap() * recent.len() as f64).round()
+    );
+    assert!(luna["meta_strength"].is_number(), "pool heroes carry meta strength");
+
+    // Same matches, same wins and losses, same tier.
+    let expected = format!(
+        "Luna: {} matches, {}-{}",
+        luna["matches"], luna["wins"], luna["losses"]
+    );
+    assert!(record.starts_with(&expected), "{record} vs {expected}");
+    let tier = luna["tier_label"].as_str().unwrap().to_lowercase();
+    assert!(record.contains(&format!("classified {tier}")), "{record} vs {tier}");
+
+    // "all" widens to every role and says so.
+    let all = app
+        .get("/api/hero-intelligence?role=all", Some(&session.token))
+        .await
+        .json();
+    assert!(all["scope"]["role"].is_null());
+
+    // An unknown role is a bad request, not a silent default.
+    let bad = app
+        .get("/api/hero-intelligence?role=jungler", Some(&session.token))
+        .await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
 
     app.cleanup(&[steam_id]).await;
 }

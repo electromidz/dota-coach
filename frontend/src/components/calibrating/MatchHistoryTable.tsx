@@ -9,7 +9,8 @@ import { Alert } from "@/components/ui/Alert";
 import { Icon } from "@/components/ui/Icon";
 import { ApiError, getMatches, syncMatches } from "@/lib/api";
 import type { MatchesMode, MatchListResponse } from "@/lib/types";
-import { cn, timeAgo } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { RelativeTime } from "@/components/ui/RelativeTime";
 
 const PAGE_SIZE = 20;
 
@@ -17,9 +18,10 @@ const PAGE_SIZE = 20;
 const SYNC_POLL_MS = 5_000;
 
 const MODES: { value: MatchesMode; label: string }[] = [
-  { value: "all", label: "All" },
+  { value: "eligible", label: "Ranked + All Pick" },
   { value: "ranked", label: "Ranked" },
   { value: "turbo", label: "Turbo" },
+  { value: "all", label: "All" },
 ];
 
 /**
@@ -39,7 +41,7 @@ export function MatchHistoryTable() {
   const searchParams = useSearchParams();
   const page = pageFrom(searchParams.get("page"));
 
-  const [mode, setMode] = useState<MatchesMode>("all");
+  const [mode, setMode] = useState<MatchesMode>("eligible");
   /** Bumped to re-run the fetch without changing what is being asked for. */
   const [reload, setReload] = useState(0);
   /** Set when a refresh was refused or failed; the table itself still stands. */
@@ -66,7 +68,7 @@ export function MatchHistoryTable() {
   useEffect(() => {
     let cancelled = false;
 
-    getMatches(page, PAGE_SIZE, "all", { mode })
+    getMatches(page, PAGE_SIZE, { mode })
       .then((response) => {
         if (cancelled) return;
         setShown({ asked, data: response });
@@ -170,7 +172,7 @@ export function MatchHistoryTable() {
         <div className="flex items-center gap-2">
           {data?.last_synced_at ? (
             <span className="font-mono text-[0.625rem] tabular-nums text-ink-faint">
-              synced {timeAgo(data.last_synced_at)}
+              synced <RelativeTime iso={data.last_synced_at} />
             </span>
           ) : null}
           <button
@@ -249,7 +251,7 @@ export function MatchHistoryTable() {
         </table>
       </div>
 
-      {data && data.total === 0 ? <EmptyState mode={mode} /> : null}
+      {data && data.total === 0 ? <EmptyState mode={mode} stored={data.lifetime_games} /> : null}
 
       {data ? (
         <Pagination
@@ -297,12 +299,19 @@ function SkeletonRows() {
   );
 }
 
-function EmptyState({ mode }: { mode: MatchesMode }) {
+const MODE_NAME: Record<MatchesMode, string> = {
+  eligible: "Ranked + All Pick",
+  ranked: "Ranked",
+  turbo: "Turbo",
+  all: "",
+};
+
+function EmptyState({ mode, stored }: { mode: MatchesMode; stored: number }) {
   return (
     <p className="text-sm leading-relaxed text-ink-muted">
-      {mode === "all"
+      {mode === "all" || stored === 0
         ? "No matches stored yet. Refresh above, or sync from the overview, to pull your recent games."
-        : `No ${mode} games in your stored history. Try All.`}
+        : `No ${MODE_NAME[mode]} games in your stored history. Try All.`}
     </p>
   );
 }

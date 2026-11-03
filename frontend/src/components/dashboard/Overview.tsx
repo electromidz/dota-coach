@@ -53,7 +53,7 @@ export function Overview({ loginError }: { loginError?: string }) {
       // backend, the list only feeds the trend and form visuals — and both
       // read the competitive population, so they describe the same games.
       const [page, computed] = await Promise.all([
-        getMatches(1, SAMPLE, "competitive"),
+        getMatches(1, SAMPLE),
         getStats(),
       ]);
       setMatches(page.matches);

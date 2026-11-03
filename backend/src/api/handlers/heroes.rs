@@ -19,6 +19,7 @@ use crate::api::extract::{AppQuery, EntitledUser};
 use crate::domain::benchmark::{BenchmarkContext, Segment};
 use crate::domain::hero::{HeroFit, HeroMeta, HeroMetaContext, HeroPoolEntry, RankBracket};
 use crate::domain::player::DotaPlayer;
+use crate::domain::role::CoachableRole;
 use crate::domain::scope::MatchScope;
 use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
@@ -33,10 +34,30 @@ use utoipa::ToSchema;
 pub struct HeroQuery {
     /// Overrides the default taken from `HeroConfig::recommendation_limit`.
     pub limit: Option<usize>,
+    /// `all` for every role, a role slug for one, absent for the coaching
+    /// role (or every role when none is chosen).
+    pub role: Option<String>,
+}
+
+/// Which matches the page reads. The same window Coach uses, so a hero's
+/// record and tier agree across the two pages for the same role.
+#[derive(Serialize, ToSchema)]
+pub struct HeroScope {
+    /// The role being read, or `null` for every role.
+    pub role: Option<CoachableRole>,
+    pub role_label: Option<&'static str>,
+    /// The role being coached, offered as the default filter.
+    pub coaching_role: Option<CoachableRole>,
+    pub coaching_role_label: Option<&'static str>,
+    /// e.g. "Ranked + All Pick".
+    pub population: &'static str,
+    /// The newest this-many eligible matches.
+    pub window: i64,
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct HeroPoolResponse {
+    pub scope: HeroScope,
     pub pool: Vec<HeroPoolEntry>,
     pub summary: PoolSummary,
     /// How many recent matches per hero "recent form" is measured over.
@@ -46,15 +67,22 @@ pub struct HeroPoolResponse {
 
 #[derive(Serialize, ToSchema)]
 pub struct RecommendationsResponse {
+    /// Heroes with enough games behind them to recommend, best fit first.
     pub recommendations: Vec<HeroFit>,
+    /// Strong meta heroes with too few games to recommend yet.
+    pub worth_trying: Vec<HeroFit>,
     pub meta: MetaContext,
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct HeroIntelligenceResponse {
+    pub scope: HeroScope,
     pub pool: Vec<HeroPoolEntry>,
     pub summary: PoolSummary,
+    /// Heroes with enough games behind them to recommend, best fit first.
     pub recommendations: Vec<HeroFit>,
+    /// Strong meta heroes with too few games to recommend yet.
+    pub worth_trying: Vec<HeroFit>,
     /// The strongest heroes in the cohort, whether or not the player plays
     /// them — "the current meta", as its own section.
     pub meta_leaders: Vec<HeroMeta>,
@@ -84,6 +112,11 @@ pub struct MetaContext {
     summary = "The player's hero pool",
     description = "Built from stored matches alone, so it keeps answering while the hero meta provider is down.",
     security(("session" = [])),
+    params(
+        ("role" = Option<String>, Query,
+            description = "`all`, or a role slug (e.g. `soft_support`). Absent: the coaching role, or every role if none is chosen. Same match window as Coach.",
+            example = "soft_support"),
+    ),
     responses(
         (status = 200, description = "Every hero played, classified", body = HeroPoolResponse),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
@@ -95,12 +128,17 @@ pub struct MetaContext {
 pub async fn pool(
     State(state): State<AppState>,
     EntitledUser(user): EntitledUser,
+    AppQuery(query): AppQuery<HeroQuery>,
 ) -> AppResult<Json<HeroPoolResponse>> {
     let player = load_linked_player(&state, &user).await?;
-    let (pool, _) = load_pool(&state, &player, &MatchScope::career()).await?;
+    let (scope, info) = resolve_scope(&state, &player, query.role.as_deref()).await?;
+    let (mut pool, _) = load_pool(&state, &player, &scope).await?;
+    canonical_pool_names(&state, &mut pool).await;
+    sort_by_tier(&mut pool);
     let summary = heroes::summarize(&pool);
 
     Ok(Json(HeroPoolResponse {
+        scope: info,
         note: empty_pool_note(&pool),
         pool,
         summary,
@@ -138,6 +176,7 @@ pub async fn recommendations(
 
     Ok(Json(RecommendationsResponse {
         recommendations: built.recommendations,
+        worth_trying: built.worth_trying,
         meta: built.meta,
     }))
 }
@@ -153,6 +192,9 @@ pub async fn recommendations(
             description = "How many recommendations to include. Defaults to HERO_RECOMMENDATION_LIMIT (8), \
 and is clamped to 50 however high it is set.",
             example = 8, minimum = 1, maximum = 50),
+        ("role" = Option<String>, Query,
+            description = "`all`, or a role slug (e.g. `soft_support`). Absent: the coaching role, or every role if none is chosen. Same match window as Coach.",
+            example = "soft_support"),
     ),
     responses(
         (status = 200, description = "Combined hero intelligence", body = HeroIntelligenceResponse),
@@ -167,13 +209,18 @@ pub async fn intelligence(
     EntitledUser(user): EntitledUser,
     AppQuery(query): AppQuery<HeroQuery>,
 ) -> AppResult<Json<HeroIntelligenceResponse>> {
-    let built = build(&state, &user, query.limit, &MatchScope::career(), None).await?;
+    let player = load_linked_player(&state, &user).await?;
+    let (scope, info) = resolve_scope(&state, &player, query.role.as_deref()).await?;
+    let mut built = build(&state, &user, query.limit, &scope, info.role).await?;
+    sort_by_tier(&mut built.pool);
 
     Ok(Json(HeroIntelligenceResponse {
+        scope: info,
         note: empty_pool_note(&built.pool),
         summary: heroes::summarize(&built.pool),
         pool: built.pool,
         recommendations: built.recommendations,
+        worth_trying: built.worth_trying,
         meta_leaders: built.meta_leaders,
         meta: built.meta,
         recent_window: RECENT_WINDOW,
@@ -182,7 +229,10 @@ pub async fn intelligence(
 
 pub(crate) struct Built {
     pub pool: Vec<HeroPoolEntry>,
+    /// Only heroes with at least `RECOMMEND_MIN_MATCHES` games.
     pub recommendations: Vec<HeroFit>,
+    /// Strong meta heroes the player has barely played, by meta strength.
+    pub worth_trying: Vec<HeroFit>,
     pub meta_leaders: Vec<HeroMeta>,
     pub meta: MetaContext,
 }
@@ -207,14 +257,20 @@ pub(crate) async fn build(
     let limit = limit.unwrap_or(config.recommendation_limit).clamp(1, 50);
 
     let player = load_linked_player(state, user).await?;
-    let (pool, baseline) = load_pool(state, &player, scope).await?;
+    let (mut pool, baseline) = load_pool(state, &player, scope).await?;
+    let names = hero_names(state).await;
+    rename(&names, pool.iter_mut().map(|e| (e.hero_id, &mut e.hero_name)));
 
     // A provider outage degrades the page rather than failing it: the player's
     // own history is local and still worth scoring on.
     let bracket = player.rank_tier.and_then(RankBracket::from_rank_tier);
     let context = HeroMetaContext::for_bracket(bracket);
     let (meta_set, outage_note) = match state.hero_meta.get_hero_meta(&context).await {
-        Ok(set) => (Some(set), None),
+        Ok(mut set) => {
+            // The meta provider's names can lag a rename; the catalogue wins.
+            rename(&names, set.heroes.iter_mut().map(|h| (h.hero_id, &mut h.hero_name)));
+            (Some(set), None)
+        }
         Err(e) => {
             let note = e.user_note().to_string();
             tracing::warn!(error = %e, ?bracket, "hero meta unavailable");
@@ -245,6 +301,9 @@ pub(crate) async fn build(
         .as_ref()
         .map(|set| set.heroes.iter().map(|h| (h.hero_id, h)).collect())
         .unwrap_or_default();
+    for entry in pool.iter_mut() {
+        entry.meta_strength = by_hero.get(&entry.hero_id).map(|m| m.meta_strength);
+    }
 
     let benchmarks =
         benchmark_percentiles(state, &player, &pool, config.benchmark_lookups, scope).await;
@@ -300,15 +359,104 @@ pub(crate) async fn build(
         )
     }));
 
-    let mut recommendations = heroes::rank(fits);
-    recommendations.truncate(limit);
+    let (recommendations, worth_trying) =
+        heroes::split_recommendations(heroes::rank(fits), limit, WORTH_TRYING_LIMIT);
 
     Ok(Built {
         pool,
         recommendations,
+        worth_trying,
         meta_leaders: top_meta(&meta_set, limit).into_iter().cloned().collect(),
         meta: meta_context,
     })
+}
+
+/// How many "worth trying" heroes the page shows.
+const WORTH_TRYING_LIMIT: usize = 8;
+
+/// Hero id -> canonical display name, from the provider's hero catalogue.
+/// Empty when the catalogue is down; names then stay as stored.
+pub(crate) async fn hero_names(state: &AppState) -> HashMap<i32, String> {
+    state.dota.heroes().await.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "hero catalogue unavailable; keeping stored names");
+        HashMap::new()
+    })
+}
+
+fn rename<'a>(names: &HashMap<i32, String>, entries: impl Iterator<Item = (i32, &'a mut String)>) {
+    for (id, name) in entries {
+        if let Some(canonical) = names.get(&id) {
+            if name != canonical {
+                *name = canonical.clone();
+            }
+        }
+    }
+}
+
+async fn canonical_pool_names(state: &AppState, pool: &mut [HeroPoolEntry]) {
+    let names = hero_names(state).await;
+    rename(&names, pool.iter_mut().map(|e| (e.hero_id, &mut e.hero_name)));
+}
+
+/// Signature, Comfort, Risk, Stretch; most played first within a tier. Risk
+/// sits before Stretch: heroes costing games matter more than untried ones.
+fn sort_by_tier(pool: &mut [HeroPoolEntry]) {
+    use crate::domain::hero::HeroTier;
+    let rank = |tier: HeroTier| match tier {
+        HeroTier::Signature => 0,
+        HeroTier::Comfort => 1,
+        HeroTier::Risk => 2,
+        HeroTier::Stretch => 3,
+    };
+    pool.sort_by(|a, b| {
+        rank(a.tier)
+            .cmp(&rank(b.tier))
+            .then(b.matches.cmp(&a.matches))
+            .then(a.hero_id.cmp(&b.hero_id))
+    });
+}
+
+/// The match scope for a role filter, and how to describe it.
+///
+/// Absent means the coaching role when one is chosen, else every role. Uses
+/// Coach's own window, so the same filter reads the same matches on both pages.
+pub(crate) async fn resolve_scope(
+    state: &AppState,
+    player: &DotaPlayer,
+    requested: Option<&str>,
+) -> AppResult<(MatchScope, HeroScope)> {
+    let window = state.config.roles.analysis_match_limit;
+    let coaching = repositories::coaching_profile::find(&state.db, player.id)
+        .await?
+        .map(|p| p.selected_role);
+
+    let role = match requested {
+        Some("all") => None,
+        Some(slug) => Some(
+            CoachableRole::ALL
+                .into_iter()
+                .find(|r| r.slug() == slug)
+                .ok_or_else(|| AppError::BadRequest(format!("Unknown role \"{slug}\".")))?,
+        ),
+        None => coaching,
+    };
+
+    let scope = match role {
+        Some(role) => MatchScope::for_role(role, window),
+        None => MatchScope::competitive(window),
+    };
+
+    Ok((
+        scope,
+        HeroScope {
+            role,
+            role_label: role.map(CoachableRole::label),
+            coaching_role: coaching,
+            coaching_role_label: coaching.map(CoachableRole::label),
+            population: "Ranked + All Pick",
+            window,
+        },
+    ))
 }
 
 /// The strongest heroes in the cohort, by meta strength.

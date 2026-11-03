@@ -16,7 +16,7 @@ import {
 } from "@/lib/api";
 import { useSession } from "@/lib/session-context";
 import type { ProgressResponse, SessionHistoryResponse } from "@/lib/types";
-import { timeAgo } from "@/lib/utils";
+import { RelativeTime } from "@/components/ui/RelativeTime";
 
 /**
  * The record of what was measured, and when.
@@ -153,7 +153,7 @@ export function CoachingHistory() {
                     <span className="text-xs text-ink-faint">
                       {entry.analyzed_match_count}{" "}
                       {entry.analyzed_match_count === 1 ? "match" : "matches"} ·{" "}
-                      {timeAgo(entry.created_at)}
+                      <RelativeTime iso={entry.created_at} />
                       {entry.has_analysis ? " · analysed" : ""}
                     </span>
                   </div>
