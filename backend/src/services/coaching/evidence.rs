@@ -1133,11 +1133,15 @@ mod tests {
             wins: 11,
             losses: 9,
             win_rate: 0.55,
+            shrunk_win_rate: 0.55,
+            win_rate_delta: None,
             recent_matches: 10,
             recent_win_rate: Some(0.6),
             avg_kda: 3.4,
             avg_gpm: 540.0,
             last_played_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            recent_results: Vec::new(),
+            meta_strength: None,
             tier: HeroTier::Signature,
             tier_label: "Signature",
             confidence: Confidence::Adequate,
@@ -1281,6 +1285,8 @@ mod tests {
             wins: 4,
             losses: 9,
             win_rate: 0.31,
+            shrunk_win_rate: 0.31,
+            win_rate_delta: None,
             ..pool_entry()
         }];
         let evidence = build(&inputs(&stats, &[], &benchmarks, &pool, &[]));

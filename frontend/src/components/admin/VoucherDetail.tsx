@@ -10,7 +10,8 @@ import { Icon } from "@/components/ui/Icon";
 import { voucherStateLabel } from "@/lib/admin";
 import { ApiError, deactivateVoucher, getAdminVoucher } from "@/lib/api";
 import type { AdminVoucherDetail as AdminVoucherDetailResponse } from "@/lib/types";
-import { cn, timeAgo } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { RelativeTime } from "@/components/ui/RelativeTime";
 
 export function VoucherDetail({ id }: { id: string }) {
   const [data, setData] = useState<AdminVoucherDetailResponse | null>(null);
@@ -74,7 +75,7 @@ export function VoucherDetail({ id }: { id: string }) {
           <div className="min-w-0">
             <p className="font-mono text-lg text-ink">{data.code}</p>
             <p className="mt-1 text-xs text-ink-faint">
-              {data.duration_days} days · created {timeAgo(data.created_at)}
+              {data.duration_days} days · created <RelativeTime iso={data.created_at} />
               {data.note ? ` · ${data.note}` : ""}
             </p>
           </div>
@@ -128,7 +129,7 @@ export function VoucherDetail({ id }: { id: string }) {
                 <Link href={`/admin/users/${r.user_id}`}>
                   <Card className="flex items-center justify-between gap-3 p-3.5 transition-colors duration-200 ease-out hover:border-function/50">
                     <span className="text-sm text-ink">{r.persona_name ?? r.steam_id}</span>
-                    <span className="text-xs text-ink-faint">{timeAgo(r.redeemed_at)}</span>
+                    <span className="text-xs text-ink-faint"><RelativeTime iso={r.redeemed_at} /></span>
                   </Card>
                 </Link>
               </li>

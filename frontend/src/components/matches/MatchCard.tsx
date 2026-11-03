@@ -3,7 +3,8 @@ import Link from "next/link";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
 import { TiltCard } from "@/components/ui/TiltCard";
 import type { MatchView } from "@/lib/types";
-import { cn, formatDuration, timeAgo } from "@/lib/utils";
+import { cn, formatDuration } from "@/lib/utils";
+import { RelativeTime } from "@/components/ui/RelativeTime";
 
 /** Rough ceilings for the inline bars, so a good game visibly fills them. */
 const GPM_CEILING = 900;
@@ -69,7 +70,7 @@ export function MatchCard({
                   {formatDuration(match.duration_seconds)}
                 </span>
                 {" · "}
-                {timeAgo(match.started_at)}
+                <RelativeTime iso={match.started_at} />
               </p>
 
               {/* What this game was, and whether the coach reads it. Without

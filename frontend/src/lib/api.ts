@@ -203,11 +203,21 @@ export function getHeroPool(): Promise<HeroPoolResponse> {
 }
 
 /** Pool, meta and scored recommendations in one payload. */
+/**
+ * `role`: "all", a role slug, or absent for the coaching role. The backend
+ * reads the same window Coach does, so records agree across the two pages.
+ */
 export function getHeroIntelligence(
   limit?: number,
+  role?: CoachableRole | "all",
 ): Promise<HeroIntelligenceResponse> {
-  const query = limit === undefined ? "" : `?limit=${limit}`;
-  return apiFetch<HeroIntelligenceResponse>(`/api/hero-intelligence${query}`);
+  const params = new URLSearchParams();
+  if (limit !== undefined) params.set("limit", String(limit));
+  if (role !== undefined) params.set("role", role);
+  const query = params.toString();
+  return apiFetch<HeroIntelligenceResponse>(
+    `/api/hero-intelligence${query ? `?${query}` : ""}`,
+  );
 }
 
 /** Measured evidence plus the last analysis. Never spends a model call. */

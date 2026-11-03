@@ -845,18 +845,26 @@ export type FitComponentName =
 export interface HeroPoolEntry {
   hero_id: number;
   hero_name: string;
-  /** The player's most frequent role on this hero. */
+  /** Position most often played on this hero, estimated per match ("played as"). */
   role: string;
   matches: number;
   wins: number;
   losses: number;
   win_rate: number;
+  /** Win rate pulled toward the player's baseline by how few games it rests on. */
+  shrunk_win_rate: number;
+  /** Shrunk win rate minus the baseline; null below 3 games. */
+  win_rate_delta: number | null;
   /** Matches inside the recent window, and the win rate across them. */
   recent_matches: number;
   recent_win_rate: number | null;
   avg_kda: number;
   avg_gpm: number;
   last_played_at: string;
+  /** Results inside the recent window, oldest first (true = won). */
+  recent_results: boolean[];
+  /** The hero's current meta strength, when the meta provider answered. */
+  meta_strength: number | null;
   tier: HeroTier;
   tier_label: string;
   confidence: Confidence;
@@ -930,10 +938,24 @@ export interface HeroPoolResponse {
   note: string | null;
 }
 
+/** Which matches the Heroes page reads; the same window Coach uses. */
+export interface HeroScope {
+  role: CoachableRole | null;
+  role_label: string | null;
+  coaching_role: CoachableRole | null;
+  coaching_role_label: string | null;
+  population: string;
+  window: number;
+}
+
 export interface HeroIntelligenceResponse {
+  scope: HeroScope;
   pool: HeroPoolEntry[];
   summary: PoolSummary;
+  /** Heroes with 5+ games, best fit first. */
   recommendations: HeroFit[];
+  /** Strong meta heroes with fewer than 5 games. */
+  worth_trying: HeroFit[];
   meta_leaders: HeroMeta[];
   meta: MetaContext;
   recent_window: number;

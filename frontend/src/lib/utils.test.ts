@@ -68,8 +68,15 @@ describe("timeAgo", () => {
     expect(timeAgo("2026-01-08T12:00:00Z", now)).toBe("2d ago");
   });
 
-  it("falls back to a date once the relative form stops helping", () => {
-    expect(timeAgo("2025-01-10T12:00:00Z", now)).toContain("2025");
+  it("keeps one relative format for older times: weeks, months, years", () => {
+    expect(timeAgo("2026-01-01T12:00:00Z", now)).toBe("9d ago");
+    expect(timeAgo("2025-12-06T12:00:00Z", now)).toBe("5w ago");
+    expect(timeAgo("2025-10-10T12:00:00Z", now)).toBe("3mo ago");
+    expect(timeAgo("2025-01-10T12:00:00Z", now)).toBe("1y ago");
+  });
+
+  it("describes future times too", () => {
+    expect(timeAgo("2026-01-13T12:00:00Z", now)).toBe("in 3d");
   });
 
   it("does not throw on an unparseable timestamp", () => {

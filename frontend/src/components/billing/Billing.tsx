@@ -17,7 +17,7 @@ import {
 } from "@/lib/billing";
 import { useSession } from "@/lib/session-context";
 import type { BillingResponse, Payment } from "@/lib/types";
-import { timeAgo } from "@/lib/utils";
+import { RelativeTime } from "@/components/ui/RelativeTime";
 
 /**
  * Trial, subscription and charges.
@@ -229,7 +229,7 @@ function PaymentRow({ payment }: { payment: Payment }) {
             )}
           </p>
           <p className="mt-1 text-xs text-ink-faint">
-            {payment.status_label} · {timeAgo(payment.created_at)}
+            {payment.status_label} · <RelativeTime iso={payment.created_at} />
           </p>
         </div>
 

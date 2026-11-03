@@ -9,7 +9,8 @@ import type { HeroFit, HeroPoolEntry, HeroTier, RecommendationLevel } from "./ty
  */
 
 /** Tier order, strongest repertoire first. Used for grouping the pool. */
-export const TIER_ORDER: HeroTier[] = ["signature", "comfort", "stretch", "risk"];
+/** Risk before Stretch: heroes costing games matter more than untried ones. */
+export const TIER_ORDER: HeroTier[] = ["signature", "comfort", "risk", "stretch"];
 
 /** What each tier means, in the player's terms rather than the spec's. */
 export const TIER_BLURB: Record<HeroTier, string> = {

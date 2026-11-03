@@ -683,3 +683,57 @@ pub async fn update_facts(
 
     Ok(result.rows_affected())
 }
+
+/// Rewrite stored hero names to the catalogue's, for one player or everyone.
+///
+/// Names are copied onto each match at sync time, so a hero Valve renamed
+/// keeps its old name on older matches. One statement for the whole catalogue.
+pub async fn normalize_hero_names(
+    pool: &PgPool,
+    dota_player_id: Option<Uuid>,
+    names: &std::collections::HashMap<i32, String>,
+) -> Result<u64, sqlx::Error> {
+    if names.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<i32> = names.keys().copied().collect();
+    let labels: Vec<&str> = ids.iter().map(|id| names[id].as_str()).collect();
+    let result = sqlx::query(
+        "UPDATE matches m
+            SET hero_name = c.name
+           FROM UNNEST($1::int[], $2::text[]) AS c(hero_id, name)
+          WHERE m.hero_id = c.hero_id
+            AND m.hero_name <> c.name
+            AND ($3::uuid IS NULL OR m.dota_player_id = $3)",
+    )
+    .bind(&ids)
+    .bind(&labels)
+    .bind(dota_player_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Matches whose role came from the farm-priority fallback (no lane data),
+/// newest first. These are the ones a farm-rank fix can change.
+pub async fn farm_ranked_matches(pool: &PgPool) -> Result<Vec<(Uuid, i64, i64, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT m.id, m.match_id, p.dota_account_id, m.role
+           FROM matches m
+           JOIN dota_players p ON p.id = m.dota_player_id
+          WHERE m.lane_role IS NULL
+            AND m.role IN ('Core', 'Support', 'Hard Support', 'Unknown')
+          ORDER BY m.started_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn set_role(pool: &PgPool, match_id: Uuid, role: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE matches SET role = $2 WHERE id = $1")
+        .bind(match_id)
+        .bind(role)
+        .execute(pool)
+        .await?;
+    Ok(())
+}

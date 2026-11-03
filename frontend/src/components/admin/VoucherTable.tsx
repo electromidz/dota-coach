@@ -10,7 +10,8 @@ import { Icon } from "@/components/ui/Icon";
 import { voucherStateLabel, vouchersToCsv } from "@/lib/admin";
 import { ApiError, createVouchers, deactivateVoucher, getAdminVouchers } from "@/lib/api";
 import type { Voucher, VoucherListResponse } from "@/lib/types";
-import { cn, timeAgo } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { RelativeTime } from "@/components/ui/RelativeTime";
 
 const PAGE_SIZE = 20;
 
@@ -332,7 +333,7 @@ function VoucherRow({
           <span className="text-ink-faint">{voucher.duration_days}d</span>
           {voucher.expires_at ? (
             <span className="text-ink-faint">
-              expires {timeAgo(voucher.expires_at)}
+              expires <RelativeTime iso={voucher.expires_at} />
             </span>
           ) : null}
           <span

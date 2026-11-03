@@ -200,13 +200,20 @@ impl HeroTier {
 pub struct HeroPoolEntry {
     pub hero_id: i32,
     pub hero_name: String,
-    /// The player's most frequent role on this hero.
+    /// The position the player most often played this hero in, estimated
+    /// per match ("played as"), not the hero's canonical role.
     pub role: String,
 
     pub matches: i64,
     pub wins: i64,
     pub losses: i64,
     pub win_rate: f32,
+    /// The win rate pulled toward the player's own baseline by how few games
+    /// it rests on. What tiers and deltas are judged on.
+    pub shrunk_win_rate: f32,
+    /// `shrunk_win_rate` minus the baseline, as a fraction. `None` below the
+    /// minimum games for a delta to be shown at all.
+    pub win_rate_delta: Option<f32>,
 
     /// Matches inside the recent window, and the win rate across them. The
     /// count is reported so a 100% from two games is visibly two games.
@@ -216,6 +223,10 @@ pub struct HeroPoolEntry {
     pub avg_kda: f32,
     pub avg_gpm: f32,
     pub last_played_at: chrono::DateTime<chrono::Utc>,
+    /// Results inside the recent window, oldest first (true = won).
+    pub recent_results: Vec<bool>,
+    /// The hero's current meta strength, when the meta provider answered.
+    pub meta_strength: Option<f32>,
 
     pub tier: HeroTier,
     pub tier_label: &'static str,

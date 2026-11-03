@@ -8,7 +8,6 @@ export default function HeroesPage() {
     <AppShell
       title="Heroes"
       eyebrow="Hero intelligence"
-      description="Which of the currently strong heroes actually fit you."
     >
       <HeroIntelligence />
     </AppShell>

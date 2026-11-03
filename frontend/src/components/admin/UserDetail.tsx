@@ -11,6 +11,7 @@ import { accountStatusLabel, displayName, planLabel } from "@/lib/admin";
 import { ApiError, disableUser, enableUser, extendAccess, getAdminUser } from "@/lib/api";
 import type { AdminUserDetail as AdminUserDetailResponse } from "@/lib/types";
 import { cn, timeAgo } from "@/lib/utils";
+import { RelativeTime } from "@/components/ui/RelativeTime";
 
 const EXTEND_PRESETS = [7, 14, 30];
 
@@ -101,7 +102,7 @@ export function UserDetail({ id }: { id: string }) {
           <div className="min-w-0">
             <p className="text-lg text-ink">{displayName(data)}</p>
             <p className="mt-1 font-mono text-xs tabular-nums text-ink-faint">
-              {data.steam_id} · joined {timeAgo(data.created_at)}
+              {data.steam_id} · joined <RelativeTime iso={data.created_at} />
             </p>
             <p className="mt-1 text-xs text-ink-faint">
               {data.last_login_at
@@ -208,7 +209,7 @@ export function UserDetail({ id }: { id: string }) {
               <li key={event.id}>
                 <Card className="flex items-center justify-between gap-3 p-3.5">
                   <span className="font-mono text-xs text-ink">{event.type}</span>
-                  <span className="text-xs text-ink-faint">{timeAgo(event.created_at)}</span>
+                  <span className="text-xs text-ink-faint"><RelativeTime iso={event.created_at} /></span>
                 </Card>
               </li>
             ))}

@@ -435,15 +435,26 @@ fn normalize_match_detail(
 ///
 /// Only usable from full match details, and only a stand-in for the real lane
 /// assignment, which unparsed matches do not carry.
+/// Net worth, or total gold when the provider omits it. Used for the stored
+/// figure only; farm priority is ranked on GPM below.
+fn net_worth_of(player: &RawMatchPlayer) -> Option<i32> {
+    player.net_worth.or(player.total_gold)
+}
+
+/// The player's farm priority within their own team: 0 for the most farm.
+///
+/// Ranked on gold per minute: gold *earned*, in one unit for every player.
+/// End-of-game net worth is the wrong measure. A carry who spent on buybacks
+/// or consumables can end below their supports (a Terrorblade on 1,339 GPM
+/// ranked last by net worth and was labelled a hard support), and mixing one
+/// player's net worth with another's total gold compares different things.
+/// Each measure is used only when every teammate has it.
 fn farm_rank(players: &[RawMatchPlayer], index: usize) -> Option<u8> {
     let target = players.get(index)?;
     let target_side = is_radiant(target.player_slot);
-    let target_worth = net_worth_of(target)?;
-
-    let mut team: Vec<i32> = players
+    let team: Vec<&RawMatchPlayer> = players
         .iter()
         .filter(|p| is_radiant(p.player_slot) == target_side)
-        .filter_map(net_worth_of)
         .collect();
 
     // A partial team (anonymous players, truncated payloads) makes the rank
@@ -452,15 +463,23 @@ fn farm_rank(players: &[RawMatchPlayer], index: usize) -> Option<u8> {
         return None;
     }
 
-    team.sort_unstable_by(|a, b| b.cmp(a));
-    team.iter()
-        .position(|w| *w == target_worth)
-        .map(|rank| rank as u8)
+    let measures: [fn(&RawMatchPlayer) -> Option<i32>; 3] = [
+        |p| p.gold_per_min,
+        |p| p.total_gold,
+        |p| p.net_worth,
+    ];
+    let measure = measures
+        .into_iter()
+        .find(|m| team.iter().all(|p| m(p).is_some()))?;
+
+    let target_value = measure(target)?;
+    let richer = team
+        .iter()
+        .filter(|p| measure(p).is_some_and(|v| v > target_value))
+        .count();
+    Some(richer as u8)
 }
 
-fn net_worth_of(player: &RawMatchPlayer) -> Option<i32> {
-    player.net_worth.or(player.total_gold)
-}
 
 fn is_radiant(player_slot: i32) -> bool {
     player_slot < DIRE_SLOT_THRESHOLD
@@ -722,6 +741,45 @@ mod tests {
         let raw: RawMatchDetail = serde_json::from_str(MATCH_DETAIL).unwrap();
         let m = normalize_match_detail(raw, ACCOUNT_ID).unwrap();
         assert_eq!(m.farm_rank, None);
+    }
+
+    #[test]
+    fn farm_priority_is_ranked_on_gold_earned_not_net_worth_at_the_end() {
+        // Match 9035288310, Dire: Terrorblade (the player) ended with the
+        // lowest net worth after buybacks, but out-earned two teammates.
+        // Ranked on net worth he was labelled a hard support.
+        let player = |slot: i32, account: Option<i64>, gpm: i32, nw: i32, tg: i32| {
+            serde_json::from_value::<RawMatchPlayer>(serde_json::json!({
+                "account_id": account, "player_slot": slot, "hero_id": 1,
+                "gold_per_min": gpm, "net_worth": nw, "total_gold": tg
+            }))
+            .unwrap()
+        };
+        let players = vec![
+            player(128, None, 1233, 40562, 48991),
+            player(129, Some(316184238), 1339, 37564, 53202),
+            player(130, None, 1753, 54506, 69652),
+            player(131, None, 1596, 45506, 63414),
+            player(132, None, 1283, 43727, 50977),
+        ];
+        assert_eq!(farm_rank(&players, 1), Some(2));
+    }
+
+    #[test]
+    fn farm_rank_never_mixes_measures_across_players() {
+        // One teammate without GPM: fall back to a measure all five have.
+        let mut players: Vec<RawMatchPlayer> = (0..5)
+            .map(|i| {
+                serde_json::from_value(serde_json::json!({
+                    "player_slot": i, "hero_id": 1,
+                    "gold_per_min": 400 + i * 10, "total_gold": 10000 - i * 100
+                }))
+                .unwrap()
+            })
+            .collect();
+        players[3].gold_per_min = None;
+        // Ranked on total gold: slot 0 earned the most.
+        assert_eq!(farm_rank(&players, 0), Some(0));
     }
 
     #[test]

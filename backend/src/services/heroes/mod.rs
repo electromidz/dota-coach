@@ -36,6 +36,22 @@ const EXPERIENCE_SATURATION: f32 = 20.0;
 /// read as a real difference rather than noise.
 const BASELINE_BAND: f32 = 0.05;
 
+/// Pseudo-games of the player's own baseline mixed into every hero's record:
+/// `(wins + K * baseline) / (matches + K)`. With 1 game a hero barely moves
+/// off the baseline; with 30 it is mostly its own record.
+pub const SHRINK_GAMES: f32 = 10.0;
+/// Below this many games no win-rate delta is shown or reasoned about.
+pub const DELTA_MIN_MATCHES: i64 = 3;
+/// Below this many games a hero is never "recommended", only "worth trying".
+pub const RECOMMEND_MIN_MATCHES: i64 = 5;
+/// Meta strength a hero needs to be offered as "worth trying".
+pub const WORTH_TRYING_META: f32 = 60.0;
+
+/// A record pulled toward the baseline by how few games it rests on.
+pub fn shrunk_win_rate(wins: i64, matches: i64, baseline: f32) -> f32 {
+    (wins as f32 + SHRINK_GAMES * baseline) / (matches as f32 + SHRINK_GAMES)
+}
+
 /// Fit at or above this is a recommendation; below the second, an avoid.
 const RECOMMEND_AT: f32 = 70.0;
 const CONSIDER_AT: f32 = 50.0;
@@ -71,7 +87,9 @@ pub fn build_pool(rows: &[HeroPoolRow], baseline: PlayerBaseline) -> Vec<HeroPoo
     rows.iter()
         .map(|row| {
             let win_rate = row.wins as f32 / row.matches.max(1) as f32;
-            let tier = classify(row.matches, win_rate, baseline);
+            let reference = baseline.win_rate_or_even();
+            let shrunk = shrunk_win_rate(row.wins, row.matches, reference);
+            let tier = classify(row.matches, shrunk, baseline);
 
             HeroPoolEntry {
                 hero_id: row.hero_id,
@@ -81,12 +99,16 @@ pub fn build_pool(rows: &[HeroPoolRow], baseline: PlayerBaseline) -> Vec<HeroPoo
                 wins: row.wins,
                 losses: row.matches - row.wins,
                 win_rate,
+                shrunk_win_rate: shrunk,
+                win_rate_delta: (row.matches >= DELTA_MIN_MATCHES).then_some(shrunk - reference),
                 recent_matches: row.recent_matches,
                 recent_win_rate: (row.recent_matches > 0)
                     .then(|| row.recent_wins as f32 / row.recent_matches as f32),
                 avg_kda: row.avg_kda,
                 avg_gpm: row.avg_gpm,
                 last_played_at: row.last_played_at,
+                recent_results: row.recent_results.clone(),
+                meta_strength: None,
                 tier,
                 tier_label: tier.label(),
                 confidence: percentile::confidence_for(row.matches),
@@ -169,7 +191,8 @@ pub fn score(input: &FitInput<'_>, weights: FitWeights) -> HeroFit {
     // --- Player performance ----------------------------------------------
     if let Some(pool) = input.pool.filter(|p| p.matches > 0) {
         let reference_wr = input.baseline.win_rate_or_even();
-        let win_delta = pool.win_rate - reference_wr;
+        // Shrunk, so one lucky game is not "41 points better".
+        let win_delta = pool.shrunk_win_rate - reference_wr;
         // 10 points of win rate is worth 20 points of score.
         let win_score = (50.0 + win_delta * 200.0).clamp(0.0, 100.0);
 
@@ -197,7 +220,9 @@ pub fn score(input: &FitInput<'_>, weights: FitWeights) -> HeroFit {
             ),
         ));
 
-        if win_delta >= BASELINE_BAND {
+        if pool.matches < DELTA_MIN_MATCHES {
+            // Too few games for a delta to mean anything; say nothing.
+        } else if win_delta >= BASELINE_BAND {
             reasons.push(format!(
                 "You win {:.0} points more often on this hero than you do overall.",
                 win_delta * 100.0
@@ -431,6 +456,33 @@ pub struct PoolSummary {
     pub established: i64,
 }
 
+/// Ranked fits into "recommended" (enough games) and "worth trying" (strong
+/// meta, too few games), so a 1-match hero is never ranked beside 16-match
+/// ones. Worth trying is ordered by meta strength, not fit.
+pub fn split_recommendations(
+    ranked: Vec<HeroFit>,
+    limit: usize,
+    worth_trying_limit: usize,
+) -> (Vec<HeroFit>, Vec<HeroFit>) {
+    let (mut recommended, few): (Vec<HeroFit>, Vec<HeroFit>) = ranked
+        .into_iter()
+        .partition(|fit| fit.matches >= RECOMMEND_MIN_MATCHES);
+    recommended.truncate(limit);
+
+    let mut worth_trying: Vec<HeroFit> = few
+        .into_iter()
+        .filter(|fit| fit.meta_strength.is_some_and(|m| m >= WORTH_TRYING_META))
+        .collect();
+    worth_trying.sort_by(|a, b| {
+        b.meta_strength
+            .partial_cmp(&a.meta_strength)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.hero_id.cmp(&b.hero_id))
+    });
+    worth_trying.truncate(worth_trying_limit);
+    (recommended, worth_trying)
+}
+
 pub fn summarize(pool: &[HeroPoolEntry]) -> PoolSummary {
     let count = |tier: HeroTier| pool.iter().filter(|e| e.tier == tier).count() as i64;
 
@@ -464,6 +516,7 @@ mod tests {
             avg_kda: kda,
             avg_gpm: 500.0,
             last_played_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            recent_results: Vec::new(),
         }
     }
 
@@ -687,5 +740,73 @@ mod tests {
         assert_eq!(result.parts.len(), 5, "every component was knowable");
         assert!(result.parts.iter().all(|p| !p.detail.is_empty()));
         assert!(!result.reasons.is_empty());
+    }
+
+    #[test]
+    fn a_handful_of_lucky_games_barely_moves_the_shrunk_rate() {
+        // 1 win from 1 game against a 50% baseline: raw 100%, shrunk ~55%.
+        let shrunk = shrunk_win_rate(1, 1, 0.5);
+        assert!((shrunk - 0.5454).abs() < 0.001, "{shrunk}");
+        // 30 games mostly speak for themselves.
+        let shrunk = shrunk_win_rate(21, 30, 0.5);
+        assert!((shrunk - 0.65).abs() < 0.001, "{shrunk}");
+    }
+
+    #[test]
+    fn no_delta_or_delta_reason_below_three_games() {
+        let pool = build_pool(&[row(1, 2, 2, (2, 2), 3.0), row(2, 12, 10, (5, 4), 3.0)], baseline());
+        assert_eq!(pool[0].win_rate, 1.0);
+        assert!(pool[0].win_rate_delta.is_none());
+        let delta = pool[1].win_rate_delta.expect("12 games is enough");
+        // Shrunk: (10 + 5) / 22 - 0.5.
+        assert!((delta - (15.0 / 22.0 - 0.5)).abs() < 0.001, "{delta}");
+
+        let fit = score(
+            &FitInput {
+                hero_id: 1,
+                hero_name: "Hero 1",
+                pool: Some(&pool[0]),
+                meta: None,
+                benchmark_percentile: None,
+                focus_alignment: None,
+                focus_title: None,
+                baseline: baseline(),
+            },
+            FitWeights::default(),
+        );
+        assert!(
+            fit.reasons.iter().all(|r| !r.contains("points")),
+            "{:?}",
+            fit.reasons
+        );
+    }
+
+    #[test]
+    fn heroes_under_five_games_are_never_recommended_only_worth_trying() {
+        let fit = |id: i32, matches: i64, score: f32, meta: Option<f32>| HeroFit {
+            hero_id: id,
+            hero_name: format!("Hero {id}"),
+            fit_score: score,
+            level: RecommendationLevel::Consider,
+            level_label: "Consider",
+            parts: Vec::new(),
+            reasons: Vec::new(),
+            caveats: Vec::new(),
+            matches,
+            tier: None,
+            meta_strength: meta,
+            focus_adjustment: 0.0,
+        };
+        let ranked = rank(vec![
+            fit(1, 1, 90.0, Some(80.0)),
+            fit(2, 16, 75.0, Some(55.0)),
+            fit(3, 0, 70.0, Some(70.0)),
+            fit(4, 2, 60.0, Some(40.0)),
+            fit(5, 5, 50.0, None),
+        ]);
+        let (recommended, worth) = split_recommendations(ranked, 8, 8);
+        assert_eq!(recommended.iter().map(|f| f.hero_id).collect::<Vec<_>>(), vec![2, 5]);
+        // By meta strength; a weak-meta 2-game hero is in neither list.
+        assert_eq!(worth.iter().map(|f| f.hero_id).collect::<Vec<_>>(), vec![1, 3]);
     }
 }

@@ -9,7 +9,8 @@ import { Alert } from "@/components/ui/Alert";
 import { Icon } from "@/components/ui/Icon";
 import { ApiError, getMatches, syncMatches } from "@/lib/api";
 import type { MatchesMode, MatchListResponse } from "@/lib/types";
-import { cn, timeAgo } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { RelativeTime } from "@/components/ui/RelativeTime";
 
 const PAGE_SIZE = 20;
 
@@ -170,7 +171,7 @@ export function MatchHistoryTable() {
         <div className="flex items-center gap-2">
           {data?.last_synced_at ? (
             <span className="font-mono text-[0.625rem] tabular-nums text-ink-faint">
-              synced {timeAgo(data.last_synced_at)}
+              synced <RelativeTime iso={data.last_synced_at} />
             </span>
           ) : null}
           <button
