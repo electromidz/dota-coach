@@ -1,0 +1,35 @@
+name: backend-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ghcr.io/electromidz/dota-coach-backend:latest
+            ghcr.io/electromidz/dota-coach-backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
