@@ -399,8 +399,9 @@ fn normalize_match_detail(
         xpm: player.xp_per_min.unwrap_or(0),
         last_hits: player.last_hits.unwrap_or(0),
         denies: player.denies,
-        // Older matches predate `net_worth`; `total_gold` is the closest stand-in.
-        net_worth: net_worth_of(&player),
+        // Only the real figure. `total_gold` counts gold already spent, so it
+        // is no stand-in: a support stored with 90k "net worth" was this.
+        net_worth: player.net_worth,
         hero_damage: player.hero_damage,
         tower_damage: player.tower_damage,
         hero_healing: player.hero_healing,
@@ -435,12 +436,6 @@ fn normalize_match_detail(
 ///
 /// Only usable from full match details, and only a stand-in for the real lane
 /// assignment, which unparsed matches do not carry.
-/// Net worth, or total gold when the provider omits it. Used for the stored
-/// figure only; farm priority is ranked on GPM below.
-fn net_worth_of(player: &RawMatchPlayer) -> Option<i32> {
-    player.net_worth.or(player.total_gold)
-}
-
 /// The player's farm priority within their own team: 0 for the most farm.
 ///
 /// Ranked on gold per minute: gold *earned*, in one unit for every player.
@@ -728,11 +723,12 @@ mod tests {
     }
 
     #[test]
-    fn net_worth_falls_back_to_total_gold_on_older_matches() {
+    fn a_missing_net_worth_stays_missing_rather_than_becoming_total_gold() {
         let raw: RawMatchDetail = serde_json::from_str(MATCH_DETAIL).unwrap();
         // Second player in the fixture has net_worth null but total_gold set.
+        // Total gold counts gold already spent, so it is not net worth.
         let m = normalize_match_detail(raw, 99_999_999).unwrap();
-        assert_eq!(m.net_worth, Some(18_300));
+        assert_eq!(m.net_worth, None);
     }
 
     #[test]

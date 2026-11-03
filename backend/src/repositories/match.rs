@@ -737,3 +737,33 @@ pub async fn set_role(pool: &PgPool, match_id: Uuid, role: &str) -> Result<(), s
         .await?;
     Ok(())
 }
+
+/// Every stored match with the account it belongs to, newest first. For
+/// one-off corrections that have to ask the provider again.
+pub async fn all_with_accounts(
+    pool: &PgPool,
+) -> Result<Vec<(Uuid, i64, i64, Option<i32>)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT m.id, m.match_id, p.dota_account_id, m.net_worth
+           FROM matches m
+           JOIN dota_players p ON p.id = m.dota_player_id
+          ORDER BY m.started_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Set the stored net worth outright, including back to unknown. The detail
+/// re-sync coalesces, so it can never clear a wrong value on its own.
+pub async fn set_net_worth(
+    pool: &PgPool,
+    match_id: Uuid,
+    net_worth: Option<i32>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE matches SET net_worth = $2 WHERE id = $1")
+        .bind(match_id)
+        .bind(net_worth)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
