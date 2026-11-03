@@ -19,6 +19,7 @@ function hero(id: number, name: string, over: Partial<HeroPoolEntry> = {}): Hero
     hero_id: id,
     hero_name: name,
     role: "Support",
+    position_label: "Soft Support",
     matches: 7,
     wins: 4,
     losses: 3,

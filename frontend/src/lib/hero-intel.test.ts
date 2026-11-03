@@ -8,6 +8,7 @@ function entry(hero_id: number, tier: HeroTier): HeroPoolEntry {
     hero_id,
     hero_name: `Hero ${hero_id}`,
     role: "Carry",
+    position_label: "Carry",
     matches: 10,
     wins: 5,
     losses: 5,

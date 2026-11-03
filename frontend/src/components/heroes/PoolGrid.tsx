@@ -36,10 +36,10 @@ export function PoolGrid({
   /** Read once, so "fresh" does not change between renders. */
   const [now] = useState(() => Date.now());
 
-  const roles = Array.from(new Set(pool.map((h) => h.role))).filter(
+  const roles = Array.from(new Set(pool.map((h) => h.position_label))).filter(
     (r) => r && r !== "Unknown",
   );
-  const filtered = pool.filter((h) => role === "all" || h.role === role);
+  const filtered = pool.filter((h) => role === "all" || h.position_label === role);
   const sorted = [...filtered].sort((a, b) => {
     if (sort === "win") return b.shrunk_win_rate - a.shrunk_win_rate;
     if (sort === "recent") return b.last_played_at.localeCompare(a.last_played_at);
@@ -165,7 +165,7 @@ function Tile({
         text={`${Math.round(hero.win_rate * 100)}`}
         tone={tone}
         label={`${hero.hero_name}: ${Math.round(hero.win_rate * 100)}% won over ${hero.matches} games${
-          hero.role && hero.role !== "Unknown" ? `, played as ${hero.role}` : ""
+          hero.position_label !== "Unknown" ? `, played as ${hero.position_label}` : ""
         }`}
       />
     </li>

@@ -8,7 +8,6 @@ export default function MatchesPage() {
     <AppShell
       title="Matches"
       eyebrow="History"
-      description="Every match stored for your account, newest first."
     >
       <MatchList />
     </AppShell>

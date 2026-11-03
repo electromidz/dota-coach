@@ -38,6 +38,10 @@ function match(overrides: Partial<MatchView> = {}): MatchView {
     updated_at: new Date().toISOString(),
     eligible: true,
     mode_label: "Ranked All Pick",
+    position: "carry",
+    position_label: "Carry",
+    peer_gpm: 500,
+    peer_xpm: 550,
     rating: 7.2,
     mmr_delta_estimate: 29,
     ...overrides,
@@ -45,31 +49,40 @@ function match(overrides: Partial<MatchView> = {}): MatchView {
 }
 
 describe("MatchCard", () => {
-  it("names the mode every match was played in", () => {
-    render(<MatchCard match={match()} />);
-
-    expect(screen.getByText("Ranked All Pick")).toBeDefined();
+  it("shows the position from the one taxonomy", () => {
+    render(<MatchCard match={match({ role: "Core", position: null, position_label: "Unknown" })} />);
+    expect(screen.getByText("Unknown")).toBeDefined();
+    expect(screen.queryByText("Core")).toBeNull();
   });
 
-  /**
-   * The reconciliation the whole label exists for: a player looking at Turbo
-   * games in their history and a dashboard that counts fewer matches needs
-   * something connecting the two.
-   */
-  it("marks a match the coach does not read", () => {
-    render(
+  it("labels nothing in the default view, where every game is coached", () => {
+    render(<MatchCard match={match()} mode="eligible" />);
+    expect(screen.queryByText("Not coached")).toBeNull();
+    expect(screen.queryByText("Ranked All Pick")).toBeNull();
+  });
+
+  it("marks only ineligible games in the Turbo and All views", () => {
+    const { rerender } = render(
       <MatchCard
         match={match({ eligible: false, mode_label: "Turbo", game_mode: 23 })}
+        mode="all"
       />,
     );
-
-    expect(screen.getByText("Turbo")).toBeDefined();
     expect(screen.getByText("Not coached")).toBeDefined();
+
+    rerender(<MatchCard match={match()} mode="all" />);
+    expect(screen.queryByText("Not coached")).toBeNull();
   });
 
-  it("does not label an eligible match as excluded", () => {
-    render(<MatchCard match={match()} />);
+  it("measures GPM against the peer median, not the list", () => {
+    render(<MatchCard match={match({ gpm: 600, peer_gpm: 500 })} />);
+    expect(
+      screen.getByRole("img", { name: /GPM 600, peer median on Luna 500/ }),
+    ).toBeDefined();
+  });
 
-    expect(screen.queryByText("Not coached")).toBeNull();
+  it("draws no bar where there is no peer reference", () => {
+    render(<MatchCard match={match({ peer_gpm: null, peer_xpm: null })} />);
+    expect(screen.queryByRole("img", { name: /peer median/ })).toBeNull();
   });
 });

@@ -295,6 +295,13 @@ export interface MatchView extends Match {
   eligible: boolean;
   /** `Ranked All Pick`, `Turbo`, `Other mode`, … */
   mode_label: string;
+  /** One of the five positions, or null when it cannot be told. */
+  position: CoachableRole | null;
+  /** The position's label, or "Unknown". The one role taxonomy. */
+  position_label: string;
+  /** Peer medians on this hero in the player's bracket; eligible games only. */
+  peer_gpm: number | null;
+  peer_xpm: number | null;
   /**
    * 1.0–10.0, measured against this player's own typical game on the hero.
    * Computed by the backend; never recomputed here.
@@ -310,8 +317,12 @@ export interface MatchView extends Match {
   mmr_delta_estimate: number | null;
 }
 
-/** Which kind of game a page shows. Slugs the backend accepts verbatim. */
-export type MatchesMode = "all" | "ranked" | "turbo";
+/**
+ * Which games a list shows. Slugs the backend accepts verbatim.
+ * `eligible` (the default) is Ranked + All Pick, the population every page
+ * reads; `ranked` is its ranked-lobby part; `turbo` and `all` are for looking.
+ */
+export type MatchesMode = "eligible" | "ranked" | "turbo" | "all";
 
 /** How a listed page is ordered. Slugs the backend accepts verbatim. */
 export type MatchSort =
@@ -349,14 +360,18 @@ export interface MatchListResponse {
   limit: number;
   total: number;
   total_pages: number;
-  /** Which population this page was drawn from. */
-  scope: "all" | "competitive";
-  /** True when a hero, role, result or mode filter narrowed this page. */
+  /** True when a hero, role or result filter narrowed this page. */
   filtered: boolean;
   sort: MatchSort;
   mode: MatchesMode;
-  /** Drawn from the player's own matches — never a hardcoded hero list. */
+  /** Drawn from the player's own matches, counted inside the current mode. */
   filters: FilterOptions;
+  /** Matches in this mode before any hero, role or result filter. */
+  mode_total: number;
+  /** Stored Turbo games this mode leaves out. */
+  hidden_turbo: number;
+  /** Every other stored game this mode leaves out. */
+  hidden_other: number;
   /**
    * Every stored match, whatever mode, hero or result.
    *
@@ -847,6 +862,8 @@ export interface HeroPoolEntry {
   hero_name: string;
   /** Position most often played on this hero, estimated per match ("played as"). */
   role: string;
+  /** `role` in the one taxonomy: a position label, or "Unknown". */
+  position_label: string;
   matches: number;
   wins: number;
   losses: number;

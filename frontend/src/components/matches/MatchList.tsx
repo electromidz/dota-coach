@@ -8,8 +8,12 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Icon } from "@/components/ui/Icon";
+import { Combobox } from "@/components/ui/Combobox";
+import { InfoTip } from "@/components/ui/InfoTip";
+import { Segmented } from "@/components/ui/Segmented";
 import { ApiError, getMatches } from "@/lib/api";
 import type {
+  MatchesMode,
   CoachableRole,
   FilterOption,
   MatchListResponse,
@@ -43,14 +47,42 @@ const RESULTS: { value: MatchResultFilter; label: string }[] = [
   { value: "loss", label: "Losses" },
 ];
 
+const MODES: { value: MatchesMode; label: string }[] = [
+  { value: "eligible", label: "Ranked + All Pick" },
+  { value: "turbo", label: "Turbo" },
+  { value: "all", label: "All" },
+];
+
+const MODE_LABEL: Record<MatchesMode, string> = {
+  eligible: "Ranked + All Pick",
+  ranked: "Ranked",
+  turbo: "Turbo",
+  all: "every mode",
+};
+
+/** The mode in `?mode=`; anything unknown is the default. */
+function modeFromUrl(): MatchesMode {
+  if (typeof window === "undefined") return "eligible";
+  const value = new URLSearchParams(window.location.search).get("mode");
+  return value === "turbo" || value === "all" ? value : "eligible";
+}
+
+/** Keep `?mode=` in step without a navigation; the default is left out. */
+function writeModeToUrl(mode: MatchesMode) {
+  const url = new URL(window.location.href);
+  if (mode === "eligible") url.searchParams.delete("mode");
+  else url.searchParams.set("mode", mode);
+  window.history.replaceState(window.history.state, "", url);
+}
+
 export function MatchList() {
   const { session } = useSession();
   const [data, setData] = useState<MatchListResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
-  /** Everything the player played, or only what the coach reads. */
-  const [scope, setScope] = useState<"all" | "competitive">("all");
+  /** Which games: Ranked + All Pick by default. Mirrored in `?mode=`. */
+  const [mode, setModeState] = useState<MatchesMode>(modeFromUrl);
 
   /** Filters. Each is the value the backend takes; `undefined` means "any". */
   const [heroId, setHeroId] = useState<number | undefined>();
@@ -70,7 +102,7 @@ export function MatchList() {
     let cancelled = false;
 
     setLoading(true);
-    getMatches(page, PAGE_SIZE, scope, { heroId, role, result, sort })
+    getMatches(page, PAGE_SIZE, { mode, heroId, role, result, sort })
       .then((response) => {
         if (cancelled) return;
         setData(response);
@@ -93,7 +125,7 @@ export function MatchList() {
     return () => {
       cancelled = true;
     };
-  }, [session.kind, page, scope, heroId, role, result, sort]);
+  }, [session.kind, page, mode, heroId, role, result, sort]);
 
   if (session.kind === "loading") return <ListSkeleton />;
   if (session.kind === "anonymous") return <SignedOut />;
@@ -122,6 +154,15 @@ export function MatchList() {
     };
   }
 
+  /** A new mode is a new population: the hero picked in the old one may
+   *  have no games here, so the hero filter resets with it. */
+  function setMode(next: MatchesMode) {
+    setModeState(next);
+    setHeroId(undefined);
+    setPage(1);
+    writeModeToUrl(next);
+  }
+
   function clearFilters() {
     setHeroId(undefined);
     setRole(undefined);
@@ -135,24 +176,12 @@ export function MatchList() {
   return (
     <div className="flex flex-col gap-4 pb-4">
       <div className="flex flex-col gap-3">
-        <nav aria-label="Match population" className="flex flex-wrap gap-2">
-          <ScopeTab
-            label="Everything you played"
-            active={scope === "all"}
-            onClick={() => {
-              setScope("all");
-              setPage(1);
-            }}
-          />
-          <ScopeTab
-            label="What the coach reads"
-            active={scope === "competitive"}
-            onClick={() => {
-              setScope("competitive");
-              setPage(1);
-            }}
-          />
-        </nav>
+        <Segmented
+          label="Which games"
+          value={mode}
+          onChange={setMode}
+          options={MODES}
+        />
 
         {/* Two-up on a phone so four controls cost one thumb-height rather
             than four; a single row once there is width for it. */}
@@ -162,13 +191,22 @@ export function MatchList() {
           className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-end"
         >
           <Field label="Hero">
-            <Select
-              value={heroId === undefined ? "" : String(heroId)}
-              onChange={change((value: string) =>
-                setHeroId(value === "" ? undefined : Number(value)),
-              )}
-              placeholder="All heroes"
-              options={heroes}
+            <Combobox
+              label="Hero"
+              anyLabel="All heroes"
+              value={heroId === undefined ? undefined : String(heroId)}
+              onChange={(value) => {
+                setHeroId(value === undefined ? undefined : Number(value));
+                setPage(1);
+              }}
+              options={heroes
+                .filter((hero) => hero.matches > 0)
+                .sort((a, b) => b.matches - a.matches)
+                .map((hero) => ({
+                  value: hero.value,
+                  label: hero.label,
+                  hint: String(hero.matches),
+                }))}
             />
           </Field>
 
@@ -223,28 +261,29 @@ export function MatchList() {
         </div>
 
         <p
-          className="font-mono text-xs tabular-nums text-ink-faint"
+          className="flex items-center gap-1.5 font-mono text-xs tabular-nums text-ink-faint"
           aria-live="polite"
         >
-          {data.total} {data.total === 1 ? "match" : "matches"}
-          {filtered ? " found" : ""}
-          {scope === "competitive"
-            ? " · Ranked and public All Pick only"
-            : filtered
-              ? ""
-              : " stored · every mode"}
+          {filtered ? `${data.total} of ` : ""}
+          {data.mode_total} {data.mode_total === 1 ? "match" : "matches"} ·{" "}
+          {MODE_LABEL[mode]}
+          {data.hidden_turbo + data.hidden_other > 0 ? (
+            <InfoTip label="Games not shown">
+              {data.hidden_turbo > 0 ? <span>+{data.hidden_turbo} Turbo hidden</span> : null}
+              {data.hidden_other > 0 ? (
+                <span>+{data.hidden_other} other games hidden (other modes or older)</span>
+              ) : null}
+            </InfoTip>
+          ) : null}
         </p>
       </div>
 
       {data.matches.length === 0 ? (
         <EmptyState
           filtered={filtered}
-          scope={scope}
+          mode={mode}
           onClear={clearFilters}
-          onShowEverything={() => {
-            setScope("all");
-            setPage(1);
-          }}
+          onShowEverything={() => setMode("all")}
         />
       ) : (
         <>
@@ -261,7 +300,7 @@ export function MatchList() {
             )}
           >
             {data.matches.map((match, i) => (
-              <MatchCard key={match.id} match={match} index={i} />
+              <MatchCard key={match.id} match={match} index={i} mode={mode} />
             ))}
           </ul>
 
@@ -311,24 +350,20 @@ export function MatchList() {
  */
 function EmptyState({
   filtered,
-  scope,
+  mode,
   onClear,
   onShowEverything,
 }: {
   filtered: boolean;
-  scope: "all" | "competitive";
+  mode: MatchesMode;
   onClear: () => void;
   onShowEverything: () => void;
 }) {
   if (filtered) {
     return (
-      <Card className="flex flex-col gap-3">
-        <p className="text-sm font-semibold text-ink">No matches found</p>
-        <p className="text-sm leading-relaxed text-ink-muted">
-          Nothing in this list matches every filter at once. Try changing or
-          clearing them.
-        </p>
-        <Button variant="ghost" onClick={onClear} className="self-start px-4 text-sm">
+      <Card className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-ink">No matches for these filters</p>
+        <Button variant="ghost" onClick={onClear} className="px-4 text-sm">
           Clear filters
         </Button>
       </Card>
@@ -336,19 +371,13 @@ function EmptyState({
   }
 
   return (
-    <Card className="flex flex-col gap-3">
-      <p className="text-sm leading-relaxed text-ink-muted">
-        {scope === "competitive"
-          ? "None of your stored matches are Ranked or public All Pick, so there is nothing here for the coach to read."
-          : "No matches stored yet. Sync from the Overview tab to pull your recent games."}
+    <Card className="flex flex-wrap items-center justify-between gap-3">
+      <p className="text-sm text-ink-muted">
+        {mode === "all" ? "No matches stored yet" : `No ${MODE_LABEL[mode]} games`}
       </p>
-      {scope === "competitive" ? (
-        <Button
-          variant="ghost"
-          onClick={onShowEverything}
-          className="self-start px-4 text-sm"
-        >
-          Show everything you played
+      {mode !== "all" ? (
+        <Button variant="ghost" onClick={onShowEverything} className="px-4 text-sm">
+          Show all games
         </Button>
       ) : null}
     </Card>
@@ -421,33 +450,6 @@ function Select({
         </option>
       ))}
     </NativeSelect>
-  );
-}
-
-function ScopeTab({
-  label,
-  active,
-  onClick,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-current={active ? "true" : undefined}
-      className={cn(
-        "focus-neon min-h-11 cursor-pointer rounded-xl border px-3 py-2 text-xs",
-        "transition-colors duration-200 ease-out",
-        active
-          ? "border-function/60 bg-function/10 text-ink"
-          : "border-glass-edge text-ink-muted hover:text-ink",
-      )}
-    >
-      {label}
-    </button>
   );
 }
 

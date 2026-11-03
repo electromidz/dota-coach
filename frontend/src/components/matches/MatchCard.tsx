@@ -2,13 +2,11 @@ import Link from "next/link";
 
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
 import { TiltCard } from "@/components/ui/TiltCard";
-import type { MatchView } from "@/lib/types";
+import type { MatchesMode, MatchView } from "@/lib/types";
 import { cn, formatDuration } from "@/lib/utils";
 import { RelativeTime } from "@/components/ui/RelativeTime";
 
 /** Rough ceilings for the inline bars, so a good game visibly fills them. */
-const GPM_CEILING = 900;
-const XPM_CEILING = 1000;
 
 /**
  * A match, in enough detail to judge it without opening it: hero portrait,
@@ -20,9 +18,12 @@ const XPM_CEILING = 1000;
 export function MatchCard({
   match,
   index = 0,
+  mode = "eligible",
 }: {
   match: MatchView;
   index?: number;
+  /** In the default view every game is coached, so nothing is labelled. */
+  mode?: MatchesMode;
 }) {
   const won = match.won;
 
@@ -64,7 +65,7 @@ export function MatchCard({
               </div>
 
               <p className="mt-0.5 truncate text-xs text-ink-muted">
-                <span className="text-operator">{match.role}</span>
+                <span className="text-operator">{match.position_label}</span>
                 {" · "}
                 <span className="font-mono tabular-nums">
                   {formatDuration(match.duration_seconds)}
@@ -73,26 +74,18 @@ export function MatchCard({
                 <RelativeTime iso={match.started_at} />
               </p>
 
-              {/* What this game was, and whether the coach reads it. Without
-                  this a player sees Turbo games in their history and a
-                  dashboard that counts fewer matches, with nothing connecting
-                  the two. The label is the server's — eligibility is decided in
-                  one place and rendered here, never recomputed. */}
-              <p className="mt-1 flex items-center gap-1.5 text-[0.625rem]">
-                <span
-                  className={cn(
-                    "rounded px-1.5 py-0.5 uppercase tracking-wider",
-                    match.eligible
-                      ? "bg-function/10 text-function"
-                      : "bg-surface-2 text-ink-faint",
-                  )}
-                >
-                  {match.mode_label}
-                </span>
-                {!match.eligible ? (
-                  <span className="truncate text-ink-faint">Not coached</span>
-                ) : null}
-              </p>
+              {/* Only outside the default view, and only on games the coach
+                  does not read. Eligibility is the server's; never recomputed. */}
+              {mode !== "eligible" && !match.eligible ? (
+                <p className="mt-1">
+                  <span
+                    title={match.mode_label}
+                    className="rounded bg-surface-2 px-1.5 py-0.5 text-[0.625rem] uppercase tracking-wider text-ink-faint"
+                  >
+                    Not coached
+                  </span>
+                </p>
+              ) : null}
             </div>
 
             <div className="shrink-0 text-right">
@@ -108,8 +101,8 @@ export function MatchCard({
           {/* Economy at a glance. Two independent measures, so two separate
               tracks rather than one chart with two scales. */}
           <div className="mt-3 grid grid-cols-2 gap-3 border-t border-glass-edge pt-3">
-            <MiniBar label="GPM" value={match.gpm} ceiling={GPM_CEILING} />
-            <MiniBar label="XPM" value={match.xpm} ceiling={XPM_CEILING} />
+            <PeerBar label="GPM" value={match.gpm} peer={match.peer_gpm} hero={match.hero_name} />
+            <PeerBar label="XPM" value={match.xpm} peer={match.peer_xpm} hero={match.hero_name} />
           </div>
         </Link>
       </TiltCard>
@@ -117,33 +110,54 @@ export function MatchCard({
   );
 }
 
-function MiniBar({
+/**
+ * A value against the peer median for this hero, never against the rest of
+ * the list: one Turbo game must not stretch every other bar. The track runs
+ * to 1.5x the median, with a tick at the median; green at or above it, red
+ * below. No peer figure (Turbo, provider down): the number alone.
+ */
+export function PeerBar({
   label,
   value,
-  ceiling,
+  peer,
+  hero,
 }: {
   label: string;
   value: number;
-  ceiling: number;
+  peer: number | null;
+  hero: string;
 }) {
-  const pct = Math.max(0, Math.min(1, value / ceiling)) * 100;
+  const ceiling = peer ? peer * 1.5 : null;
+  const at = (v: number) => `${Math.max(0, Math.min(1, v / (ceiling ?? 1))) * 100}%`;
+  const ahead = peer !== null && value >= peer;
 
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-[0.625rem] uppercase tracking-wider text-ink-faint">
-          {label}
-        </span>
+        <span className="text-[0.625rem] uppercase tracking-wider text-ink-faint">{label}</span>
         <span className="font-mono text-xs tabular-nums text-ink-muted">
           {value.toLocaleString()}
         </span>
       </div>
-      <div className="h-1.5 w-full overflow-hidden rounded-full bg-mark-track">
+      {peer !== null ? (
         <div
-          className="h-full rounded-r bg-function/70"
-          style={{ width: `${pct}%` }}
-        />
-      </div>
+          role="img"
+          aria-label={`${label} ${value}, peer median on ${hero} ${Math.round(peer)}`}
+          className="relative h-1.5 w-full rounded-full bg-mark-track"
+        >
+          <div
+            className={cn("h-full rounded-full", ahead ? "bg-mark-win" : "bg-mark-loss")}
+            style={{ width: at(value) }}
+          />
+          <span
+            aria-hidden
+            className="absolute -inset-y-0.5 w-0.5 rounded bg-ink-faint"
+            style={{ left: at(peer) }}
+          />
+        </div>
+      ) : (
+        <div className="h-1.5" title="No peer reference for this game" />
+      )}
     </div>
   );
 }
