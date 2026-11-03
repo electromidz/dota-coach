@@ -4,21 +4,43 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ComparisonContext } from "@/components/benchmark/ComparisonContext";
 import { Paywall } from "@/components/billing/Paywall";
-import { BulletRow } from "@/components/charts/BulletRow";
+import { BulletBar } from "@/components/charts/BulletBar";
+import { formatMetricValue } from "@/components/charts/BulletRow";
+import { Delta } from "@/components/charts/Delta";
+import { DivergingBars } from "@/components/charts/DivergingBars";
+import { KpiTile, PipMeter } from "@/components/charts/KpiTile";
+import { LegendItem, RadarCompare } from "@/components/charts/RadarCompare";
 import { SignedOut } from "@/components/shell/SignedOut";
 import { Alert } from "@/components/ui/Alert";
-import { Card } from "@/components/ui/Card";
+import { ChartCard } from "@/components/ui/ChartCard";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
+import { Icon } from "@/components/ui/Icon";
+import { InfoTip } from "@/components/ui/InfoTip";
+import { Segmented } from "@/components/ui/Segmented";
 import { ApiError, getBenchmark, getStats } from "@/lib/api";
+import {
+  averagePercentile,
+  extremes,
+  gapToTarget,
+  shortLabel,
+  targetByMetric,
+  toPercentileVector,
+} from "@/lib/benchmark-view";
 import { CONFIDENCE_NOTE } from "@/lib/confidence";
 import { useSession } from "@/lib/session-context";
+import { formatPercent } from "@/lib/stats";
 import type {
   BenchmarkResponse,
   CoachableRole,
   HeroStats,
   RankBracket,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, ordinal } from "@/lib/utils";
+
+/** Below this many matches the sample tile carries a warning badge. */
+const LOW_SAMPLE_BADGE = 20;
+/** Mirrors the server's floor for ranking a figure (`percentile::MIN_SAMPLE`). */
+const MIN_SAMPLE = 5;
 
 /**
  * Where the chosen bracket lives between page views.
@@ -161,6 +183,9 @@ export function Benchmark() {
   const resolved = data.context.bracket;
   const ownRank = data.brackets.find((option) => option.is_player_rank);
   const target = data.target;
+  const activeHero = heroes.find(
+    (hero) => hero.hero_id === (selected ?? data.hero_id),
+  );
 
   /**
    * A bracket was named and nothing came back for it. Only worth saying when
@@ -170,15 +195,19 @@ export function Benchmark() {
    */
   const targetMissing =
     bracket !== undefined && bracket !== "none" && target === null;
-  /** Peer values for each row, keyed by metric, so a row finds its own target. */
-  const targetByMetric = new Map(
-    target?.metrics.map((metric) => [metric.metric, metric]) ?? [],
-  );
+
+  const points = toPercentileVector(data.results, target);
+  const ranked = points.filter((point) => point.you !== null);
+  const best = extremes(points);
+  const gaps = gapToTarget(data.results, target);
+  const average = averagePercentile(data.results);
+  const aims = targetByMetric(target);
+  const lowSample = data.sample < LOW_SAMPLE_BADGE;
 
   return (
-    <div className="flex flex-col gap-5 pb-4">
+    <div className={cn("flex flex-col gap-4 pb-4", loading && "opacity-60 transition-opacity")}>
       {heroes.length > 1 ? (
-        <nav aria-label="Choose a hero" className="flex gap-2 overflow-x-auto pb-1">
+        <nav aria-label="Choose a hero" className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
           {heroes.map((hero) => {
             const active = (selected ?? data.hero_id) === hero.hero_id;
             return (
@@ -187,24 +216,16 @@ export function Benchmark() {
                 type="button"
                 onClick={() => pick(hero.hero_id)}
                 aria-current={active ? "true" : undefined}
+                aria-label={`${hero.hero_name}, ${hero.matches} matches`}
+                title={hero.hero_name}
                 className={cn(
-                  "focus-neon flex min-h-11 shrink-0 cursor-pointer items-center gap-2",
-                  "rounded-xl border px-3 py-2 transition-colors duration-200 ease-out",
-                  active
-                    ? "border-function/60 bg-function/10 text-ink"
-                    : "border-glass-edge text-ink-muted hover:text-ink",
+                  "focus-neon relative shrink-0 cursor-pointer rounded-lg transition-opacity duration-200",
+                  active ? "ring-2 ring-function" : "opacity-60 hover:opacity-100",
                 )}
               >
-                <HeroPortrait
-                  heroId={hero.hero_id}
-                  heroName={hero.hero_name}
-                  size="sm"
-                />
-                <span className="whitespace-nowrap text-xs">
-                  {hero.hero_name}
-                  <span className="ml-1.5 font-mono text-ink-faint">
-                    {hero.matches}
-                  </span>
+                <HeroPortrait heroId={hero.hero_id} heroName={hero.hero_name} size="sm" />
+                <span className="absolute bottom-0.5 right-0.5 rounded bg-base/85 px-1 font-mono text-[0.625rem] tabular-nums text-ink">
+                  {hero.matches}
                 </span>
               </button>
             );
@@ -212,90 +233,59 @@ export function Benchmark() {
         </nav>
       ) : null}
 
-      {/* Which of the player's own matches are being compared. The peer side
-          cannot be narrowed — see the context block below — but this side can,
-          and defaults to the role they are being coached on. */}
-      {data.context.role || roleScope === "all" ? (
-        <nav aria-label="Comparison scope" className="flex flex-wrap gap-2">
-          <ScopeChip
-            label={
-              data.context.role_label
-                ? `${data.context.role_label} only`
-                : "Coaching role"
-            }
-            active={roleScope !== "all"}
-            onClick={() => void setScope(undefined)}
+      <div className="flex flex-wrap items-center gap-2">
+        {/* Which of the player's own matches are compared. */}
+        {data.context.role || roleScope === "all" ? (
+          <Segmented
+            label="Comparison scope"
+            value={roleScope === "all" ? "all" : "role"}
+            onChange={(next) => void setScope(next === "all" ? "all" : undefined)}
+            options={[
+              { value: "role", label: data.context.role_label ?? "My role" },
+              { value: "all", label: "All roles" },
+            ]}
           />
-          <ScopeChip
-            label="All roles"
-            active={roleScope === "all"}
-            onClick={() => void setScope("all")}
-          />
-        </nav>
-      ) : null}
+        ) : null}
 
-      {/* Which rank to aim at. Separate from the scope chips above because it
-          adds to the *other* side of the comparison: those narrow the player's
-          own matches, this adds a rung above the one they are on. */}
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-1 text-xs text-ink-faint">
-          Aiming at
-          <select
-            value={bracket ?? ""}
-            onChange={(e) =>
-              void setTargetBracket(
-                e.target.value === ""
-                  ? undefined
-                  : (e.target.value as BracketChoice),
-              )
-            }
-            className="focus-neon min-h-11 cursor-pointer rounded-xl border border-glass-edge bg-surface-2/60 px-3 text-sm text-ink outline-none"
-          >
-            {/* Empty asks the server for the next rung up, which is what the
-                page arrives showing — so it names the bracket it landed on
-                rather than pretending nothing was chosen. */}
-            <option value="">
-              {target ? `Next rank up (${target.label})` : "Next rank up"}
+        {/* Which rank to aim at. */}
+        <select
+          aria-label="Aiming at"
+          value={bracket ?? ""}
+          onChange={(e) =>
+            void setTargetBracket(
+              e.target.value === "" ? undefined : (e.target.value as BracketChoice),
+            )
+          }
+          className="focus-neon min-h-11 cursor-pointer rounded-xl border border-glass-edge bg-surface-2/60 px-3 text-xs text-ink outline-none"
+        >
+          <option value="">
+            {target ? `Next rank up (${target.label})` : "Next rank up"}
+          </option>
+          {data.brackets.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+              {option.is_player_rank ? " — your rank" : ""}
             </option>
-            {data.brackets.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-                {option.is_player_rank ? " — your rank" : ""}
-              </option>
-            ))}
-            <option value="none">
-              {ownRank ? `Your rank only (${ownRank.label})` : "Your rank only"}
-            </option>
-          </select>
-        </label>
+          ))}
+          <option value="none">
+            {ownRank ? `Your rank only (${ownRank.label})` : "Your rank only"}
+          </option>
+        </select>
 
-        <p className="pb-3 text-xs text-ink-faint">
-          Your figures are measured against{" "}
-          <span className="text-ink-muted">{resolved.label}</span>
-          {target ? (
-            <>
-              {" "}
-              and held up to{" "}
-              <span className="text-number">{target.label}</span>
-            </>
-          ) : null}
-          .
-        </p>
+        <span className="ml-auto flex items-center gap-1.5 text-xs text-ink-faint">
+          vs {resolved.label}
+          <InfoTip label="What this compares against" align="end">
+            <ComparisonContext context={data.context} />
+          </InfoTip>
+        </span>
       </div>
 
-      {/* A bracket the provider publishes nothing for is absent rather than
-          filled with the all-ranks numbers under its name. Said outright,
-          because the reader picked it and would otherwise see a page that
-          silently ignored them. */}
       {targetMissing ? (
         <Alert tone="info" title="No data for that rank">
-          The benchmark provider publishes no distribution for {data.hero_name}{" "}
-          in{" "}
+          Nothing published for{" "}
           {data.brackets.find((option) => option.value === bracket)?.label ??
             "that bracket"}
-          , so there is nothing to hold your figures up to. Your own comparison
-          below is unaffected, and nothing has been estimated from a
-          neighbouring bracket.
+          ; nothing has been estimated.
         </Alert>
       ) : null}
 
@@ -303,101 +293,231 @@ export function Benchmark() {
 
       {data.results.length > 0 ? (
         <>
-          {/* The one line the page exists to deliver, before any chart. Both
-              numbers are the backend's count — how many metrics already clear
-              the next rank is arithmetic, and arithmetic is not the browser's
-              to do. */}
-          {target ? (
-            <Card className="flex flex-col gap-1" glow="keyword">
-              <p className="text-sm leading-relaxed text-ink">
-                You already clear {target.label}&rsquo;s median on{" "}
-                <span className="font-mono tabular-nums text-number">
-                  {target.metrics_cleared}
-                </span>{" "}
-                of{" "}
-                <span className="font-mono tabular-nums text-number">
-                  {target.metrics_compared}
-                </span>{" "}
-                {target.metrics_compared === 1 ? "metric" : "metrics"}.
-              </p>
-              <p className="text-xs leading-relaxed text-ink-faint">
-                Each bar below carries both marks: where {resolved.label} sits,
-                and where {target.label} sits.
-              </p>
-            </Card>
-          ) : null}
-
-          <Card className="flex flex-col gap-1">
-            <p className="text-sm text-ink">
-              {data.hero_name} ·{" "}
-              <span className="font-mono tabular-nums text-number">
-                {data.sample}
-              </span>{" "}
-              {data.sample === 1 ? "match" : "matches"}
-              <span className="text-ink-faint"> vs {resolved.label}</span>
-            </p>
-            {caveat ? (
-              <p className="text-xs leading-relaxed text-ink-faint">{caveat}</p>
-            ) : null}
-          </Card>
-
-          <Card
-            className={cn(
-              "flex flex-col gap-6",
-              loading && "opacity-60 transition-opacity",
-            )}
-          >
-            {data.results.map((result) => (
-              <BulletRow
-                key={result.metric}
-                result={result}
-                target={targetByMetric.get(result.metric)}
-                ownLabel={resolved.label}
-                targetLabel={target?.label}
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {target ? (
+              <KpiTile
+                label={`Above ${target.label}`}
+                value={
+                  <>
+                    {target.metrics_cleared}
+                    <span className="text-ink-faint">/{target.metrics_compared}</span>
+                  </>
+                }
+                comparison={
+                  <PipMeter
+                    filled={target.metrics_cleared}
+                    total={target.metrics_compared}
+                    label={`${target.metrics_cleared} of ${target.metrics_compared} metrics at or past the ${target.label} median`}
+                  />
+                }
+                info={`Metrics where you already meet the ${target.label} median for ${data.hero_name}.`}
               />
-            ))}
-          </Card>
+            ) : (
+              <KpiTile
+                label={`Above ${resolved.label}`}
+                value={
+                  <>
+                    {ranked.filter((point) => (point.you ?? 0) >= 50).length}
+                    <span className="text-ink-faint">/{ranked.length}</span>
+                  </>
+                }
+                comparison={
+                  <PipMeter
+                    filled={ranked.filter((point) => (point.you ?? 0) >= 50).length}
+                    total={ranked.length}
+                    label={`Metrics at or above the ${resolved.label} median`}
+                  />
+                }
+              />
+            )}
+
+            <KpiTile
+              label="Avg percentile"
+              value={average !== null ? ordinal(average) : "—"}
+              comparison={
+                average !== null ? (
+                  <Delta value={Math.round(average) - 50} suffix={`vs ${resolved.label} p50`} />
+                ) : (
+                  <span className="text-xs text-ink-faint">Insufficient sample size</span>
+                )
+              }
+              info={`Mean of your percentiles across ranked metrics, within ${resolved.label}.`}
+            />
+
+            <KpiTile
+              label="Sample"
+              value={
+                <>
+                  {data.sample}
+                  <span className="ml-1.5 font-sans text-sm text-ink-faint">
+                    {data.sample === 1 ? "match" : "matches"}
+                  </span>
+                </>
+              }
+              badge={
+                lowSample ? (
+                  <span className="flex items-center gap-1 rounded-md bg-warn/15 px-1.5 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-warn">
+                    <Icon name="alert" className="size-3" />
+                    Low
+                  </span>
+                ) : null
+              }
+              comparison={
+                <span className="text-xs text-ink-faint">vs {resolved.label}</span>
+              }
+              info={caveat || undefined}
+            />
+
+            <KpiTile
+              label="Hero"
+              value={<span className="text-xl sm:text-2xl">{data.hero_name}</span>}
+              visual={
+                <HeroPortrait heroId={data.hero_id} heroName={data.hero_name} size="sm" />
+              }
+              comparison={
+                <span className="text-xs text-ink-faint">
+                  {data.context.role_label ?? "All roles"}
+                  {activeHero ? ` · ${formatPercent(activeHero.win_rate)} WR` : ""}
+                </span>
+              }
+            />
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+            <ChartCard
+              title={`${data.hero_name} vs ${resolved.label}`}
+              className="lg:col-span-7"
+              info="Each axis is your percentile in your own bracket (0–100). Deaths are scored so outward is always better. Hover an axis for raw values."
+            >
+              {ranked.length >= 3 ? (
+                <>
+                  <RadarCompare
+                    points={ranked}
+                    rankLabel={resolved.label}
+                    targetLabel={target?.label}
+                  />
+                  {best ? (
+                    <p className="mx-auto flex flex-wrap justify-center gap-2 text-xs">
+                      <span className="rounded-full bg-string/10 px-2.5 py-1 text-ink">
+                        Strongest: {best.strongest.axis}{" "}
+                        <span className="font-mono text-string">{ordinal(best.strongest.you ?? 0)}</span>
+                      </span>
+                      <span className="rounded-full bg-error/10 px-2.5 py-1 text-ink">
+                        Weakest: {best.weakest.axis}{" "}
+                        <span className="font-mono text-error">{ordinal(best.weakest.you ?? 0)}</span>
+                      </span>
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <EmptyRadar sample={data.sample} />
+              )}
+            </ChartCard>
+
+            <ChartCard
+              title={target ? `Gap to ${target.label}` : "Gap to next rank"}
+              className="lg:col-span-5"
+              info={
+                target
+                  ? `How far each metric sits above (+) or below (−) the ${target.label} median, as a share of that median. Deaths count fewer as better.`
+                  : "Pick a rank to aim at to see the gap."
+              }
+            >
+              {gaps.length > 0 ? (
+                <DivergingBars
+                  label={`Gap to ${target?.label} median by metric`}
+                  rows={gaps.map((gap) => {
+                    const result = data.results.find((r) => r.metric === gap.metric);
+                    const aim = aims.get(gap.metric);
+                    return {
+                      key: gap.metric,
+                      label: gap.axis,
+                      value: gap.percent,
+                      detail:
+                        result && aim?.peer_median != null
+                          ? `You ${formatMetricValue(result.player_value)} · ${target?.label} ${formatMetricValue(aim.peer_median)}`
+                          : undefined,
+                    };
+                  })}
+                />
+              ) : (
+                <p className="py-8 text-center text-xs text-ink-faint">No target rank selected</p>
+              )}
+            </ChartCard>
+
+            <ChartCard
+              title="Percentile ladder"
+              className="lg:col-span-12"
+              info={caveat || undefined}
+              action={
+                <ul className="hidden gap-3 text-[0.6875rem] text-ink-faint sm:flex">
+                  <LegendItem kind="you">You</LegendItem>
+                  <LegendTick className="bg-rank">{resolved.label}</LegendTick>
+                  {target ? (
+                    <LegendTick className="bg-target">{target.label}</LegendTick>
+                  ) : null}
+                </ul>
+              }
+            >
+              <ul className="grid grid-cols-1 gap-x-8 gap-y-3 md:grid-cols-2">
+                {data.results.map((result) => {
+                  const aim = aims.get(result.metric);
+                  return (
+                    <BulletBar
+                      key={result.metric}
+                      label={shortLabel(result.metric, result.label)}
+                      fullLabel={result.label}
+                      value={result.player_value}
+                      percentile={result.percentile}
+                      rankMedian={result.peer_median}
+                      targetMedian={aim?.peer_median ?? null}
+                      cleared={aim ? aim.cleared : null}
+                      shortfall={aim?.gap_to_median ?? null}
+                      rankLabel={resolved.label}
+                      targetLabel={target?.label}
+                      note={result.note}
+                    />
+                  );
+                })}
+              </ul>
+            </ChartCard>
+          </div>
         </>
       ) : null}
-
-      {/* The honesty note the whole page rests on — composed by the backend,
-          which is the only place that knows what the provider actually
-          delivered. A second copy of these claims here would be a second thing
-          to keep true. */}
-      <Card className="flex flex-col gap-2">
-        <h2 className="text-xs font-semibold uppercase tracking-[0.2em] text-ink-faint">
-          What this compares against
-        </h2>
-        <ComparisonContext context={data.context} />
-      </Card>
     </div>
   );
 }
 
-function ScopeChip({
-  label,
-  active,
-  onClick,
+function LegendTick({
+  className,
+  children,
 }: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
+  className: string;
+  children: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-current={active ? "true" : undefined}
-      className={cn(
-        "focus-neon min-h-11 cursor-pointer rounded-xl border px-3 py-2 text-xs",
-        "transition-colors duration-200 ease-out",
-        active
-          ? "border-function/60 bg-function/10 text-ink"
-          : "border-glass-edge text-ink-muted hover:text-ink",
+    <li className="flex items-center gap-1.5">
+      <span aria-hidden className={cn("h-3 w-1 rounded", className)} />
+      {children}
+    </li>
+  );
+}
+
+function EmptyRadar({ sample }: { sample: number }) {
+  return (
+    <div className="flex flex-col items-center gap-3 py-6">
+      <div className="relative aspect-square w-full max-w-[16rem] rounded-full border border-dashed border-mark-track" />
+      {sample < MIN_SAMPLE ? (
+        <>
+          <p className="text-sm text-ink">Insufficient sample size</p>
+          <p className="text-xs text-ink-faint">
+            {sample}/{MIN_SAMPLE} matches to rank
+          </p>
+        </>
+      ) : (
+        <p className="text-sm text-ink">Too few ranked metrics to plot</p>
       )}
-    >
-      {label}
-    </button>
+    </div>
   );
 }
 
@@ -405,8 +525,33 @@ function BenchmarkSkeleton() {
   return (
     <div className="flex flex-col gap-4" aria-busy="true" aria-live="polite">
       <span className="sr-only">Loading benchmarks…</span>
-      <div className="h-14 animate-pulse rounded-card bg-surface-2" />
-      <div className="h-80 animate-pulse rounded-card bg-surface-2" />
+      <div className="flex gap-2">
+        {Array.from({ length: 6 }, (_, i) => (
+          <div key={i} className="h-9 w-16 animate-pulse rounded-lg bg-surface-2" />
+        ))}
+      </div>
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        {Array.from({ length: 4 }, (_, i) => (
+          <div key={i} className="glass flex h-28 flex-col gap-3 rounded-card p-4">
+            <div className="h-2.5 w-20 animate-pulse rounded bg-surface-2" />
+            <div className="h-7 w-16 animate-pulse rounded bg-surface-2" />
+            <div className="h-1.5 w-full animate-pulse rounded bg-surface-2" />
+          </div>
+        ))}
+      </div>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+        <div className="glass flex items-center justify-center rounded-card p-6 lg:col-span-7">
+          <div className="aspect-square w-full max-w-[22rem] animate-pulse rounded-full bg-surface-2/70 [clip-path:polygon(50%_0,85%_15%,100%_50%,85%_85%,50%_100%,15%_85%,0_50%,15%_15%)]" />
+        </div>
+        <div className="glass flex flex-col justify-center gap-3 rounded-card p-5 lg:col-span-5">
+          {[60, 40, 75, 30, 55, 45, 65, 35].map((w, i) => (
+            <div key={i} className="grid grid-cols-[5.5rem_1fr] items-center gap-3">
+              <div className="h-2.5 w-14 animate-pulse rounded bg-surface-2" />
+              <div className="h-3 animate-pulse rounded-sm bg-surface-2" style={{ width: `${w}%`, marginLeft: i % 2 ? "50%" : `${50 - w / 2}%` }} />
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

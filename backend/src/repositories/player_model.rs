@@ -98,12 +98,30 @@ pub async fn sync_patterns(
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    for pattern in detected {
+    // One statement for every pattern rather than one per pattern. Against a
+    // remote database each statement is a round trip, and this transaction
+    // holds a pooled connection for all of them.
+    let ids: Vec<&str> = detected.iter().map(|p| p.id.as_str()).collect();
+    let occurrences: Vec<i64> = detected.iter().map(|p| p.occurrences).collect();
+    let measured: Vec<i64> = detected.iter().map(|p| p.measured).collect();
+    let rates: Vec<f32> = detected.iter().map(|p| p.rate).collect();
+    let recent: Vec<Option<f32>> = detected.iter().map(|p| p.recent_rate).collect();
+    let statuses: Vec<&str> = detected.iter().map(|p| p.status.slug()).collect();
+    let first_seen: Vec<Option<DateTime<Utc>>> =
+        detected.iter().map(|p| p.first_seen_at).collect();
+    let last_seen: Vec<Option<DateTime<Utc>>> = detected.iter().map(|p| p.last_seen_at).collect();
+
+    if !detected.is_empty() {
         sqlx::query(
             "INSERT INTO player_patterns
                  (dota_player_id, pattern_id, occurrences, measured, rate, recent_rate,
                   status, first_seen_at, last_seen_at, first_detected_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now())
+             SELECT $1, t.pattern_id, t.occurrences, t.measured, t.rate, t.recent_rate,
+                    t.status, t.first_seen_at, t.last_seen_at, now(), now()
+               FROM UNNEST($2::text[], $3::bigint[], $4::bigint[], $5::real[], $6::real[],
+                           $7::text[], $8::timestamptz[], $9::timestamptz[])
+                    AS t(pattern_id, occurrences, measured, rate, recent_rate,
+                         status, first_seen_at, last_seen_at)
              ON CONFLICT (dota_player_id, pattern_id) DO UPDATE
                  SET occurrences = EXCLUDED.occurrences,
                      measured    = EXCLUDED.measured,
@@ -118,14 +136,14 @@ pub async fn sync_patterns(
                      updated_at  = now()",
         )
         .bind(dota_player_id)
-        .bind(&pattern.id)
-        .bind(pattern.occurrences)
-        .bind(pattern.measured)
-        .bind(pattern.rate)
-        .bind(pattern.recent_rate)
-        .bind(pattern.status.slug())
-        .bind(pattern.first_seen_at)
-        .bind(pattern.last_seen_at)
+        .bind(&ids)
+        .bind(&occurrences)
+        .bind(&measured)
+        .bind(&rates)
+        .bind(&recent)
+        .bind(&statuses)
+        .bind(&first_seen)
+        .bind(&last_seen)
         .execute(&mut *tx)
         .await?;
     }

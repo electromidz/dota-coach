@@ -8,11 +8,13 @@ import { formatMetricValue } from "@/components/charts/BulletRow";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
+import { InfoTip } from "@/components/ui/InfoTip";
+import { SectionError } from "@/components/ui/SectionError";
 import { ApiError, getTrainingFocus } from "@/lib/api";
 import { CONFIDENCE_LABEL, CONFIDENCE_NOTE } from "@/lib/confidence";
 import { formatFocusValue } from "@/lib/training";
 import type { PreliminaryFocus, TrainingFocusResponse } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, ordinal } from "@/lib/utils";
 
 /**
  * The answer to "what should I do next?".
@@ -24,13 +26,23 @@ import { cn } from "@/lib/utils";
  * Every number is deterministic. The model is not consulted to produce any of
  * it, which is why it renders on a deployment with no LLM at all.
  */
-export function TrainingFocusCard({ compact = false }: { compact?: boolean }) {
-  const [data, setData] = useState<TrainingFocusResponse | null>(null);
+export function TrainingFocusCard({
+  compact = false,
+  data: given,
+}: {
+  compact?: boolean;
+  /** Already fetched by the page. When given, this card does not fetch. */
+  data?: TrainingFocusResponse;
+}) {
+  const [data, setData] = useState<TrainingFocusResponse | null>(given ?? null);
   const [error, setError] = useState<string | null>(null);
+  /** Bumped by Retry to re-run the fetch below. */
+  const [attempt, setAttempt] = useState(0);
   /** The backend has no role to train for yet. A prompt, not a failure. */
   const [needsRole, setNeedsRole] = useState<string | null>(null);
 
   useEffect(() => {
+    if (given) return;
     let cancelled = false;
 
     getTrainingFocus()
@@ -55,9 +67,20 @@ export function TrainingFocusCard({ compact = false }: { compact?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [attempt, given]);
 
-  if (error) return <Alert>{error}</Alert>;
+  if (error) {
+    return (
+      <SectionError
+        section="Training focus"
+        message={error}
+        onRetry={() => {
+          setError(null);
+          setAttempt((n) => n + 1);
+        }}
+      />
+    );
+  }
 
   if (needsRole) {
     return (
@@ -114,7 +137,7 @@ export function TrainingFocusCard({ compact = false }: { compact?: boolean }) {
       <Card className="flex flex-col gap-4" glow="keyword">
         <div className="flex flex-col gap-1.5">
           <h3 className="font-display text-lg text-ink">{focus.title}</h3>
-          <p className="text-sm leading-relaxed text-ink-muted">{focus.why}</p>
+          <p className="line-clamp-2 text-sm leading-relaxed text-ink-muted">{focus.why}</p>
         </div>
 
         {/* Baseline, now, target — the three numbers that make a goal
@@ -224,7 +247,7 @@ function PreliminaryCard({ reading }: { reading: PreliminaryFocus }) {
             </span>
             {ranked ? (
               <span className="rounded bg-mark-track px-1.5 py-0.5 font-mono text-[0.625rem] tabular-nums text-ink-muted">
-                p{Math.round(reading.percentile as number)}
+                {ordinal(reading.percentile as number)}
               </span>
             ) : (
               <span className="rounded bg-mark-track px-1.5 py-0.5 text-[0.625rem] text-ink-faint">
@@ -234,7 +257,7 @@ function PreliminaryCard({ reading }: { reading: PreliminaryFocus }) {
           </span>
         </div>
 
-        <p className="text-sm leading-relaxed text-ink-muted">{reading.why}</p>
+        <p className="line-clamp-2 text-sm leading-relaxed text-ink-muted">{reading.why}</p>
 
         {reading.peer_median !== null ? (
           <dl className="grid grid-cols-2 gap-3">
@@ -250,26 +273,14 @@ function PreliminaryCard({ reading }: { reading: PreliminaryFocus }) {
           </dl>
         ) : null}
 
-        {/* The whole point of the card: say why this is not yet a conclusion,
-            and what would make it one. */}
-        <div className="flex flex-col gap-1.5 rounded-xl border border-glass-edge bg-mark-track/40 p-3">
-          <p className="text-xs leading-relaxed text-ink-muted">
-            This is an early signal, not a reliable conclusion — no target has
-            been set against it and no progress is being tracked yet.
-          </p>
-          <p className="text-xs leading-relaxed text-ink-faint">
-            {reading.to_confirm}
-          </p>
-          {CONFIDENCE_NOTE[reading.confidence] ? (
-            <p className="text-xs leading-relaxed text-ink-faint">
-              {CONFIDENCE_NOTE[reading.confidence]}
-            </p>
-          ) : null}
-        </div>
-
-        <p className="text-xs text-ink-faint">
-          Keep playing in this role and it will either firm up into a focus or
-          drop away.
+        <p className="flex items-center gap-1.5 text-xs text-warn">
+          Early signal, no target yet
+          <InfoTip label="Why this is not a focus yet">
+            <span>{reading.to_confirm}</span>
+            {CONFIDENCE_NOTE[reading.confidence] ? (
+              <span>{CONFIDENCE_NOTE[reading.confidence]}</span>
+            ) : null}
+          </InfoTip>
         </p>
       </Card>
     </section>

@@ -14,6 +14,7 @@
 //!
 //! Pure. History and the clock come from the caller.
 
+use crate::services::format::ordinal;
 use crate::domain::benchmark::{BenchmarkMetric, BenchmarkResult, Confidence};
 use crate::domain::player_model::{AnalyzedMatch, PatternStatus, RecurringPattern};
 use crate::domain::training::{
@@ -350,22 +351,6 @@ fn to_confirm(result: &BenchmarkResult) -> String {
              single match, so there is no progress target to set against it yet.",
         ),
     }
-}
-
-/// A percentile as an ordinal: `22` -> `"22nd"`, `11` -> `"11th"`.
-///
-/// The teens are the trap — 11, 12 and 13 take `th` despite ending in 1, 2 and
-/// 3 — and percentiles land there often enough to matter.
-fn ordinal(value: f32) -> String {
-    let n = value.round().max(0.0) as i64;
-    let suffix = match (n % 10, n % 100) {
-        (_, 11..=13) => "th",
-        (1, _) => "st",
-        (2, _) => "nd",
-        (3, _) => "rd",
-        _ => "th",
-    };
-    format!("{n}{suffix}")
 }
 
 /// A metric's value as a player reads it.

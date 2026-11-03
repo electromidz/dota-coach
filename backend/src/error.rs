@@ -86,6 +86,15 @@ impl AppError {
                 (StatusCode::SERVICE_UNAVAILABLE, "FEATURE_UNAVAILABLE")
             }
             AppError::PaymentRequired(_) => (StatusCode::PAYMENT_REQUIRED, "PAYMENT_REQUIRED"),
+            // Every connection busy, or the database unreachable for a moment
+            // (DNS, network, TLS): a wait, not a fault. 503 tells a client a
+            // retry is the right response, and the code says which kind.
+            AppError::Database(sqlx::Error::PoolTimedOut) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "DATABASE_BUSY")
+            }
+            AppError::Database(e) if is_connection_failure(e) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "DATABASE_UNAVAILABLE")
+            }
             AppError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
         }
@@ -110,6 +119,12 @@ impl AppError {
                 "No Dota account is linked to your Steam profile yet.".into()
             }
             AppError::Upstream(m) => format!("Upstream service unavailable: {m}"),
+            AppError::Database(sqlx::Error::PoolTimedOut) => {
+                "The service is busy right now. Please retry in a moment.".into()
+            }
+            AppError::Database(e) if is_connection_failure(e) => {
+                "The database can't be reached right now. Please retry in a moment.".into()
+            }
             AppError::Database(_) => "A database error occurred. Please try again.".into(),
             AppError::Internal(_) => "An unexpected error occurred. Please try again.".into(),
         }
@@ -304,5 +319,32 @@ mod tests {
         let error = AppError::DotaAccountNotLinked;
         assert_eq!(error.parts().0, StatusCode::CONFLICT);
         assert_eq!(error.parts().1, "DOTA_ACCOUNT_NOT_LINKED");
+    }
+}
+
+/// The database could not be reached, as opposed to a query going wrong.
+fn is_connection_failure(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Io(_) | sqlx::Error::Tls(_) | sqlx::Error::PoolClosed
+    )
+}
+
+#[cfg(test)]
+mod database_error_tests {
+    use super::*;
+
+    #[test]
+    fn unreachable_or_busy_databases_are_retryable_and_say_so() {
+        let io = AppError::Database(sqlx::Error::Io(std::io::Error::other("dns")));
+        assert_eq!(io.parts(), (StatusCode::SERVICE_UNAVAILABLE, "DATABASE_UNAVAILABLE"));
+        assert!(io.public_message().contains("can't be reached"));
+
+        let busy = AppError::Database(sqlx::Error::PoolTimedOut);
+        assert_eq!(busy.parts(), (StatusCode::SERVICE_UNAVAILABLE, "DATABASE_BUSY"));
+
+        // A query that genuinely failed stays a 500.
+        let row = AppError::Database(sqlx::Error::RowNotFound);
+        assert_eq!(row.parts(), (StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR"));
     }
 }

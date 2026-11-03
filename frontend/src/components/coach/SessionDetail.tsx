@@ -12,6 +12,7 @@ import { Icon } from "@/components/ui/Icon";
 import { SteamLoginButton } from "@/components/ui/SteamLoginButton";
 import { ApiError, getCoachingSession } from "@/lib/api";
 import type { CoachingSession, PlayerTrait } from "@/lib/types";
+import { fixOrdinals } from "@/lib/utils";
 
 type State =
   | { kind: "loading" }
@@ -240,7 +241,7 @@ function TraitList({
             <li key={trait.key} className="flex items-start gap-2.5">
               <Icon name={icon} className={`mt-0.5 size-4 shrink-0 ${tone}`} />
               <span className="text-[0.8125rem] leading-relaxed text-ink-muted">
-                {trait.statement}
+                {fixOrdinals(trait.statement)}
               </span>
             </li>
           ))}

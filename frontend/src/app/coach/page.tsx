@@ -8,7 +8,6 @@ export default function CoachPage() {
     <AppShell
       title="Coach"
       eyebrow="AI coaching"
-      description="What your numbers say, and what to do about it."
     >
       <Coach />
     </AppShell>

@@ -1,6 +1,4 @@
-import { RoleScoreBreakdown } from "@/components/coach/RoleScoreBreakdown";
-import { Card } from "@/components/ui/Card";
-import { ConfidenceBadge } from "@/components/dashboard/ScopeBanner";
+import { InfoTip } from "@/components/ui/InfoTip";
 import { formatPercent } from "@/lib/stats";
 import type {
   AnalysisScopeInfo,
@@ -21,86 +19,55 @@ export function CoachingFocusHeader({
   analysis,
   scope,
   onChangeRole,
+  extra,
 }: {
   profile: CoachingProfile;
   analysis: RoleAnalysis;
   scope: AnalysisScopeInfo;
   onChangeRole: () => void;
+  /** Trailing content, e.g. the analysis's (i). */
+  extra?: React.ReactNode;
 }) {
   const performance = analysis.roles.find(
     (role) => role.role === profile.selected_role,
   );
 
   return (
-    <Card className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
-        <div className="flex flex-col gap-1">
-          <p className="text-xs uppercase tracking-wider text-ink-faint">
-            Coaching focus
-          </p>
-          <p className="font-mono text-2xl text-keyword">
-            {profile.selected_role_label}
-          </p>
-        </div>
-
-        <button
-          type="button"
-          onClick={onChangeRole}
-          className="focus-neon cursor-pointer rounded text-xs text-function transition-colors duration-200 ease-out hover:text-ink"
-        >
-          Change role
-        </button>
-      </div>
-
-      <p className="text-sm leading-relaxed text-ink-muted">
+    <div className="glass flex flex-wrap items-center gap-x-4 gap-y-2 rounded-card px-4 py-3">
+      <span className="text-[0.6875rem] uppercase tracking-[0.16em] text-ink-faint">
+        Coaching
+      </span>
+      <span className="font-display text-lg text-keyword">{profile.selected_role_label}</span>
+      <span className="font-mono text-xs tabular-nums text-ink-muted">
         {performance ? (
           <>
-            {performance.matches}{" "}
-            {performance.matches === 1 ? "game" : "games"} as{" "}
-            {profile.selected_role_label} in Ranked and public All Pick ·{" "}
-            {formatPercent(performance.win_rate)} won ·{" "}
-            {Math.round(performance.performance)}/100
+            {performance.matches} {performance.matches === 1 ? "game" : "games"} ·{" "}
+            {formatPercent(performance.win_rate)} won
           </>
         ) : (
-          <>
-            No eligible {profile.selected_role_label} games yet. Your other roles
-            still count towards your overall numbers, but they are not evidence
-            about this one.
-          </>
+          "No eligible games yet"
         )}
-      </p>
-
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
-        <p className="text-xs text-ink-faint">
-          Read from your last {scope.analyzed_matches} eligible{" "}
-          {scope.analyzed_matches === 1 ? "match" : "matches"}.
-        </p>
-        {performance ? (
-          <ConfidenceBadge
-            confidence={performance.confidence}
-            label={
-              performance.confidence.charAt(0).toUpperCase() +
-              performance.confidence.slice(1)
-            }
-          />
+      </span>
+      <InfoTip label="Which games this reads">
+        <span>
+          Ranked and public All Pick games as {profile.selected_role_label}; the last{" "}
+          {scope.analyzed_matches} eligible {scope.analyzed_matches === 1 ? "match" : "matches"}.
+        </span>
+        {profile.overrode_recommendation && profile.recommended_role_label ? (
+          <span>
+            Your measured performance was stronger as {profile.recommended_role_label}; you
+            chose {profile.selected_role_label}.
+          </span>
         ) : null}
-      </div>
-
-      {performance ? (
-        <RoleScoreBreakdown
-          performance={performance}
-          className="border-t border-border pt-3"
-        />
-      ) : null}
-
-      {profile.overrode_recommendation && profile.recommended_role_label ? (
-        <p className="border-t border-border pt-3 text-xs leading-relaxed text-ink-faint">
-          Your measured performance was stronger as{" "}
-          {profile.recommended_role_label}, and you chose{" "}
-          {profile.selected_role_label}. That is the role being coached — the
-          recommendation was only advice.
-        </p>
-      ) : null}
-    </Card>
+      </InfoTip>
+      {extra}
+      <button
+        type="button"
+        onClick={onChangeRole}
+        className="focus-neon ml-auto cursor-pointer rounded text-xs text-function transition-colors duration-200 ease-out hover:text-ink"
+      >
+        Change role
+      </button>
+    </div>
   );
 }

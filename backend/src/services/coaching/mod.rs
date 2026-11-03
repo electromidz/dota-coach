@@ -14,6 +14,7 @@
 
 pub mod chat;
 pub mod evidence;
+pub mod goals;
 pub mod numbers;
 pub mod prompt;
 
@@ -546,6 +547,7 @@ mod tests {
             statement: statement.to_string(),
             sample: 20,
             confidence: Confidence::Adequate,
+            figure: None,
         })
         .collect()
     }
@@ -571,6 +573,7 @@ mod tests {
                 statement: statement.to_string(),
                 sample: 20,
                 confidence: Confidence::Adequate,
+                figure: None,
             });
         }
         out
@@ -907,6 +910,7 @@ mod tests {
             statement: statement.to_string(),
             sample: 1,
             confidence: Confidence::Insufficient,
+            figure: None,
         })
         .collect()
     }

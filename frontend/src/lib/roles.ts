@@ -17,8 +17,14 @@ export function formatComponentValue(component: ScoreComponent): string {
       return `${Math.round(component.value * 100)}%`;
     case "kda":
       return component.value.toFixed(2);
+    // The backend serializes this key as "deaths"; "deaths_per_10" is kept
+    // for any stored payload written under the older name.
+    case "deaths":
     case "deaths_per_10":
       return component.value.toFixed(1);
+    default:
+      // A key added server-side must still show its number, never a blank.
+      return Number.isFinite(component.value) ? component.value.toFixed(1) : "—";
   }
 }
 

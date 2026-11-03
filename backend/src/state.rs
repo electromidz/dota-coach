@@ -10,6 +10,7 @@ use crate::services::benchmarks::BenchmarkProvider;
 use crate::services::cache::postgres::PostgresCoachingCache;
 use crate::services::cache::{CoachingCache, NoCache};
 use crate::services::dota::DotaDataProvider;
+use crate::services::hero_kit::HeroKitProvider;
 use crate::services::hero_meta::HeroMetaProvider;
 use crate::services::llm::LlmProvider;
 use crate::services::match_facts::MatchFactsProvider;
@@ -35,6 +36,9 @@ pub struct AppState {
     /// What the wider player base is doing. Degradable: Hero Intelligence
     /// still answers from the player's own history when this is down.
     pub hero_meta: Arc<dyn HeroMetaProvider>,
+    /// A hero's abilities and usual items, so advice can be hero-specific.
+    /// Degradable: an outage drops those facts and nothing else.
+    pub hero_kit: Arc<dyn HeroKitProvider>,
     /// One match's timeline, second by second. STRATZ in production.
     ///
     /// Separate from `dota` on purpose: the two are different providers with
@@ -110,6 +114,7 @@ pub struct Providers {
     pub steam_verifier: Arc<dyn SteamVerifier>,
     pub benchmarks: Arc<dyn BenchmarkProvider>,
     pub hero_meta: Arc<dyn HeroMetaProvider>,
+    pub hero_kit: Arc<dyn HeroKitProvider>,
     pub match_facts: Arc<dyn MatchFactsProvider>,
     pub llm: Arc<dyn LlmProvider>,
     pub payments: Arc<dyn PaymentProvider>,
@@ -130,6 +135,7 @@ impl AppState {
             steam_verifier: providers.steam_verifier,
             benchmarks: providers.benchmarks,
             hero_meta: providers.hero_meta,
+            hero_kit: providers.hero_kit,
             match_facts: providers.match_facts,
             llm: providers.llm,
             payments: providers.payments,

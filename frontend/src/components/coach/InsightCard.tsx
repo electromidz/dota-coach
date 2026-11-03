@@ -1,7 +1,7 @@
 import { Card } from "@/components/ui/Card";
 import { citedBy, INSIGHT_CLASS } from "@/lib/coach";
 import type { Evidence, Insight } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, fixOrdinals } from "@/lib/utils";
 
 /** Major reads as urgent; minor reads as context. */
 const SEVERITY_CLASS = {
@@ -79,7 +79,7 @@ export function InsightCard({
           </span>
         ) : null}
 
-        <h3 className="font-display text-base text-ink">{insight.title}</h3>
+        <h3 className="font-display text-base text-ink">{fixOrdinals(insight.title)}</h3>
       </div>
 
       {split ? (
@@ -90,7 +90,7 @@ export function InsightCard({
         </dl>
       ) : (
         <p className="text-sm leading-relaxed text-ink-muted">
-          {insight.explanation}
+          {fixOrdinals(insight.explanation)}
         </p>
       )}
 
@@ -105,7 +105,7 @@ export function InsightCard({
                 </span>
               </span>
               <span className="text-xs leading-relaxed text-ink">
-                {item.statement}
+                {fixOrdinals(item.statement)}
               </span>
             </li>
           ))}

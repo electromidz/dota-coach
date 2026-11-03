@@ -771,6 +771,7 @@ pub struct TestApp {
 pub fn test_config() -> Config {
     Config {
         database_url: String::new(),
+        db: dota_coach_backend::config::DbConfig::default(),
         host: "127.0.0.1".into(),
         port: 0,
         cors_origins: vec!["http://localhost:3000".into()],
@@ -1025,6 +1026,7 @@ fn build(
             steam_verifier: verifier,
             benchmarks,
             hero_meta,
+            hero_kit: Arc::new(dota_coach_backend::services::hero_kit::NullHeroKitProvider),
             match_facts,
             llm,
             payments,

@@ -11,6 +11,8 @@ pub mod coaching;
 pub mod coaching_session;
 pub mod dota;
 pub mod events;
+pub mod format;
+pub mod hero_kit;
 pub mod hero_meta;
 pub mod heroes;
 pub mod llm;

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PreliminaryFocus, TrainingFocusResponse } from "@/lib/types";
@@ -59,7 +59,7 @@ describe("TrainingFocusCard", () => {
 
     expect(await screen.findByText("Potential training focus")).toBeTruthy();
     expect(screen.getByText("Last hits per minute")).toBeTruthy();
-    expect(screen.getByText("p27")).toBeTruthy();
+    expect(screen.getByText("27th")).toBeTruthy();
   });
 
   it("labels the reading as preliminary rather than as a conclusion", async () => {
@@ -74,7 +74,9 @@ describe("TrainingFocusCard", () => {
     expect(await screen.findByText("Potential training focus")).toBeTruthy();
     expect(screen.queryByText("Current training focus")).toBeNull();
     expect(screen.getByText("Low confidence")).toBeTruthy();
-    expect(screen.getByText(/early signal, not a reliable conclusion/)).toBeTruthy();
+    expect(screen.getByText(/Early signal, no target yet/)).toBeTruthy();
+    // The explanation is one tap away rather than on the card.
+    fireEvent.click(screen.getByRole("button", { name: "Why this is not a focus yet" }));
     expect(screen.getByText(/rests on 11 matches/)).toBeTruthy();
     // No goal was set, so nothing may claim progress toward one.
     expect(screen.queryByText("Progress toward the target")).toBeNull();

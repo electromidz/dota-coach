@@ -192,8 +192,9 @@ fn benchmark_traits(results: &[BenchmarkResult], hero: Option<&str>) -> Vec<Play
                 key: format!("benchmark.{}", result.metric.slug()),
                 label: result.label.to_string(),
                 statement: format!(
-                    "On {hero}, your {} sits at the {percentile:.0}th percentile across {} {}.",
+                    "On {hero}, your {} sits at the {} percentile across {} {}.",
                     result.label.to_lowercase(),
+                    crate::services::format::ordinal(percentile),
                     result.player_sample,
                     if result.player_sample == 1 {
                         "match"

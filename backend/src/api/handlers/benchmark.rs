@@ -23,7 +23,7 @@ use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
 use crate::repositories::metrics::HeroAverages;
-use crate::services::benchmarks::{self, percentile, BenchmarkError, PlayerValues};
+use crate::services::benchmarks::{self, percentile, BenchmarkError, Distribution, PlayerValues};
 use crate::state::AppState;
 use utoipa::ToSchema;
 
@@ -509,7 +509,9 @@ pub(crate) async fn build(
         // Already the player's own bracket. A second identical column would be
         // noise dressed as a comparison.
         Some(aim) if bracket.used == Some(aim) => None,
-        Some(aim) => target_comparison(state, &context, &values, aim, only).await,
+        Some(aim) => {
+            target_comparison(state, &context, &distribution, &values, aim, only).await
+        }
         None => None,
     };
 
@@ -551,6 +553,7 @@ pub(crate) async fn build(
 async fn target_comparison(
     state: &AppState,
     context: &BenchmarkContext,
+    own: &Distribution,
     values: &PlayerValues,
     aim: RankBracket,
     only: Option<BenchmarkMetric>,
@@ -591,6 +594,7 @@ async fn target_comparison(
                 percentile: result.percentile,
                 gap_to_median: gap,
                 cleared: gap.is_some_and(|gap| gap <= 0.0),
+                median_percentile: median_percentile(own, &result),
             }
         })
         .collect();
@@ -607,6 +611,16 @@ async fn target_comparison(
         metrics_compared: compared as i64,
         metrics,
     })
+}
+
+/// The target median placed in the player's own bracket's distribution.
+///
+/// Same interpolation as the player's own percentile, so the two are directly
+/// comparable on a chart axis.
+fn median_percentile(own: &Distribution, target: &BenchmarkResult) -> Option<f32> {
+    let median = target.peer_median?;
+    let buckets = own.buckets.get(&target.metric)?;
+    percentile::percentile_of(median, buckets, target.higher_is_better)
 }
 
 /// Every bracket, in rank order, with the player's own marked.
@@ -770,5 +784,71 @@ mod tests {
 
         // An unranked player's own bracket is not guessed at.
         assert!(bracket_options(None).iter().all(|o| !o.is_player_rank));
+    }
+
+    fn own_distribution() -> Distribution {
+        use crate::domain::benchmark::Bucket;
+        let buckets = |pairs: [(f32, f32); 3]| {
+            pairs
+                .into_iter()
+                .map(|(percentile, value)| Bucket { percentile, value })
+                .collect::<Vec<_>>()
+        };
+        Distribution {
+            buckets: HashMap::from([
+                (
+                    BenchmarkMetric::GoldPerMin,
+                    buckets([(0.1, 300.0), (0.5, 500.0), (0.9, 700.0)]),
+                ),
+                (
+                    BenchmarkMetric::DeathsPerMin,
+                    buckets([(0.1, 0.1), (0.5, 0.2), (0.9, 0.4)]),
+                ),
+            ]),
+            segmented_by: Vec::new(),
+            sample_size: None,
+            bracket: ResolvedBracket::all_ranks(),
+        }
+    }
+
+    fn target_result(metric: BenchmarkMetric, median: Option<f32>) -> BenchmarkResult {
+        BenchmarkResult {
+            metric,
+            label: metric.label(),
+            higher_is_better: metric.higher_is_better(),
+            player_value: 0.0,
+            player_sample: 20,
+            peer_median: median,
+            top_20_value: None,
+            percentile: None,
+            gap_to_top_20: None,
+            peer_sample_size: None,
+            confidence: Confidence::Adequate,
+            segmented_by: Vec::new(),
+            note: None,
+        }
+    }
+
+    #[test]
+    fn the_target_median_is_placed_on_the_players_own_scale() {
+        let own = own_distribution();
+
+        // 600 GPM sits halfway between the 50th and 90th of the own bracket.
+        let gpm = median_percentile(&own, &target_result(BenchmarkMetric::GoldPerMin, Some(600.0)));
+        assert!((gpm.unwrap() - 70.0).abs() < 0.01);
+
+        // Fewer deaths is better, so a lower target median ranks *higher*.
+        let deaths =
+            median_percentile(&own, &target_result(BenchmarkMetric::DeathsPerMin, Some(0.15)));
+        assert!((deaths.unwrap() - 70.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn no_target_percentile_without_both_sides() {
+        let own = own_distribution();
+        assert!(median_percentile(&own, &target_result(BenchmarkMetric::GoldPerMin, None)).is_none());
+        assert!(
+            median_percentile(&own, &target_result(BenchmarkMetric::XpPerMin, Some(500.0))).is_none()
+        );
     }
 }

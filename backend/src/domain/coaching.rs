@@ -65,6 +65,42 @@ pub struct Evidence {
     /// Matches behind the figure, so thin evidence is visibly thin.
     pub sample: i64,
     pub confidence: Confidence,
+    /// The numbers inside `statement`, for charts. The same values the
+    /// sentence was written from, so a chart and its sentence cannot differ.
+    /// Absent on evidence that is not a single measured figure, and on
+    /// analyses stored before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub figure: Option<EvidenceFigure>,
+}
+
+/// One measured figure behind an evidence statement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct EvidenceFigure {
+    /// Benchmark metric slug, e.g. `gold_per_min`, when this is one.
+    #[serde(default)]
+    pub metric: Option<String>,
+    /// The hero the figure was measured on, when it is hero-specific.
+    #[serde(default)]
+    pub hero_id: Option<i32>,
+    pub value: f32,
+    pub higher_is_better: bool,
+    #[serde(default)]
+    pub unit: Option<crate::domain::coaching_session::MetricUnit>,
+    /// Peer median and top-20% line, for a benchmark figure.
+    #[serde(default)]
+    pub median: Option<f32>,
+    #[serde(default)]
+    pub top_20: Option<f32>,
+    /// Direction-corrected 0-100.
+    #[serde(default)]
+    pub percentile: Option<f32>,
+    /// The earlier reading, for a change since the last session.
+    #[serde(default)]
+    pub previous: Option<f32>,
+    #[serde(default)]
+    pub percent_change: Option<f32>,
+    #[serde(default)]
+    pub status: Option<crate::domain::progress::ProgressStatus>,
 }
 
 /// The kinds of insight the coaching layer may produce.
@@ -269,6 +305,62 @@ pub struct CoachingAnalysis {
     /// still be read against the numbers that produced it.
     pub evidence: Vec<Evidence>,
     pub generated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A plan step turned into something checkable: one metric, where it stood,
+/// and where it should get to.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct PlanGoal {
+    /// The plan step this goal belongs to.
+    pub position: i32,
+    /// The benchmark evidence the target was read from.
+    pub evidence_id: String,
+    /// Benchmark metric slug.
+    pub metric: String,
+    pub label: String,
+    pub hero_id: Option<i32>,
+    pub higher_is_better: bool,
+    /// The value when the goal was set.
+    pub baseline: f32,
+    pub target: f32,
+    /// "Peer median" or "Top 20%".
+    pub target_label: String,
+}
+
+/// A current goal, with how far along it is and the last few games.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct GoalView {
+    #[serde(flatten)]
+    pub goal: PlanGoal,
+    /// The value in the analysis's own snapshot.
+    pub current: f32,
+    /// 0-1, the current value as a share of the target, direction honoured.
+    pub progress: f32,
+    /// Whether each of the most recent games on the hero met the target,
+    /// oldest first. At most five.
+    pub recent: Vec<bool>,
+}
+
+/// What became of a goal set by the previous analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalOutcome {
+    /// The target is met.
+    Hit,
+    /// Not met, and no further away than when it was set.
+    InProgress,
+    /// Not met, and further away than when it was set.
+    Missed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct GoalResult {
+    #[serde(flatten)]
+    pub goal: PlanGoal,
+    /// The value now, from the current analysis. `None` when it no longer
+    /// measures that metric.
+    pub current: Option<f32>,
+    pub outcome: GoalOutcome,
 }
 
 #[cfg(test)]

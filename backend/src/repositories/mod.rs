@@ -9,6 +9,7 @@ pub mod benchmark;
 pub mod billing;
 pub mod coaching;
 pub mod coaching_cache;
+pub mod coaching_goal;
 pub mod coaching_profile;
 pub mod coaching_session;
 pub mod conversation;

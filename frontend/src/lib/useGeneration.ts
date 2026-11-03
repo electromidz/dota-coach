@@ -50,5 +50,5 @@ export function useGeneration(
     }
   }
 
-  return { current, busy, error, paywalled, generate };
+  return { current, busy, error, paywalled, generate, replace: setCurrent };
 }

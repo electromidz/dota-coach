@@ -115,6 +115,7 @@ pub fn unavailable(reason: Unavailable, provider: &str) -> Evidence {
         statement: reason.statement(provider),
         sample: 1,
         confidence: percentile::confidence_for(1),
+        figure: None,
     }
 }
 
@@ -531,6 +532,7 @@ fn push(out: &mut Vec<Evidence>, id: &str, label: &str, statement: String) {
         // single game a pattern.
         sample: 1,
         confidence: percentile::confidence_for(1),
+        figure: None,
     })
 }
 

@@ -1,5 +1,6 @@
 import { Card } from "@/components/ui/Card";
 import type { Evidence, PlanStep } from "@/lib/types";
+import { fixOrdinals } from "@/lib/utils";
 
 /**
  * What to actually do next, in order.
@@ -64,10 +65,10 @@ export function TrainingPlan({
                         : "font-display text-base text-ink"
                     }
                   >
-                    {step.title}
+                    {fixOrdinals(step.title)}
                   </p>
                   <p className="text-xs leading-relaxed text-ink-muted">
-                    {step.action}
+                    {fixOrdinals(step.action)}
                   </p>
                   <p className="text-[0.6875rem] text-ink-faint">
                     From:{" "}

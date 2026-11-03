@@ -14,7 +14,7 @@
 //!     thin a sample, or present in only one session, gets
 //!     [`ProgressStatus::InsufficientData`] — never a quiet "no change".
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -22,7 +22,7 @@ use crate::domain::coaching_session::MetricUnit;
 use crate::domain::role::CoachableRole;
 
 /// What happened to one metric between two sessions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgressStatus {
     /// Moved in the good direction by more than the stable band.
@@ -122,6 +122,9 @@ pub struct SessionProgress {
     pub current_session_id: Uuid,
     pub current_sequence: i32,
     pub current_at: chrono::DateTime<chrono::Utc>,
+    /// Matches behind the current session. Counted once here so every row of
+    /// "since your last session" reports the same number.
+    pub matches: i64,
 
     /// The headline: the role score, compared. `None` when either session
     /// could not score the role.

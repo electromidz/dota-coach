@@ -3,11 +3,13 @@
 import { useEffect, useState } from "react";
 
 import { ComparisonContext } from "@/components/benchmark/ComparisonContext";
-import { BulletRow } from "@/components/charts/BulletRow";
-import { Alert } from "@/components/ui/Alert";
+import { PeerBullet, PeerLegend } from "@/components/coach/PeerBullet";
 import { Card } from "@/components/ui/Card";
+import { InfoTip } from "@/components/ui/InfoTip";
+import { SectionError } from "@/components/ui/SectionError";
 import { ApiError, getBenchmark } from "@/lib/api";
-import type { BenchmarkResponse } from "@/lib/types";
+import { hasPeerFigure } from "@/lib/coach";
+import type { BenchmarkResponse, Evidence } from "@/lib/types";
 
 /**
  * Where the player stands against the top 20%, in the role being coached.
@@ -19,9 +21,19 @@ import type { BenchmarkResponse } from "@/lib/types";
  * come from the benchmark engine, and when the provider has nothing to say the
  * panel says that instead of estimating.
  */
-export function RoleBenchmark({ roleLabel }: { roleLabel: string }) {
+export function RoleBenchmark({
+  roleLabel,
+  snapshot,
+}: {
+  roleLabel: string;
+  /** The analysis's evidence. Its benchmark figures win over a live read, so
+   *  this panel shows the same numbers as the cards. */
+  snapshot?: Evidence[];
+}) {
   const [data, setData] = useState<BenchmarkResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Bumped by Retry to re-run the fetch below. */
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -43,9 +55,20 @@ export function RoleBenchmark({ roleLabel }: { roleLabel: string }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [attempt]);
 
-  if (error) return <Alert>{error}</Alert>;
+  if (error) {
+    return (
+      <SectionError
+        section="Role benchmark"
+        message={error}
+        onRetry={() => {
+          setError(null);
+          setAttempt((n) => n + 1);
+        }}
+      />
+    );
+  }
   if (!data) {
     return (
       <div
@@ -55,32 +78,61 @@ export function RoleBenchmark({ roleLabel }: { roleLabel: string }) {
     );
   }
 
+  const fromSnapshot = (snapshot ?? []).filter(hasPeerFigure);
+  const items: Evidence[] =
+    fromSnapshot.length > 0
+      ? fromSnapshot
+      : data.results.map((r) => ({
+          id: `benchmark.${r.metric}`,
+          kind: "benchmark" as const,
+          label: r.label,
+          statement: r.note ?? "",
+          sample: r.player_sample,
+          confidence: r.confidence,
+          figure: {
+            metric: r.metric,
+            hero_id: data.hero_id,
+            value: r.player_value,
+            higher_is_better: r.higher_is_better,
+            unit: null,
+            median: r.peer_median,
+            top_20: r.top_20_value,
+            percentile: r.percentile,
+            previous: null,
+            percent_change: null,
+            status: null,
+          },
+        }));
+  const sample = items[0]?.sample ?? data.sample;
+
   return (
-    <section className="flex flex-col gap-4">
-      <header className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="font-display text-sm uppercase tracking-[0.2em] text-ink-faint">
+    <section className="flex flex-col gap-3" aria-label="Against the top 20%">
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="flex items-center gap-2 font-display text-sm uppercase tracking-[0.2em] text-ink-faint">
           Against the top 20%
+          <InfoTip label="What this compares against">
+            <ComparisonContext context={data.context} />
+          </InfoTip>
         </h2>
-        {data.results.length > 0 ? (
+        {items.length > 0 ? (
           <span className="font-mono text-[0.6875rem] tabular-nums text-ink-faint">
-            {data.hero_name} · {data.sample}{" "}
-            {data.sample === 1 ? "game" : "games"} as {roleLabel}
+            {data.hero_name} · {sample} {sample === 1 ? "game" : "games"} as {roleLabel}
           </span>
         ) : null}
       </header>
 
-      {data.note ? <Alert tone="info">{data.note}</Alert> : null}
+      {data.note && items.length === 0 ? (
+        <p className="truncate text-xs text-ink-faint">{data.note}</p>
+      ) : null}
 
-      {data.results.length > 0 ? (
-        <Card className="flex flex-col gap-6">
-          {data.results.map((result) => (
-            <BulletRow key={result.metric} result={result} />
-          ))}
-
-          <ComparisonContext
-            context={data.context}
-            className="border-t border-border pt-4"
-          />
+      {items.length > 0 ? (
+        <Card className="flex flex-col gap-4">
+          <PeerLegend />
+          <ul className="grid grid-cols-1 gap-x-8 gap-y-3 md:grid-cols-2">
+            {items.map((item) => (
+              <PeerBullet key={item.id} item={item} />
+            ))}
+          </ul>
         </Card>
       ) : null}
     </section>
