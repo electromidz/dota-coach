@@ -180,6 +180,33 @@ pub async fn latest(
     hydrate(pool, row).await
 }
 
+/// The role analysis generated just before a given one, if any.
+pub async fn previous(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    role: CoachableRole,
+    before: DateTime<Utc>,
+) -> Result<Option<CoachingAnalysis>, sqlx::Error> {
+    let row = sqlx::query_as::<_, AnalysisRow>(concat!(
+        "SELECT ",
+        analysis_columns!(),
+        " FROM coaching_analyses
+          WHERE dota_player_id = $1
+            AND match_id IS NULL
+            AND role = $2
+            AND generated_at < $3
+          ORDER BY generated_at DESC
+          LIMIT 1"
+    ))
+    .bind(dota_player_id)
+    .bind(role.slug())
+    .bind(before)
+    .fetch_optional(pool)
+    .await?;
+
+    hydrate(pool, row).await
+}
+
 /// How many analyses this player has generated since a moment.
 ///
 /// Counts stored analyses rather than attempts: a cache hit costs nothing and

@@ -66,6 +66,15 @@
   --color-mark-line: #7aa2f7;
   --color-mark-track: #3b4261;
 
+  /* Comparison series, used on every "you vs a rank" chart. All Tokyo Night:
+     you = function blue (the app's trend-line colour), your rank = the muted
+     comment grey, the rank you aim at = number orange. The references are
+     dashed/ticked so identity never rests on colour alone. Validated on
+     surface-2: CVD dE >= 16, contrast >= 3:1. */
+  --color-you: #7aa2f7;
+  --color-rank: #8f98c4;
+  --color-target: #ff9e64;
+
   /* Glass surfaces. Tokens so every card blurs identically.
      The fill sits at 0.48: enough tint to hold text, thin enough that the
      ambient field behind actually shows through and the blur has something to
@@ -80,7 +89,7 @@
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code",
     "Cascadia Code", Menlo, Consolas, monospace;
 
-  --radius-card: 1.25rem;
+  --radius-card: 1rem;
 
   /* Native app chrome. The tab bar is a fixed height plus the home-indicator
      inset; content reserves exactly this much so nothing hides behind it. */

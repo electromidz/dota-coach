@@ -14,6 +14,7 @@ export type IconName =
   | "chevron-right"
   | "external"
   | "alert"
+  | "info"
   | "check"
   | "trophy"
   | "home"
@@ -75,6 +76,13 @@ const PATHS: Record<IconName, React.ReactNode> = {
       <circle cx="12" cy="12" r="10" />
       <path d="M12 8v4" />
       <path d="M12 16h.01" />
+    </>
+  ),
+  info: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 16v-4" />
+      <path d="M12 8h.01" />
     </>
   ),
   check: (

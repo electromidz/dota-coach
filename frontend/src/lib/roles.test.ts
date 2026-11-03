@@ -23,6 +23,28 @@ describe("formatComponentValue", () => {
     expect(formatComponentValue(component("kda", 3.456))).toBe("3.46");
     expect(formatComponentValue(component("deaths_per_10", 2.14))).toBe("2.1");
   });
+
+  it("renders deaths under the key the backend actually sends", () => {
+    // The backend serializes ScoreComponentKey::Deaths as "deaths". This row
+    // used to render blank because only "deaths_per_10" was handled.
+    expect(formatComponentValue(component("deaths", 1.4))).toBe("1.4");
+  });
+
+  it("never leaves a weight row without a value", () => {
+    const keys: ScoreComponent["key"][] = [
+      "win_rate",
+      "kill_participation",
+      "kda",
+      "deaths",
+    ];
+    for (const key of keys) {
+      expect(formatComponentValue(component(key, 0.5))).not.toBe("");
+    }
+    const unknown = component("kda", 2);
+    expect(
+      formatComponentValue({ ...unknown, key: "new_measure" as ScoreComponent["key"] }),
+    ).toBe("2.0");
+  });
 });
 
 describe("formatWeight", () => {

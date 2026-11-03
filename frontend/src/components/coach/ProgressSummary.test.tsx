@@ -80,18 +80,19 @@ function progress(overrides: Partial<ProgressResponse> = {}): ProgressResponse {
 afterEach(() => getCoachingProgress.mockReset());
 
 describe("ProgressSummary", () => {
-  it("leads with the backend's headline and shows the score then and now", async () => {
+  it("shows the score then and now, and each change as before -> after", async () => {
     getCoachingProgress.mockResolvedValue(progress());
 
     render(<ProgressSummary />);
 
-    expect(
-      await screen.findByText("Deaths per 10 minutes improved by 19%."),
-    ).toBeDefined();
-    // 54 → 61, both rendered, neither recomputed here. Each appears twice:
-    // once in the delta and once as an endpoint of the trend chart.
-    expect(screen.getAllByText("54").length).toBeGreaterThan(0);
+    // 54 → 61, both rendered, neither recomputed here.
+    expect((await screen.findAllByText("54")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("61").length).toBeGreaterThan(0);
+    expect(screen.getByText("Deaths per 10 minutes")).toBeTruthy();
+    expect(screen.getByText("7.20")).toBeTruthy();
+    expect(screen.getByText("5.80")).toBeTruthy();
+    // No sentences: the headline is not printed.
+    expect(screen.queryByText("Deaths per 10 minutes improved by 19%.")).toBeNull();
   });
 
   it("renders the verdict in words, never colour alone", async () => {
@@ -99,28 +100,72 @@ describe("ProgressSummary", () => {
 
     render(<ProgressSummary />);
 
-    // The status label comes from the backend and is shown verbatim, so a
-    // reader who cannot distinguish the dot colours still gets the answer.
-    expect(await screen.findByText("Improved")).toBeDefined();
+    // Fewer deaths is an improvement: the word is there for screen readers,
+    // whatever the arrow points at.
+    expect((await screen.findAllByText(/Improved/)).length).toBeGreaterThan(0);
   });
 
   it("says there is nothing to compare rather than implying no change", async () => {
     getCoachingProgress.mockResolvedValue(
-      progress({
-        comparison: null,
-        sessions: 1,
-        note: "This is your first coaching session, so there is nothing to compare it with yet.",
-        series: [],
-      }),
+      progress({ comparison: null, sessions: 1, note: null, series: [] }),
     );
 
     render(<ProgressSummary />);
 
-    expect(
-      await screen.findByText(/first coaching session/),
-    ).toBeDefined();
-    // "Stable" would be a different and wrong answer here.
-    expect(screen.queryByText("Improved")).toBeNull();
+    expect(await screen.findByText(/nothing to compare yet/)).toBeDefined();
+    expect(screen.queryByText(/Improved|unchanged/)).toBeNull();
+  });
+
+  it("reads from the analysis snapshot when given one, with one match count", async () => {
+    getCoachingProgress.mockResolvedValue(progress());
+    const snapshot = [
+      { id: "progress.session", kind: "progress" as const, label: "Since your last session", statement: "", sample: 0, confidence: "insufficient" as const },
+      {
+        id: "progress.performance",
+        kind: "progress" as const,
+        label: "Performance since your last session",
+        statement: "",
+        sample: 8,
+        confidence: "low" as const,
+        figure: { metric: null, hero_id: null, value: 58.4, higher_is_better: true, unit: "score" as const, median: null, top_20: null, percentile: null, previous: 56, percent_change: null, status: "improved" as const },
+      },
+      {
+        id: "progress.overall.xp_per_min",
+        kind: "progress" as const,
+        label: "XP per minute since your last session",
+        statement: "",
+        sample: 8,
+        confidence: "low" as const,
+        figure: { metric: null, hero_id: null, value: 702, higher_is_better: true, unit: "per_minute" as const, median: null, top_20: null, percentile: null, previous: 636, percent_change: 0.104, status: "improved" as const },
+      },
+      {
+        id: "progress.benchmark.assists_per_min",
+        kind: "progress" as const,
+        label: "Assists per minute since your last session",
+        statement: "",
+        sample: 8,
+        confidence: "low" as const,
+        figure: { metric: null, hero_id: null, value: 59, higher_is_better: true, unit: "percentile" as const, median: null, top_20: null, percentile: null, previous: 48, percent_change: null, status: "improved" as const },
+      },
+    ];
+
+    render(<ProgressSummary snapshot={snapshot} />);
+
+    // The snapshot wins over the live comparison (54 → 61).
+    expect(await screen.findByText("XP per minute")).toBeTruthy();
+    expect(screen.getByText("636")).toBeTruthy();
+    expect(screen.getByText("702")).toBeTruthy();
+    expect(screen.getByText(/\+10%/)).toBeTruthy();
+    // 56.0 → 58.4 reads as improved, not unchanged.
+    expect(screen.getByText(/▲ \+2/)).toBeTruthy();
+    // A percentile moving 48th -> 59th is eleven points, not "+11th".
+    expect(screen.getByText(/\+11 pts/)).toBeTruthy();
+    expect(screen.queryByText(/11th/)).toBeNull();
+    // Role-wide rows say so, apart from the per-hero peer comparison.
+    expect(screen.getByText("All Carry games")).toBeTruthy();
+    // One count for the section, never 0 beside 8.
+    expect(screen.getByText("8 matches")).toBeTruthy();
+    expect(screen.queryByText(/^0 matches/)).toBeNull();
   });
 
   it("renders nothing at all before a first session exists", async () => {

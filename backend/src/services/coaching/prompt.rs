@@ -25,7 +25,7 @@ use utoipa::ToSchema;
 /// 5: single-match analysis asks for the three-part form (what happened, why it
 /// matters, what to do instead), a severity, and a timestamp — and is told that
 /// timestamps are verified against the evidence as strings.
-pub const PROMPT_VERSION: u32 = 5;
+pub const PROMPT_VERSION: u32 = 7;
 
 /// The instructions.
 ///
@@ -81,7 +81,19 @@ got worse\" are different claims, and only the second needs a progress id.
 player has nothing to be compared against yet — say so if it is relevant, and \
 make no claim about change in either direction. An insight of kind \
 \"improvement\" that cites no \"progress.\" id is discarded.
-10. Reply with one JSON object and nothing else, with exactly three keys: \
+10. Evidence ids beginning \"tension.\" mark a hero where the hero pool or \
+fit score warns against it while the player's own figures on it are good. If \
+you mention that hero, address both sides of the tension explicitly and cite \
+the \"tension.\" id. Never praise or dismiss that hero while ignoring the \
+other reading.
+11. Evidence ids beginning \"kit.\" list a hero's abilities and the items \
+players most often build on it, and the role it is played in. Make every \
+insight and plan step specific to that hero and role: name the ability, item \
+or role duty involved and cite the \"kit.\" id. Generic advice that would \
+apply to any hero (\"farm better\", \"die less\", \"use your spells\") is not \
+acceptable when a kit is given. Only name abilities and items that appear in \
+a \"kit.\" item.
+12. Reply with one JSON object and nothing else, with exactly three keys: \
 \"summary\" (a string), \"insights\" (an array) and \"plan\" (an array). Every \
 insight has a \"kind\" from [{kinds}], a \"title\", and an \"evidence\" array; \
 the rest of its fields depend on what you are being asked, below."
@@ -347,6 +359,7 @@ mod tests {
             statement: "Across 20 stored matches, you have won 11 and lost 9 (55%).".into(),
             sample: 20,
             confidence: Confidence::Adequate,
+            figure: None,
         }]
     }
 
@@ -384,6 +397,14 @@ mod tests {
         // should be ignored is in the list.
         assert!(system.contains("already restricted"));
         assert!(system.contains("All Pick"));
+    }
+
+    #[test]
+    fn the_system_prompt_demands_hero_and_role_specific_advice() {
+        let prompt = system(AnalysisScope::Role, 4, 3);
+        assert!(prompt.contains("\"kit.\""));
+        assert!(prompt.contains("specific to that hero and role"));
+        assert!(prompt.contains("\"tension.\""));
     }
 
     #[test]

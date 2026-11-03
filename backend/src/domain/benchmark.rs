@@ -346,6 +346,12 @@ pub struct TargetMetric {
     /// True when the player already meets or beats that median. Direction is
     /// honoured, so clearing a deaths-per-minute median means being *under* it.
     pub cleared: bool,
+    /// Where this bracket's median sits in the player's *own* bracket, 0-100
+    /// and direction-corrected like every other percentile. Puts the target on
+    /// the same scale as `BenchmarkResult::percentile`, so a chart can draw both
+    /// on one axis without the client estimating anything. A peer statistic, so
+    /// no player sample floor applies; `None` when either side lacks the data.
+    pub median_percentile: Option<f32>,
 }
 
 /// The bracket a player is aiming at, beside the one they are in.

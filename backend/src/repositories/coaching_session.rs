@@ -7,6 +7,7 @@
 //! The single exception is [`attach_analysis`], which fills in the model's
 //! reading after the fact. The trigger checks that it changes nothing else.
 
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -89,6 +90,56 @@ pub async fn latest(
     )
     .bind(dota_player_id)
     .bind(role.slug())
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(Row::into_domain))
+}
+
+/// The session an analysis was attached to, if any.
+pub async fn find_by_analysis(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    analysis_id: Uuid,
+) -> Result<Option<CoachingSession>, sqlx::Error> {
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT id, role, sequence, analyzed_match_count, analyzed_match_ids,
+                newest_match_at, performance, metrics, strengths, weaknesses,
+                benchmark_snapshot, hero_snapshot, training_focus_id, analysis_id,
+                created_at
+           FROM coaching_sessions
+          WHERE dota_player_id = $1 AND analysis_id = $2
+          ORDER BY sequence DESC
+          LIMIT 1",
+    )
+    .bind(dota_player_id)
+    .bind(analysis_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(Row::into_domain))
+}
+
+/// The newest session for a role written at or before a moment.
+pub async fn latest_before(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    role: CoachableRole,
+    at: DateTime<Utc>,
+) -> Result<Option<CoachingSession>, sqlx::Error> {
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT id, role, sequence, analyzed_match_count, analyzed_match_ids,
+                newest_match_at, performance, metrics, strengths, weaknesses,
+                benchmark_snapshot, hero_snapshot, training_focus_id, analysis_id,
+                created_at
+           FROM coaching_sessions
+          WHERE dota_player_id = $1 AND role = $2 AND created_at <= $3
+          ORDER BY sequence DESC
+          LIMIT 1",
+    )
+    .bind(dota_player_id)
+    .bind(role.slug())
+    .bind(at)
     .fetch_optional(pool)
     .await?;
 

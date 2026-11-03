@@ -9,8 +9,8 @@
 //! passes in, so the exact text a model will be shown is testable.
 
 use crate::domain::benchmark::{BenchmarkResult, Confidence};
-use crate::domain::coaching::{Evidence, EvidenceKind};
-use crate::domain::hero::{HeroFit, HeroPoolEntry};
+use crate::domain::coaching::{Evidence, EvidenceFigure, EvidenceKind};
+use crate::domain::hero::{HeroFit, HeroKit, HeroPoolEntry};
 use crate::domain::metrics::{MatchMetrics, PlayerStats};
 use crate::domain::player_model::{PatternStatus, RecurringPattern};
 use crate::domain::progress::{MetricProgress, ProgressStatus, SessionProgress};
@@ -19,6 +19,7 @@ use crate::domain::role::CoachableRole;
 use crate::domain::scope::SampleConfidence;
 use crate::domain::training::TrainingFocus;
 use crate::services::benchmarks::percentile;
+use crate::services::format::ordinal;
 
 /// How many heroes and recommendations reach the prompt.
 ///
@@ -64,6 +65,10 @@ pub struct EvidenceInputs<'a> {
     pub benchmarks: &'a [BenchmarkResult],
     /// The hero those results describe.
     pub benchmark_hero: Option<&'a str>,
+    /// Its id, carried on the benchmark figures so a chart can find the hero.
+    pub benchmark_hero_id: Option<i32>,
+    /// Abilities and usual items for the heroes the advice is about.
+    pub kits: &'a [HeroKit],
     pub pool: &'a [HeroPoolEntry],
     pub recommendations: &'a [HeroFit],
     /// Recurring patterns, as detected across the whole history.
@@ -105,8 +110,21 @@ pub fn build(inputs: &EvidenceInputs<'_>) -> Vec<Evidence> {
     scope(inputs.scope, &mut evidence);
     overall(inputs.stats, &mut evidence);
     form(inputs.recent, &mut evidence);
-    benchmarks(inputs.benchmarks, inputs.benchmark_hero, &mut evidence);
+    benchmarks(
+        inputs.benchmarks,
+        inputs.benchmark_hero,
+        inputs.benchmark_hero_id,
+        &mut evidence,
+    );
+    hero_kits(inputs.kits, inputs.scope.role, &mut evidence);
     heroes(inputs.pool, inputs.recommendations, &mut evidence);
+    hero_tensions(
+        inputs.pool,
+        inputs.recommendations,
+        inputs.benchmarks,
+        inputs.benchmark_hero,
+        &mut evidence,
+    );
     recurring(inputs.patterns, &mut evidence);
     // After the patterns it refers to, before the focus that acts on it.
     progress(inputs.progress, inputs.has_session, &mut evidence);
@@ -156,6 +174,7 @@ fn scope(scope: EvidenceScope, out: &mut Vec<Evidence>) {
             SampleConfidence::Moderate => Confidence::Low,
             SampleConfidence::Strong => Confidence::Adequate,
         },
+        figure: None,
     });
 }
 
@@ -274,7 +293,12 @@ fn form(recent: &[Match], out: &mut Vec<Evidence>) {
     }
 }
 
-fn benchmarks(results: &[BenchmarkResult], hero: Option<&str>, out: &mut Vec<Evidence>) {
+fn benchmarks(
+    results: &[BenchmarkResult],
+    hero: Option<&str>,
+    hero_id: Option<i32>,
+    out: &mut Vec<Evidence>,
+) {
     let Some(hero) = hero else {
         return;
     };
@@ -282,9 +306,10 @@ fn benchmarks(results: &[BenchmarkResult], hero: Option<&str>, out: &mut Vec<Evi
     for result in results {
         let statement = match (result.percentile, result.peer_median, result.top_20_value) {
             (Some(p), Some(median), Some(top)) => format!(
-                "On {hero}, your {} averages {:.1}; the peer median is {median:.1} and the top 20% start at {top:.1}. That places you at the {p:.0}th percentile.",
+                "On {hero}, your {} averages {:.1}; the peer median is {median:.1} and the top 20% start at {top:.1}. That places you at the {} percentile.",
                 result.label.to_lowercase(),
                 result.player_value,
+                ordinal(p),
             ),
             // Withheld percentiles keep the player's own value and say why —
             // the same honesty rule the benchmark endpoint enforces.
@@ -311,6 +336,19 @@ fn benchmarks(results: &[BenchmarkResult], hero: Option<&str>, out: &mut Vec<Evi
             statement,
             sample: result.player_sample,
             confidence: result.confidence,
+            figure: Some(EvidenceFigure {
+                metric: Some(result.metric.slug().to_string()),
+                hero_id,
+                value: result.player_value,
+                higher_is_better: result.higher_is_better,
+                unit: None,
+                median: result.peer_median,
+                top_20: result.top_20_value,
+                percentile: result.percentile,
+                previous: None,
+                percent_change: None,
+                status: None,
+            }),
         });
     }
 }
@@ -365,6 +403,122 @@ fn heroes(pool: &[HeroPoolEntry], recommendations: &[HeroFit], out: &mut Vec<Evi
                 plural(fit.matches, "match", "matches"),
             ),
             fit.matches,
+        );
+    }
+}
+
+/// A hero's kit as evidence: what it casts and what is usually built on it.
+///
+/// No numbers, so it can never trip the figure check; it exists so advice can
+/// name a real ability or item instead of a generic tip.
+fn hero_kits(kits: &[HeroKit], role: Option<CoachableRole>, out: &mut Vec<Evidence>) {
+    for kit in kits {
+        if kit.abilities.is_empty() && kit.core_items.is_empty() {
+            continue;
+        }
+        let mut parts = Vec::new();
+        if let Some(role) = role {
+            parts.push(format!("Played here as {}.", role.label()));
+        }
+        if !kit.roles.is_empty() {
+            parts.push(format!("Hero tags: {}.", kit.roles.join(", ")));
+        }
+        if !kit.abilities.is_empty() {
+            parts.push(format!("Abilities: {}.", kit.abilities.join(", ")));
+        }
+        if !kit.core_items.is_empty() {
+            parts.push(format!(
+                "Most-bought core items on this hero: {}.",
+                kit.core_items.join(", ")
+            ));
+        }
+        push(
+            out,
+            &format!("kit.{}", kit.hero_id),
+            EvidenceKind::Hero,
+            &format!("{} kit", kit.hero_name),
+            format!("{}: {}", kit.hero_name, parts.join(" ")),
+            0,
+        );
+    }
+}
+
+/// A percentile at or above this on a hero counts as doing well on it.
+const TENSION_STRONG_PERCENTILE: f32 = 60.0;
+
+/// Where the hero pool and the measured figures disagree about a hero.
+///
+/// The pool can mark a hero "risk" (results below the player's own baseline)
+/// or the fit score can say "avoid for now", while the same hero carries a
+/// winning record or strong peer percentiles. Both are measured and both are
+/// true; dropping either would let the coach praise a hero the rest of the
+/// page warns about, or the reverse. This states the disagreement so the model
+/// has to address it rather than pick a side silently.
+fn hero_tensions(
+    pool: &[HeroPoolEntry],
+    recommendations: &[HeroFit],
+    benchmarks: &[BenchmarkResult],
+    benchmark_hero: Option<&str>,
+    out: &mut Vec<Evidence>,
+) {
+    use crate::domain::hero::{HeroTier, RecommendationLevel};
+
+    let mut seen: Vec<i32> = Vec::new();
+    for entry in pool.iter().take(MAX_POOL_EVIDENCE) {
+        let fit = recommendations.iter().find(|f| f.hero_id == entry.hero_id);
+        let warning = if entry.tier == HeroTier::Risk {
+            Some(format!("classified {} in your pool", entry.tier_label.to_lowercase()))
+        } else if fit.is_some_and(|f| f.level == RecommendationLevel::AvoidForNow) {
+            fit.map(|f| format!("rated \"{}\" for fit", f.level_label.to_lowercase()))
+        } else {
+            None
+        };
+        let Some(warning) = warning else { continue };
+
+        // The strongest peer reading on this hero, when it is the benchmarked one.
+        let best = (benchmark_hero == Some(entry.hero_name.as_str()))
+            .then(|| {
+                benchmarks
+                    .iter()
+                    .filter_map(|r| r.percentile.map(|p| (r, p)))
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+            })
+            .flatten()
+            .filter(|(_, p)| *p >= TENSION_STRONG_PERCENTILE);
+        let winning = entry.win_rate > 0.5;
+
+        let praise = match best {
+            Some((result, p)) => format!(
+                "your {} on {} sits at the {} percentile",
+                result.label.to_lowercase(),
+                entry.hero_name,
+                ordinal(p),
+            ),
+            None if winning => format!(
+                "you are {}-{} ({}) on it",
+                entry.wins,
+                entry.losses,
+                percent(Some(entry.win_rate)),
+            ),
+            None => continue,
+        };
+
+        if seen.contains(&entry.hero_id) {
+            continue;
+        }
+        seen.push(entry.hero_id);
+
+        push(
+            out,
+            &format!("tension.{}", entry.hero_id),
+            EvidenceKind::Hero,
+            &format!("{} mixed signals", entry.hero_name),
+            format!(
+                "{} is {warning}, yet {praise}. Both readings are measured and they \
+                 disagree; advice about {} has to address both.",
+                entry.hero_name, entry.hero_name,
+            ),
+            entry.matches,
         );
     }
 }
@@ -654,12 +808,12 @@ fn progress(progress: Option<&SessionProgress>, has_session: bool, out: &mut Vec
              everything below compares the two.",
             progress.current_sequence, progress.role_label, progress.previous_sequence,
         ),
-        0,
+        progress.matches,
     );
 
     if let Some(performance) = &progress.performance {
         if let (Some(previous), Some(current)) = (performance.previous, performance.current) {
-            push(
+            push_figure(
                 out,
                 "progress.performance",
                 EvidenceKind::Progress,
@@ -671,7 +825,8 @@ fn progress(progress: Option<&SessionProgress>, has_session: bool, out: &mut Vec
                     movement_word(performance.status),
                     round(previous),
                 ),
-                performance.current_sample.unwrap_or(0),
+                progress.matches,
+                Some(progress_figure(performance, current, previous)),
             );
         }
     }
@@ -701,7 +856,7 @@ fn progress(progress: Option<&SessionProgress>, has_session: bool, out: &mut Vec
             continue;
         };
 
-        push(
+        push_figure(
             out,
             &format!("progress.{}", metric.key),
             EvidenceKind::Progress,
@@ -713,7 +868,8 @@ fn progress(progress: Option<&SessionProgress>, has_session: bool, out: &mut Vec
                 round(current),
                 round(previous),
             ),
-            metric.current_sample.unwrap_or(0),
+            progress.matches,
+            Some(progress_figure(metric, current, previous)),
         );
     }
 
@@ -732,7 +888,7 @@ fn progress(progress: Option<&SessionProgress>, has_session: bool, out: &mut Vec
                 "{} was flagged at your previous coaching session and is no longer detected.",
                 metric.label,
             ),
-            metric.previous_sample.unwrap_or(0),
+            progress.matches,
         );
     }
 
@@ -751,8 +907,25 @@ fn progress(progress: Option<&SessionProgress>, has_session: bool, out: &mut Vec
                 "{} was not detected at your previous coaching session and is now.",
                 metric.label,
             ),
-            metric.current_sample.unwrap_or(0),
+            progress.matches,
         );
+    }
+}
+
+/// The two readings behind a progress statement, for a before -> after row.
+fn progress_figure(metric: &MetricProgress, current: f32, previous: f32) -> EvidenceFigure {
+    EvidenceFigure {
+        metric: None,
+        hero_id: None,
+        value: current,
+        higher_is_better: metric.higher_is_better,
+        unit: Some(metric.unit),
+        median: None,
+        top_20: None,
+        percentile: None,
+        previous: Some(previous),
+        percent_change: metric.percent_change,
+        status: Some(metric.status),
     }
 }
 
@@ -796,6 +969,19 @@ fn push(
     statement: String,
     sample: i64,
 ) {
+    push_figure(out, id, kind, label, statement, sample, None);
+}
+
+/// The same, carrying the numbers the statement was written from.
+fn push_figure(
+    out: &mut Vec<Evidence>,
+    id: &str,
+    kind: EvidenceKind,
+    label: &str,
+    statement: String,
+    sample: i64,
+    figure: Option<EvidenceFigure>,
+) {
     out.push(Evidence {
         id: id.to_string(),
         kind,
@@ -806,6 +992,7 @@ fn push(
         // whether it is accurate. One match is exact and generalizes to
         // nothing, which is exactly what `Insufficient` should mean here.
         confidence: percentile::confidence_for(sample),
+        figure,
     });
 }
 
@@ -991,6 +1178,8 @@ mod tests {
             recent,
             benchmarks,
             benchmark_hero: Some("Luna"),
+            benchmark_hero_id: Some(35),
+            kits: &[],
             pool,
             recommendations,
             patterns: &[],
@@ -1000,6 +1189,107 @@ mod tests {
             focus_match: None,
             focus_metrics: None,
         }
+    }
+
+    fn find<'a>(items: &'a [Evidence], id: &str) -> &'a str {
+        items
+            .iter()
+            .find(|e| e.id == id)
+            .unwrap_or_else(|| panic!("{id} missing"))
+            .statement
+            .as_str()
+    }
+
+    #[test]
+    fn a_kit_names_abilities_items_and_role_without_numbers() {
+        let stats = stats();
+        let kit = HeroKit {
+            hero_id: 87,
+            hero_name: "Disruptor".into(),
+            roles: vec!["Support".into(), "Disabler".into()],
+            abilities: vec!["Thunder Strike".into(), "Static Storm".into()],
+            core_items: vec!["Force Staff".into(), "Glimmer Cape".into()],
+        };
+        let mut i = inputs(&stats, &[], &[], &[], &[]);
+        let kits = [kit];
+        i.kits = &kits;
+        let evidence = build(&i);
+
+        let s = find(&evidence, "kit.87");
+        assert!(s.contains("Static Storm"), "{s}");
+        assert!(s.contains("Force Staff"), "{s}");
+        assert!(s.contains("Carry"), "{s}");
+        assert!(!s.chars().any(|c| c.is_ascii_digit()), "no figures in a kit: {s}");
+    }
+
+    #[test]
+    fn benchmark_evidence_carries_the_figures_its_sentence_states() {
+        let stats = stats();
+        let benchmarks = [benchmark(Some(46.0))];
+        let evidence = build(&inputs(&stats, &[], &benchmarks, &[], &[]));
+        let item = evidence.iter().find(|e| e.id == "benchmark.gold_per_min").unwrap();
+        let f = item.figure.as_ref().expect("figure");
+        assert_eq!(f.value, 512.0);
+        assert_eq!(f.median, Some(500.0));
+        assert_eq!(f.top_20, Some(684.0));
+        assert_eq!(f.percentile, Some(46.0));
+        assert_eq!(f.hero_id, Some(35));
+        assert!(item.statement.contains("46th"));
+    }
+
+    #[test]
+    fn a_risk_hero_with_strong_figures_is_flagged_as_a_tension() {
+        let stats = stats();
+        let benchmarks = [benchmark(Some(66.0))];
+        let pool = [HeroPoolEntry {
+            tier: HeroTier::Risk,
+            tier_label: "Risk",
+            ..pool_entry()
+        }];
+        let evidence = build(&inputs(&stats, &[], &benchmarks, &pool, &[]));
+
+        let s = find(&evidence, "tension.35");
+        assert!(s.contains("classified risk"), "{s}");
+        assert!(s.contains("66th percentile"), "{s}");
+        // The plain pool record is still there: neither reading is hidden.
+        assert!(find(&evidence, "hero.35").contains("classified risk"));
+    }
+
+    #[test]
+    fn an_avoid_rating_against_a_winning_record_is_a_tension_too() {
+        let stats = stats();
+        let pool = [pool_entry()];
+        let fits = [HeroFit {
+            level: RecommendationLevel::AvoidForNow,
+            level_label: "Avoid for now",
+            ..fit()
+        }];
+        let evidence = build(&inputs(&stats, &[], &[], &pool, &fits));
+
+        let s = find(&evidence, "tension.35");
+        assert!(s.contains("avoid for now"), "{s}");
+        assert!(s.contains("11-9"), "{s}");
+    }
+
+    #[test]
+    fn no_tension_when_the_warning_and_the_figures_agree() {
+        let stats = stats();
+        let benchmarks = [benchmark(Some(30.0))];
+        let pool = [HeroPoolEntry {
+            tier: HeroTier::Risk,
+            tier_label: "Risk",
+            wins: 4,
+            losses: 9,
+            win_rate: 0.31,
+            ..pool_entry()
+        }];
+        let evidence = build(&inputs(&stats, &[], &benchmarks, &pool, &[]));
+        assert!(evidence.iter().all(|e| !e.id.starts_with("tension.")));
+
+        // And none for a signature hero, however good.
+        let pool = [pool_entry()];
+        let evidence = build(&inputs(&stats, &[], &[benchmark(Some(90.0))], &pool, &[]));
+        assert!(evidence.iter().all(|e| !e.id.starts_with("tension.")));
     }
 
     #[test]
@@ -1279,6 +1569,7 @@ mod progress_tests {
             current_session_id: Uuid::new_v4(),
             current_sequence: 2,
             current_at: chrono::Utc::now(),
+            matches: 8,
             performance: Some(metric(
                 "role.performance",
                 "Role performance",
@@ -1309,6 +1600,25 @@ mod progress_tests {
             })
             .statement
             .as_str()
+    }
+
+    #[test]
+    fn every_progress_row_reports_the_same_match_count() {
+        let items = build_progress(
+            Some(&session_progress(vec![metric(
+                "overall.deaths",
+                "Deaths per 10 minutes",
+                Some(7.2),
+                Some(5.8),
+                ProgressStatus::Improved,
+            )])),
+            true,
+        );
+
+        let counts: Vec<i64> = items.iter().map(|e| e.sample).collect();
+        assert!(counts.len() >= 3, "header, performance and a movement");
+        // The header used to say 0 while the rows said 8.
+        assert!(counts.iter().all(|&n| n == 8), "{counts:?}");
     }
 
     #[test]

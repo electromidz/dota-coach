@@ -13,6 +13,7 @@ import { analyzeMatch, ApiError, getMatchAnalysis } from "@/lib/api";
 import { formatGeneratedAt } from "@/lib/coach";
 import type { CoachResponse, Evidence } from "@/lib/types";
 import { useGeneration } from "@/lib/useGeneration";
+import { fixOrdinals } from "@/lib/utils";
 
 /**
  * The evidence id the backend uses to say a match has no measured timeline.
@@ -129,7 +130,7 @@ function Loaded({ id, data }: { id: string; data: CoachResponse }) {
 
             {analysis.summary ? (
               <Card className="flex flex-col gap-2" glow="keyword">
-                <p className="leading-relaxed text-ink">{analysis.summary}</p>
+                <p className="leading-relaxed text-ink">{fixOrdinals(analysis.summary)}</p>
                 <p className="font-mono text-[0.625rem] text-ink-faint">
                   {formatGeneratedAt(analysis.generated_at)} · {analysis.model}
                 </p>
@@ -232,7 +233,7 @@ function Loaded({ id, data }: { id: string; data: CoachResponse }) {
 function MissingTimeline({ evidence }: { evidence: Evidence }) {
   return (
     <Alert tone="info" title="No second-by-second data for this match">
-      {evidence.statement}
+      {fixOrdinals(evidence.statement)}
     </Alert>
   );
 }

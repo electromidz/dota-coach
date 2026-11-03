@@ -227,6 +227,7 @@ mod tests {
             statement: statement.to_string(),
             sample: 20,
             confidence: Confidence::Adequate,
+            figure: None,
         })
         .collect()
     }

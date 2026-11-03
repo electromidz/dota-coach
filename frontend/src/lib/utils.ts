@@ -3,6 +3,39 @@ export function cn(...values: Array<string | false | null | undefined>): string 
   return values.filter(Boolean).join(" ");
 }
 
+/**
+ * A percentile or rank as an ordinal: `72` -> `"72nd"`, `11` -> `"11th"`.
+ *
+ * Rounds first, so `71.6` reads `"72nd"`. The teens take `th` whatever their
+ * last digit.
+ */
+export function ordinal(value: number): string {
+  const n = Math.max(0, Math.round(value));
+  const lastTwo = n % 100;
+  if (lastTwo >= 11 && lastTwo <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1:
+      return `${n}st`;
+    case 2:
+      return `${n}nd`;
+    case 3:
+      return `${n}rd`;
+    default:
+      return `${n}th`;
+  }
+}
+
+/**
+ * Corrects ordinals inside stored text, e.g. "the 72th percentile" ->
+ * "the 72nd percentile". Analyses written before the backend fix kept the
+ * wrong suffixes in their saved evidence; this keeps them readable.
+ */
+export function fixOrdinals(text: string): string {
+  return text.replace(/\b(\d+)(?:st|nd|rd|th)\b/g, (_, n: string) =>
+    ordinal(Number(n)),
+  );
+}
+
 /** `2400` -> `"40:00"`. */
 export function formatDuration(seconds: number): string {
   const safe = Math.max(0, Math.floor(seconds));

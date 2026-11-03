@@ -1,5 +1,5 @@
 import type { MetricComparison } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, ordinal } from "@/lib/utils";
 
 /**
  * One metric on a fixed 0-100 percentile axis.
@@ -43,7 +43,7 @@ export function PercentileRow({ row }: { row: MetricComparison }) {
                 tone(matchPercentile),
               )}
             >
-              p{Math.round(matchPercentile)}
+              {ordinal(matchPercentile)}
             </span>
           ) : (
             <span className="rounded bg-mark-track px-1.5 py-0.5 text-[0.625rem] text-ink-faint">
@@ -76,7 +76,7 @@ export function PercentileRow({ row }: { row: MetricComparison }) {
         {averagePercentile !== null ? (
           <span
             aria-hidden
-            title={`Your average on this hero: p${Math.round(averagePercentile)}`}
+            title={`Your average on this hero: ${ordinal(averagePercentile)}`}
             className="absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-ink-muted bg-surface-2"
             style={{ left: `${clamp(averagePercentile)}%` }}
           />
@@ -85,7 +85,7 @@ export function PercentileRow({ row }: { row: MetricComparison }) {
         {matchPercentile !== null ? (
           <span
             aria-hidden
-            title={`This match: p${Math.round(matchPercentile)}`}
+            title={`This match: ${ordinal(matchPercentile)}`}
             className={cn(
               "absolute top-1/2 size-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full ring-2 ring-surface-2",
               mark(matchPercentile),

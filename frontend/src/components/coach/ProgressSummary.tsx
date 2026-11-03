@@ -3,12 +3,17 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { DeltaRow } from "@/components/charts/DeltaRow";
 import { formatValue, SeriesChart } from "@/components/charts/SeriesChart";
-import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
-import { Icon } from "@/components/ui/Icon";
+import { SectionError } from "@/components/ui/SectionError";
 import { ApiError, getCoachingProgress } from "@/lib/api";
-import type { MetricProgress, ProgressResponse, ProgressStatus } from "@/lib/types";
+import type {
+  Evidence,
+  MetricUnit,
+  ProgressResponse,
+  ProgressStatus,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -24,9 +29,11 @@ import { cn } from "@/lib/utils";
  * nothing to compare with. "No change" and "nothing to compare" are different
  * answers and are never collapsed into each other.
  */
-export function ProgressSummary() {
+export function ProgressSummary({ snapshot }: { snapshot?: Evidence[] }) {
   const [data, setData] = useState<ProgressResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Bumped by Retry to re-run the fetch below. */
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,28 +53,58 @@ export function ProgressSummary() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [attempt]);
 
-  if (error) return <Alert>{error}</Alert>;
+  if (error) {
+    return (
+      <SectionError
+        section="Progress since last session"
+        message={error}
+        onRetry={() => {
+          setError(null);
+          setAttempt((n) => n + 1);
+        }}
+      />
+    );
+  }
   if (!data) {
     return (
       <div className="h-40 animate-pulse rounded-card bg-surface-2" aria-busy="true" />
     );
   }
 
-  // Nothing recorded yet. Not worth a card — the coach page has plenty to say
-  // before a player has two sessions.
-  if (data.sessions === 0) return null;
+  if (data.sessions === 0 && !snapshot?.some((e) => e.kind === "progress")) return null;
 
   const performance = data.series.find((s) => s.key === "role.performance");
-  const comparison = data.comparison;
-  const movements = (comparison?.metrics ?? []).filter((m) => notable(m.status));
+  const rows = changeRows(snapshot, data);
+  const perf = rows.find((r) => r.key === "role.performance");
+  const moved = rows.filter((r) => r.key !== "role.performance");
+  const flags = issueFlags(snapshot, data);
+  const matches = sectionMatches(snapshot, data);
+
+  if (!perf && moved.length === 0 && flags.length === 0) {
+    // A first session has a trend of one and nothing to compare it with.
+    // Saying so beats both silence and an implied "no change".
+    if (data.sessions >= 1 && !data.comparison) {
+      return (
+        <p className="glass rounded-card px-4 py-3 text-xs text-ink-faint">
+          Since your last session · first session, nothing to compare yet
+        </p>
+      );
+    }
+    if (!performance) return null;
+  }
 
   return (
-    <section className="flex flex-col gap-3">
+    <section className="flex flex-col gap-3" aria-label="Since your last session">
       <div className="flex items-baseline justify-between gap-3">
-        <h2 className="font-display text-sm uppercase tracking-[0.2em] text-ink-faint">
+        <h2 className="flex items-baseline gap-2 font-display text-sm uppercase tracking-[0.2em] text-ink-faint">
           Since your last session
+          {matches !== null ? (
+            <span className="font-mono text-[0.625rem] normal-case tracking-normal text-ink-faint">
+              {matches} {matches === 1 ? "match" : "matches"}
+            </span>
+          ) : null}
         </h2>
         <Link
           href="/coach/history"
@@ -77,45 +114,57 @@ export function ProgressSummary() {
         </Link>
       </div>
 
-      {data.note ? <Alert tone="info">{data.note}</Alert> : null}
-
-      <div className="grid gap-4 lg:grid-cols-2 lg:items-start">
+      <div className="grid gap-3 lg:grid-cols-2 lg:items-start">
         <Card className="flex flex-col gap-4">
-          {comparison?.headline ? (
-            <p className="text-sm leading-relaxed text-ink">
-              {comparison.headline}
-            </p>
-          ) : comparison ? (
-            <p className="text-sm leading-relaxed text-ink-muted">
-              Nothing moved far enough to call a change since session{" "}
-              {comparison.previous_sequence}.
-            </p>
+          {perf ? (
+            <PerformanceDelta row={perf} />
           ) : null}
-
-          {comparison?.performance ? (
-            <PerformanceDelta progress={comparison.performance} />
-          ) : null}
-
-          {performance ? (
-            <div className="flex flex-col gap-1">
-              <p className="text-xs uppercase tracking-wider text-ink-faint">
-                Performance across sessions
-              </p>
-              <SeriesChart series={performance} />
-            </div>
-          ) : null}
+          {performance ? <SeriesChart series={performance} /> : null}
         </Card>
 
-        {movements.length > 0 ? (
-          <Card className="flex flex-col gap-3">
-            <h3 className="text-xs font-semibold uppercase tracking-[0.2em] text-ink-faint">
-              What moved
-            </h3>
-            <ul className="flex flex-col gap-2.5">
-              {movements.slice(0, 6).map((metric) => (
-                <MovementRow key={metric.key} metric={metric} />
-              ))}
-            </ul>
+        {moved.length > 0 || flags.length > 0 ? (
+          <Card className="flex flex-col gap-2">
+            <p className="text-[0.625rem] uppercase tracking-wider text-ink-faint">
+              All {data.role_label ?? "role"} games
+            </p>
+            {moved.length > 0 ? (
+              <ul className="flex flex-col divide-y divide-border/60">
+                {moved.slice(0, 6).map((row) => (
+                  <DeltaRow
+                    key={row.key}
+                    label={row.label}
+                    before={row.before}
+                    after={row.after}
+                    change={row.change}
+                    status={row.status}
+                    format={(v) => formatValue(v, row.unit)}
+                    formatDelta={(v) =>
+                      row.unit === "percentile" || row.unit === "score"
+                        ? `${Math.round(v)} pts`
+                        : formatValue(v, row.unit)
+                    }
+                  />
+                ))}
+              </ul>
+            ) : null}
+            {flags.length > 0 ? (
+              <ul className="flex flex-wrap gap-1.5 pt-1">
+                {flags.map((flag) => (
+                  <li
+                    key={flag.key}
+                    className={cn(
+                      "rounded-full border px-2.5 py-0.5 text-[0.6875rem]",
+                      flag.resolved
+                        ? "border-string/40 bg-string/10 text-string"
+                        : "border-error/40 bg-error/10 text-error",
+                    )}
+                  >
+                    {flag.resolved ? "✓ Resolved: " : "New: "}
+                    {flag.label}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </Card>
         ) : null}
       </div>
@@ -123,70 +172,111 @@ export function ProgressSummary() {
   );
 }
 
-/** The role score, then and now. */
-function PerformanceDelta({ progress }: { progress: MetricProgress }) {
-  const { previous, current, direction_delta: delta } = progress;
-  if (previous === null || current === null) return null;
+interface ChangeRow {
+  key: string;
+  label: string;
+  before: number;
+  after: number;
+  change: number | null;
+  status: ProgressStatus;
+  unit: MetricUnit;
+}
 
+/**
+ * Before -> after rows. From the analysis snapshot when it carries them, so
+ * these match the cards above; otherwise from the live session comparison.
+ */
+export function changeRows(
+  snapshot: Evidence[] | undefined,
+  data: ProgressResponse,
+): ChangeRow[] {
+  const fromSnapshot = (snapshot ?? [])
+    .filter((e) => e.kind === "progress" && e.figure?.previous != null)
+    .map((e) => ({
+      key: e.id.replace(/^progress\./, ""),
+      label: e.label.replace(/ since your last session$/i, ""),
+      before: e.figure!.previous as number,
+      after: e.figure!.value,
+      change: e.figure!.percent_change,
+      status: e.figure!.status ?? "stable",
+      unit: e.figure!.unit ?? "ratio",
+    }));
+  if (fromSnapshot.length > 0) {
+    return fromSnapshot.map((r) =>
+      r.key === "performance" ? { ...r, key: "role.performance", label: "Performance" } : r,
+    );
+  }
+
+  const comparison = data.comparison;
+  if (!comparison) return [];
+  const all = [
+    ...(comparison.performance ? [comparison.performance] : []),
+    ...comparison.metrics.filter((m) => m.key !== "role.performance"),
+  ];
+  return all
+    .filter(
+      (m) =>
+        m.previous !== null &&
+        m.current !== null &&
+        (m.key === "role.performance" || notable(m.status)),
+    )
+    .filter((m) => m.status !== "new_issue" && m.status !== "resolved_issue")
+    .map((m) => ({
+      key: m.key,
+      label: m.key === "role.performance" ? "Performance" : m.label,
+      before: m.previous as number,
+      after: m.current as number,
+      change: m.percent_change,
+      status: m.status,
+      unit: m.unit,
+    }));
+}
+
+function issueFlags(snapshot: Evidence[] | undefined, data: ProgressResponse) {
+  const fromSnapshot = (snapshot ?? []).filter(
+    (e) => e.id.startsWith("progress.resolved.") || e.id.startsWith("progress.new."),
+  );
+  if (snapshot && snapshot.some((e) => e.kind === "progress")) {
+    return fromSnapshot.map((e) => ({
+      key: e.id,
+      label: e.id.split(".").slice(2).join(".").replace(/^pattern\./, "").replace(/_/g, " "),
+      resolved: e.id.startsWith("progress.resolved."),
+    }));
+  }
+  return (data.comparison?.metrics ?? [])
+    .filter((m) => m.status === "new_issue" || m.status === "resolved_issue")
+    .map((m) => ({ key: m.key, label: m.label, resolved: m.status === "resolved_issue" }));
+}
+
+/** One match count for the section. */
+function sectionMatches(snapshot: Evidence[] | undefined, data: ProgressResponse): number | null {
+  const progress = (snapshot ?? []).filter((e) => e.kind === "progress");
+  if (progress.length > 0) return Math.max(...progress.map((e) => e.sample));
+  return data.comparison?.matches ?? null;
+}
+
+/** The role score, then and now. */
+function PerformanceDelta({ row }: { row: ChangeRow }) {
   return (
     <div className="flex items-baseline gap-3">
       <span className="font-mono text-2xl tabular-nums text-ink-faint">
-        {Math.round(previous)}
+        {Math.round(row.before)}
       </span>
-      <Icon name="chevron-right" className="size-4 shrink-0 text-ink-faint" />
-      <span
-        className={cn(
-          "font-display text-3xl tabular-nums",
-          tone(progress.status, "text"),
-        )}
-      >
-        {Math.round(current)}
+      <span aria-hidden className="text-ink-faint">→</span>
+      <span className={cn("font-display text-3xl tabular-nums", tone(row.status, "text"))}>
+        {Math.round(row.after)}
       </span>
-      <span className="text-sm text-ink-muted">
+      <span className="text-xs text-ink-muted">
         performance
-        {delta !== null && progress.status !== "stable" ? (
-          <span className={cn("ml-2 font-mono text-xs", tone(progress.status, "text"))}>
-            {delta > 0 ? "+" : ""}
-            {Math.round(delta)}
-          </span>
-        ) : null}
+        <span className={cn("ml-2 font-mono", tone(row.status, "text"))}>
+          {row.status === "improved" || row.status === "declined"
+            ? `${row.after > row.before ? "▲ +" : "▼ −"}${Math.abs(
+                Math.round(row.after - row.before),
+              )}`
+            : "unchanged"}
+        </span>
       </span>
     </div>
-  );
-}
-
-function MovementRow({ metric }: { metric: MetricProgress }) {
-  return (
-    <li className="flex items-start gap-2.5">
-      <span
-        aria-hidden
-        className={cn(
-          "mt-1.5 size-2 shrink-0 rounded-full",
-          tone(metric.status, "bg"),
-        )}
-      />
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="flex flex-wrap items-baseline justify-between gap-x-2 text-sm text-ink">
-          {metric.label}
-          <span className={cn("text-[0.6875rem]", tone(metric.status, "text"))}>
-            {metric.status_label}
-          </span>
-        </span>
-
-        {metric.previous !== null && metric.current !== null ? (
-          <span className="font-mono text-[0.6875rem] tabular-nums text-ink-faint">
-            {formatValue(metric.previous, metric.unit)} →{" "}
-            {formatValue(metric.current, metric.unit)}
-          </span>
-        ) : null}
-
-        {metric.note ? (
-          <span className="text-[0.6875rem] leading-relaxed text-ink-faint">
-            {metric.note}
-          </span>
-        ) : null}
-      </div>
-    </li>
   );
 }
 

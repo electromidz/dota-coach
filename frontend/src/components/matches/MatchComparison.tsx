@@ -10,7 +10,7 @@ import { Card } from "@/components/ui/Card";
 import { Icon } from "@/components/ui/Icon";
 import { ApiError, getMatchComparison } from "@/lib/api";
 import type { Highlight, MatchComparisonResponse } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, ordinal } from "@/lib/utils";
 
 /**
  * This match against players in the same rank bracket on the same hero.
@@ -309,7 +309,7 @@ function HighlightList({
                 <span className="flex items-baseline gap-2 text-sm text-ink">
                   {item.label}
                   <span className="font-mono text-[0.625rem] tabular-nums text-ink-faint">
-                    p{Math.round(item.percentile)}
+                    {ordinal(item.percentile)}
                   </span>
                 </span>
                 <span className="text-[0.6875rem] leading-relaxed text-ink-faint">

@@ -1,5 +1,5 @@
 import type { MetricSeries, MetricUnit } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, ordinal } from "@/lib/utils";
 
 const W = 320;
 const H = 72;
@@ -153,7 +153,7 @@ function range(unit: MetricUnit, values: number[]): [number, number] {
 
 export function formatValue(value: number, unit: MetricUnit): string {
   if (unit === "proportion") return `${Math.round(value * 100)}%`;
-  if (unit === "percentile") return `p${Math.round(value)}`;
+  if (unit === "percentile") return ordinal(value);
   if (unit === "score") return `${Math.round(value)}`;
   if (Math.abs(value) >= 100) return Math.round(value).toLocaleString();
   if (Math.abs(value) >= 10) return value.toFixed(1);

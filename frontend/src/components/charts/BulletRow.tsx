@@ -1,5 +1,5 @@
 import type { BenchmarkResult, TargetMetric } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, ordinal } from "@/lib/utils";
 
 /**
  * One metric against its peer distribution — a bullet chart.
@@ -77,7 +77,7 @@ export function BulletRow({
                   : "bg-mark-track text-ink-muted",
               )}
             >
-              p{Math.round(percentile)}
+              {ordinal(percentile)}
             </span>
           ) : (
             <span className="rounded bg-mark-track px-1.5 py-0.5 text-[0.625rem] text-ink-faint">

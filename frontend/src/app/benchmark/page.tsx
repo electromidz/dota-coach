@@ -8,7 +8,6 @@ export default function BenchmarkPage() {
     <AppShell
       title="Benchmark"
       eyebrow="Comparison"
-      description="How your numbers sit against other players on the same hero."
     >
       <Benchmark />
     </AppShell>

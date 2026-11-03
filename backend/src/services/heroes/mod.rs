@@ -246,7 +246,10 @@ pub fn score(input: &FitInput<'_>, weights: FitWeights) -> HeroFit {
                 FitComponent::Benchmark,
                 value,
                 weights,
-                format!("Around the {value:.0}th percentile of players on this hero."),
+                format!(
+                    "Around the {} percentile of players on this hero.",
+                    crate::services::format::ordinal(value)
+                ),
             ));
         }
         None if matches > 0 => caveats.push(

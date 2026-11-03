@@ -5,6 +5,25 @@ use crate::domain::role::RoleScoreWeights;
 use crate::domain::training::FocusWeights;
 use crate::services::hero_meta::strength::MetaWeights;
 
+/// Database pool settings.
+#[derive(Debug, Clone)]
+pub struct DbConfig {
+    pub max_connections: u32,
+    /// Kept open so a burst of requests does not pay a TLS handshake each.
+    pub min_connections: u32,
+    pub acquire_timeout_seconds: u64,
+}
+
+impl Default for DbConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 10,
+            min_connections: 2,
+            acquire_timeout_seconds: 15,
+        }
+    }
+}
+
 /// Application configuration, sourced exclusively from environment variables.
 ///
 /// Secrets (`llm_api_key`, database credentials) live here and are never
@@ -15,6 +34,8 @@ use crate::services::hero_meta::strength::MetaWeights;
 #[derive(Clone, Debug)]
 pub struct Config {
     pub database_url: String,
+    /// Connection pool sizing. See `db::connect` for why these are tunable.
+    pub db: DbConfig,
     pub host: String,
     pub port: u16,
     /// Comma-separated list of origins allowed to call the API.
@@ -671,6 +692,11 @@ impl Config {
         Ok(Self {
             docs_enabled: docs_enabled(&auth)?,
             database_url: required("DATABASE_URL")?,
+            db: DbConfig {
+                max_connections: parsed("DB_MAX_CONNECTIONS", 10)?.clamp(1, 100),
+                min_connections: parsed("DB_MIN_CONNECTIONS", 2)?,
+                acquire_timeout_seconds: parsed("DB_ACQUIRE_TIMEOUT_SECONDS", 15)?.max(1),
+            },
             host: optional("HOST", "0.0.0.0"),
             port: optional("PORT", "8080")
                 .parse()
@@ -893,6 +919,7 @@ mod tests {
         let config = Config {
             docs_enabled: true,
             database_url: "postgres://localhost/test".into(),
+            db: DbConfig::default(),
             host: "127.0.0.1".into(),
             port: 9000,
             cors_origins: vec![],

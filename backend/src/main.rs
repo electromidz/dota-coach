@@ -10,6 +10,8 @@ use dota_coach_backend::services::auth::steam_openid::{self, SteamOpenId};
 use dota_coach_backend::services::benchmarks::opendota::OpenDotaBenchmarkProvider;
 use dota_coach_backend::services::billing;
 use dota_coach_backend::services::dota::opendota::OpenDotaProvider;
+use dota_coach_backend::services::hero_kit::opendota::OpenDotaHeroKitProvider;
+use dota_coach_backend::services::hero_kit::HeroKitProvider;
 use dota_coach_backend::services::hero_meta::opendota::OpenDotaHeroMetaProvider;
 use dota_coach_backend::services::llm::openai::OpenAiLlmProvider;
 use dota_coach_backend::services::match_facts::stratz::StratzMatchFactsProvider;
@@ -88,6 +90,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.heroes.meta_weights,
     );
 
+    // Abilities and usual items, for hero-specific coaching. The constants are
+    // large and identical for everyone, so they are fetched once up front
+    // rather than on the first coaching read.
+    let hero_kit = OpenDotaHeroKitProvider::new(
+        reqwest::Client::new(),
+        &config.dota.base_url,
+        config.dota.api_key.clone(),
+    );
+    {
+        let warm = hero_kit.clone();
+        tokio::spawn(async move {
+            if let Err(e) = warm.get_kit(1).await {
+                tracing::warn!(error = %e, "hero kit warm-up failed; coaching will omit hero kits until it recovers");
+            }
+        });
+    }
+    let hero_kit: Arc<dyn HeroKitProvider> = hero_kit;
+
     // Single-match analysis is the only caller. Optional in the same way billing
     // is: without a token the product runs in full and one section of one page
     // is shallower, which is a better failure than a match page that cannot
@@ -155,6 +175,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             steam_verifier: steam,
             benchmarks,
             hero_meta,
+            hero_kit,
             match_facts,
             llm,
             payments,

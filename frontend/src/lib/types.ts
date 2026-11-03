@@ -169,7 +169,7 @@ export interface EligibilitySummary {
 
 /** One measure's contribution to a role score, so the number can be explained. */
 export interface ScoreComponent {
-  key: "win_rate" | "kill_participation" | "kda" | "deaths_per_10";
+  key: "win_rate" | "kill_participation" | "kda" | "deaths" | "deaths_per_10";
   label: string;
   value: number;
   normalized: number;
@@ -493,6 +493,12 @@ export interface TargetMetric {
   gap_to_median: number | null;
   /** Already meets or beats that median, direction honoured. */
   cleared: boolean;
+  /**
+   * Where this bracket's median sits in the player's *own* bracket, 0-100 and
+   * direction-corrected. Puts the target on the same scale as
+   * `BenchmarkResult.percentile`. Optional: older responses lack it.
+   */
+  median_percentile?: number | null;
 }
 
 /**
@@ -752,6 +758,8 @@ export interface SessionProgress {
   current_session_id: string;
   current_sequence: number;
   current_at: string;
+  /** Matches behind the current session; the one count for the section. */
+  matches?: number;
   performance: MetricProgress | null;
   metrics: MetricProgress[];
   headline: string | null;
@@ -953,7 +961,7 @@ export type InsightKind =
   | "warning"
   | "improvement";
 
-export type AnalysisScope = "player" | "match";
+export type AnalysisScope = "player" | "match" | "role";
 
 /**
  * One measured fact. `statement` is composed by the backend from its own
@@ -967,6 +975,54 @@ export interface Evidence {
   sample: number;
   /** How far the figure generalizes, not whether it is accurate. */
   confidence: Confidence;
+  /** The numbers the statement was written from. Absent on older analyses
+   *  and on evidence that is not one measured figure. */
+  figure?: EvidenceFigure;
+}
+
+export interface EvidenceFigure {
+  /** Benchmark metric slug, e.g. `tower_damage`. */
+  metric: string | null;
+  hero_id: number | null;
+  value: number;
+  higher_is_better: boolean;
+  unit: MetricUnit | null;
+  median: number | null;
+  top_20: number | null;
+  /** Direction-corrected 0-100. */
+  percentile: number | null;
+  /** Earlier reading, for a change since the last session. */
+  previous: number | null;
+  percent_change: number | null;
+  status: ProgressStatus | null;
+}
+
+/** A plan step made checkable. */
+export interface PlanGoal {
+  position: number;
+  evidence_id: string;
+  metric: string;
+  label: string;
+  hero_id: number | null;
+  higher_is_better: boolean;
+  baseline: number;
+  target: number;
+  target_label: string;
+}
+
+export interface GoalView extends PlanGoal {
+  current: number;
+  /** 0-1 share of the target, direction honoured. */
+  progress: number;
+  /** Recent games on the hero that met the target, oldest first. */
+  recent: boolean[];
+}
+
+export type GoalOutcome = "hit" | "in_progress" | "missed";
+
+export interface GoalResult extends PlanGoal {
+  current: number | null;
+  outcome: GoalOutcome;
 }
 
 /**
@@ -1052,6 +1108,14 @@ export interface CoachResponse {
   /** Deterministic, and present whether or not a model has ever run. */
   patterns: RecurringPattern[];
   note: string | null;
+  /** Eligible matches since the stored analysis. Null when unknown. */
+  new_matches_since_analysis?: number | null;
+  /** This read started a background refresh of the analysis. */
+  refreshing?: boolean;
+  /** The plan's goals, with progress and recent games. */
+  goals?: GoalView[];
+  /** The previous analysis's goals, scored against this one. */
+  previous_goals?: GoalResult[];
 }
 
 /* --- Player model --------------------------------------------------------- */

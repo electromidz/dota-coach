@@ -19,9 +19,13 @@
 //!
 //! | Unit | Band | Why |
 //! |---|---|---|
-//! | Percentile, Score | **5 points** | Bounded 0-100. A relative change near either end is nonsense: the 2nd to the 4th percentile is a doubling and two points. |
-//! | Proportion | **0.05** (5 points) | Bounded 0-1. Same argument, different scale — a win rate moving .50 → .55 is five points. |
-//! | Ratio, PerMinute, Per10, Count | **5%** | Unbounded. "Ten percent more gold per minute" is what a player means; five percent of 512 GPM is about 26, which is inside the noise of twenty games. |
+//! | Percentile, Score | **2 points** | Bounded 0-100. A relative change near either end is nonsense: the 2nd to the 4th percentile is a doubling and two points. |
+//! | Proportion | **0.02** (2 points) | Bounded 0-1. Same argument, different scale — a win rate moving .50 → .52 is two points. |
+//! | Ratio, PerMinute, Per10, Count | **2%** | Unbounded. "Ten percent more gold per minute" is what a player means. |
+//!
+//! The band was 5 and is now 2 by product decision: at 5, a score moving
+//! 56.0 → 58.4 read as "unchanged", which players saw as plainly wrong. Anything
+//! under 2 is still called unchanged.
 //!
 //! Both are deliberately the same number so there is one thing to remember and
 //! one thing to change.
@@ -36,14 +40,14 @@ use crate::domain::progress::{
 /// Movement smaller than this is called stable, on the bounded scales.
 ///
 /// Points, on a 0-100 axis. See the module docs.
-pub const STABLE_BAND_POINTS: f32 = 5.0;
+pub const STABLE_BAND_POINTS: f32 = 2.0;
 
 /// The same band on a 0-1 proportion.
-pub const STABLE_BAND_PROPORTION: f32 = 0.05;
+pub const STABLE_BAND_PROPORTION: f32 = 0.02;
 
 /// Movement smaller than this fraction is called stable, on the unbounded
 /// scales.
-pub const STABLE_BAND_RATIO: f32 = 0.05;
+pub const STABLE_BAND_RATIO: f32 = 0.02;
 
 /// Below this many matches behind a reading, no comparison is claimed.
 ///
@@ -107,6 +111,7 @@ pub fn compare(previous: &CoachingSession, current: &CoachingSession) -> Session
         current_session_id: current.id,
         current_sequence: current.sequence,
         current_at: current.created_at,
+        matches: i64::from(current.analyzed_match_count),
         headline: headline(&metrics),
         performance,
         metrics,
@@ -508,8 +513,8 @@ mod tests {
 
     #[test]
     fn a_bounded_scale_moves_in_points_not_percentages() {
-        // 2nd to 4th percentile: a doubling, and two points. Relative change
-        // would call this a spectacular improvement.
+        // 2nd to 3.5th percentile: a 75% relative jump, and a point and a
+        // half. Relative change would call this a spectacular improvement.
         let before = session(
             1,
             vec![metric(
@@ -524,7 +529,7 @@ mod tests {
             2,
             vec![metric(
                 "benchmark.gold_per_min",
-                4.0,
+                3.5,
                 MetricUnit::Percentile,
                 true,
                 20,
@@ -554,8 +559,8 @@ mod tests {
 
     #[test]
     fn a_proportion_moves_in_points_too() {
-        // A win rate .50 → .54 is four points: inside the band, even though it
-        // is an 8% relative change.
+        // A win rate .50 → .515 is a point and a half: inside the band, even
+        // though it is a 3% relative change.
         let before = session(
             1,
             vec![metric(
@@ -570,7 +575,7 @@ mod tests {
             2,
             vec![metric(
                 "role.win_rate",
-                0.54,
+                0.515,
                 MetricUnit::Proportion,
                 true,
                 20,
@@ -579,6 +584,28 @@ mod tests {
 
         assert_eq!(
             only(&compare(&before, &after), "role.win_rate").status,
+            ProgressStatus::Stable
+        );
+    }
+
+    #[test]
+    fn a_two_point_move_is_a_change_and_less_is_unchanged() {
+        let score = |value: f32| {
+            vec![metric("role.performance", value, MetricUnit::Score, true, 20)]
+        };
+        let before = session(1, score(56.0));
+
+        // The case players reported: 56.0 → 58.4 must read as improved.
+        assert_eq!(
+            only(&compare(&before, &session(2, score(58.4))), "role.performance").status,
+            ProgressStatus::Improved
+        );
+        assert_eq!(
+            only(&compare(&before, &session(2, score(53.5))), "role.performance").status,
+            ProgressStatus::Declined
+        );
+        assert_eq!(
+            only(&compare(&before, &session(2, score(57.5))), "role.performance").status,
             ProgressStatus::Stable
         );
     }

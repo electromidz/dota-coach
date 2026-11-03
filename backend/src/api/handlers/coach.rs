@@ -10,6 +10,8 @@
 //! the router's own timeout, needs no queue. Background or scheduled analysis
 //! would — and that is where a queue belongs, not here.
 
+use std::collections::HashMap;
+
 use axum::extract::State;
 use axum::Json;
 use chrono::{Duration, Utc};
@@ -18,7 +20,10 @@ use uuid::Uuid;
 
 use crate::api::extract::{AppJson, AppPath, CurrentUser, EntitledUser};
 use crate::api::handlers::{benchmark, heroes, stats};
-use crate::domain::coaching::{AnalysisScope, CoachingAnalysis, Evidence};
+use crate::domain::benchmark::BenchmarkMetric;
+use crate::domain::coaching::{
+    AnalysisScope, CoachingAnalysis, Evidence, GoalResult, GoalView, PlanGoal,
+};
 use crate::domain::coaching_profile::CoachingProfile;
 use crate::domain::coaching_session::CoachingSession;
 use crate::domain::event::EventType;
@@ -75,6 +80,16 @@ pub struct CoachResponse {
     pub role: Option<CoachableRole>,
     pub role_label: Option<&'static str>,
     pub note: Option<String>,
+    /// Eligible matches played since the stored analysis was written. `null`
+    /// when there is no analysis, or it cannot be tied to the matches it read.
+    pub new_matches_since_analysis: Option<i64>,
+    /// True when this read started a background refresh of the analysis.
+    /// The page can poll; the current analysis stays valid meanwhile.
+    pub refreshing: bool,
+    /// The plan's goals, with progress and the last few games.
+    pub goals: Vec<GoalView>,
+    /// The previous analysis's goals, scored against this one.
+    pub previous_goals: Vec<GoalResult>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -331,19 +346,225 @@ pub async fn get(
 ) -> AppResult<Json<CoachResponse>> {
     let player = load_linked_player(&state, &user).await?;
     let scope = require_scope(&state, &player).await?;
-    let (evidence, patterns) = role_evidence(&state, &user, &player, &scope).await?;
+    let cached = role_evidence_cached(&state, &user, &player, &scope).await?;
     let stored =
         repositories::coaching::latest(&state.db, player.id, None, Some(scope.role)).await?;
 
-    Ok(Json(respond(
+    let new_matches = match &stored {
+        Some(analysis) => {
+            new_matches_since(&state, &player, &scope, analysis, &cached.window_ids).await
+        }
+        None => None,
+    };
+    let refreshing = stored.as_ref().is_some_and(|analysis| {
+        state.llm.is_configured()
+            && auto_refresh_due(new_matches, Utc::now() - analysis.generated_at)
+            && claim_auto_refresh(player.id, Utc::now())
+    });
+    if refreshing {
+        spawn_auto_refresh(&state, &user, &player, &scope);
+    }
+
+    let mut response = respond(
         &state,
         stored,
-        evidence,
-        patterns,
+        cached.evidence,
+        cached.patterns,
         Some(scope.role),
         None,
         true,
-    )))
+    );
+    response.new_matches_since_analysis = new_matches;
+    response.refreshing = refreshing;
+    attach_goals(&state, &player, &scope, &mut response).await;
+    Ok(Json(response))
+}
+
+/// How many recent games each goal shows as hit or missed.
+const GOAL_RECENT_GAMES: usize = 5;
+
+/// The analysis's goals, or the same goals derived again for an analysis
+/// stored before goals were.
+async fn goals_for(state: &AppState, analysis: &CoachingAnalysis) -> Vec<PlanGoal> {
+    match repositories::coaching_goal::for_analysis(&state.db, analysis.id).await {
+        Ok(goals) if !goals.is_empty() => goals,
+        Ok(_) => coaching::goals::derive(&analysis.plan, &analysis.evidence),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read goals; deriving them");
+            coaching::goals::derive(&analysis.plan, &analysis.evidence)
+        }
+    }
+}
+
+/// Fill in the goals, their recent games, and how the previous goals went.
+/// Best effort: a failure leaves the lists empty rather than failing the read.
+async fn attach_goals(
+    state: &AppState,
+    player: &DotaPlayer,
+    scope: &CoachingScope,
+    response: &mut CoachResponse,
+) {
+    let Some(analysis) = response.analysis.as_ref() else {
+        return;
+    };
+
+    let goals = goals_for(state, analysis).await;
+    let mut recent_by_hero: HashMap<i32, Vec<HashMap<BenchmarkMetric, f32>>> = HashMap::new();
+    for hero_id in goals.iter().filter_map(|g| g.hero_id) {
+        if recent_by_hero.contains_key(&hero_id) {
+            continue;
+        }
+        let values = repositories::metrics::hero_match_values(
+            &state.db,
+            player.id,
+            hero_id,
+            &scope.matches,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, hero_id, "recent games for goals unavailable");
+            Vec::new()
+        });
+        // Newest first from the query; the chart reads oldest first.
+        let mut recent: Vec<_> = values
+            .into_iter()
+            .take(GOAL_RECENT_GAMES)
+            .map(|m| m.figures.values())
+            .collect();
+        recent.reverse();
+        recent_by_hero.insert(hero_id, recent);
+    }
+
+    response.goals = goals
+        .into_iter()
+        .map(|goal| {
+            let current = coaching::goals::current_value(&analysis.evidence, &goal.evidence_id)
+                .unwrap_or(goal.baseline);
+            let metric = BenchmarkMetric::ALL.into_iter().find(|m| m.slug() == goal.metric);
+            let recent: Vec<f32> = match (goal.hero_id, metric) {
+                (Some(hero), Some(metric)) => recent_by_hero
+                    .get(&hero)
+                    .map(|games| games.iter().filter_map(|g| g.get(&metric).copied()).collect())
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            coaching::goals::view(goal, current, &recent)
+        })
+        .collect();
+
+    let previous = repositories::coaching::previous(
+        &state.db,
+        player.id,
+        scope.role,
+        analysis.generated_at,
+    )
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "previous analysis unavailable");
+        None
+    });
+    if let Some(previous) = previous {
+        response.previous_goals = goals_for(state, &previous)
+            .await
+            .into_iter()
+            .map(|goal| {
+                let now = coaching::goals::current_value(&analysis.evidence, &goal.evidence_id);
+                coaching::goals::evaluate(goal, now)
+            })
+            .collect();
+    }
+}
+
+/// New eligible matches since the analysis was written: every match in the
+/// current window that the analysis's session did not read.
+///
+/// The analysis's own session when it is attached to one. A regenerated
+/// analysis is not (a session keeps its first reading), so it falls back to the
+/// newest session written before the analysis, which is the one it read.
+/// `None` when neither exists.
+async fn new_matches_since(
+    state: &AppState,
+    player: &DotaPlayer,
+    scope: &CoachingScope,
+    analysis: &CoachingAnalysis,
+    window_ids: &[Uuid],
+) -> Option<i64> {
+    let session = match repositories::coaching_session::find_by_analysis(
+        &state.db,
+        player.id,
+        analysis.id,
+    )
+    .await
+    {
+        Ok(Some(session)) => Ok(Some(session)),
+        Ok(None) => {
+            repositories::coaching_session::latest_before(
+                &state.db,
+                player.id,
+                scope.role,
+                analysis.generated_at,
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
+
+    match session {
+        Ok(Some(session)) => Some(coaching_session::new_match_count(&session, window_ids) as i64),
+        Ok(None) => None,
+        Err(e) => {
+            // A count is a nicety on a read path; it must not fail the page.
+            tracing::warn!(error = %e, "could not count matches since the analysis");
+            None
+        }
+    }
+}
+
+/// New eligible matches that justify regenerating the analysis on its own.
+pub(crate) const AUTO_REFRESH_NEW_MATCHES: i64 = 3;
+/// An analysis older than this is regenerated on the next read.
+pub(crate) const AUTO_REFRESH_MAX_AGE_DAYS: i64 = 7;
+/// At most one automatic refresh per player in this window. The manual
+/// cooldown and daily limit still apply on top of it.
+pub(crate) const AUTO_REFRESH_MIN_INTERVAL_HOURS: i64 = 6;
+
+/// Whether a stored analysis has fallen far enough behind to regenerate.
+pub(crate) fn auto_refresh_due(new_matches: Option<i64>, age: Duration) -> bool {
+    new_matches.is_some_and(|n| n >= AUTO_REFRESH_NEW_MATCHES)
+        || age > Duration::days(AUTO_REFRESH_MAX_AGE_DAYS)
+}
+
+/// When each player last had an automatic refresh started, in this process.
+static AUTO_REFRESHES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, chrono::DateTime<Utc>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Take this player's automatic-refresh slot, if it is free.
+///
+/// In-process, so concurrent reads of the same page start one refresh rather
+/// than several. Per instance: with several backends running, the database-
+/// backed cooldown in `enforce_limits` is what stops a second model call.
+pub(crate) fn claim_auto_refresh(player_id: Uuid, now: chrono::DateTime<Utc>) -> bool {
+    let mut started = AUTO_REFRESHES.lock().unwrap_or_else(|e| e.into_inner());
+    let interval = Duration::hours(AUTO_REFRESH_MIN_INTERVAL_HOURS);
+    if started.get(&player_id).is_some_and(|last| now - *last < interval) {
+        return false;
+    }
+    started.insert(player_id, now);
+    true
+}
+
+/// Regenerate the analysis without holding up the page that noticed it was due.
+fn spawn_auto_refresh(state: &AppState, user: &User, player: &DotaPlayer, scope: &CoachingScope) {
+    let (state, user, player, scope) = (state.clone(), user.clone(), player.clone(), scope.clone());
+    tokio::spawn(async move {
+        match generate_role_analysis(&state, &user, &player, &scope).await {
+            Ok(_) => tracing::info!(player = %player.id, "analysis auto-refreshed"),
+            // Rate limits and model outages land here. The stored analysis
+            // stays on the page, so there is nothing to surface.
+            Err(e) => tracing::warn!(player = %player.id, error = %e, "auto-refresh skipped"),
+        }
+    });
 }
 
 /// `GET /api/coach/player-model`
@@ -605,18 +826,30 @@ pub async fn analyze(
 ) -> AppResult<Json<CoachResponse>> {
     let player = load_linked_player(&state, &user).await?;
     let scope = require_scope(&state, &player).await?;
+    let mut response = generate_role_analysis(&state, &user, &player, &scope).await?;
+    attach_goals(&state, &player, &scope, &mut response).await;
+    Ok(Json(response))
+}
 
+/// Generate (or serve from storage) the role analysis. Shared by the
+/// `analyze` route and the automatic refresh.
+async fn generate_role_analysis(
+    state: &AppState,
+    user: &User,
+    player: &DotaPlayer,
+    scope: &CoachingScope,
+) -> AppResult<CoachResponse> {
     // One gather, two renderings: the prose the model is shown, and the
     // numbers the session records. Fetching twice would let the snapshot and
     // the advice written about it describe different windows.
-    let inputs = role_inputs(&state, &user, &player, &scope).await?;
+    let inputs = role_inputs(state, user, player, scope).await?;
     let patterns = inputs.patterns.clone();
 
     // A threshold of one, not ten: an analysis has to bind to a snapshot
     // describing exactly the games it read, so any new match earns a session
     // before the model sees anything. A failure here must not cost the player
     // the analysis they are paying for.
-    let session = match checkpoint_from(&state, &player, &scope, &inputs, 1).await {
+    let session = match checkpoint_from(state, player, scope, &inputs, 1).await {
         Ok(session) => session,
         Err(e) => {
             tracing::warn!(error = %e, "coaching session skipped before generation");
@@ -634,16 +867,16 @@ pub async fn analyze(
 
     // Read *after* the checkpoint, so a session written a moment ago is the
     // current half of the comparison rather than being compared against.
-    let progress = progress_context(&state, &player, scope.role).await?;
+    let progress = progress_context(state, player, scope.role).await?;
     let evidence = inputs.evidence(
-        &scope,
+        scope,
         state.config.coach.recent_matches as usize,
         &progress,
     );
 
     run(
-        &state,
-        &player,
+        state,
+        player,
         Generation {
             scope: AnalysisScope::Role,
             role: Some(scope.role),
@@ -654,6 +887,7 @@ pub async fn analyze(
         },
     )
     .await
+    .map(|Json(response)| response)
 }
 
 /// `POST /api/matches/:id/analyze`
@@ -846,6 +1080,18 @@ async fn run(
     )
     .await?;
 
+    // The plan's measurable goals, fixed at the moment they were set.
+    if scope == AnalysisScope::Role {
+        let goals = coaching::goals::derive(&generated.plan, &evidence);
+        if let Err(e) =
+            repositories::coaching_goal::insert_all(&state.db, analysis_id, &goals).await
+        {
+            // The analysis is what was asked for; goals can be derived again
+            // from it on read.
+            tracing::warn!(error = %e, "could not store the plan's goals");
+        }
+    }
+
     // Bind the model's reading to the snapshot it read. A session records the
     // *first* interpretation made of it: re-generating after a prompt-version
     // bump writes a new analysis row and leaves the session alone, which is
@@ -908,6 +1154,10 @@ fn respond(
         role,
         role_label: role.map(CoachableRole::label),
         note,
+        new_matches_since_analysis: None,
+        refreshing: false,
+        goals: Vec::new(),
+        previous_goals: Vec::new(),
     }
 }
 
@@ -954,6 +1204,17 @@ pub(crate) async fn role_evidence(
     player: &DotaPlayer,
     scope: &CoachingScope,
 ) -> AppResult<(Vec<Evidence>, Vec<RecurringPattern>)> {
+    let cached = role_evidence_cached(state, user, player, scope).await?;
+    Ok((cached.evidence, cached.patterns))
+}
+
+/// The same, with the ids of the matches it was built from.
+async fn role_evidence_cached(
+    state: &AppState,
+    user: &User,
+    player: &DotaPlayer,
+    scope: &CoachingScope,
+) -> AppResult<CachedEvidence> {
     let key = evidence_cache_key(state, player, scope).await;
 
     let compute = || async {
@@ -963,6 +1224,7 @@ pub(crate) async fn role_evidence(
             inputs.evidence(scope, state.config.coach.recent_matches as usize, &progress);
         Ok(CachedEvidence {
             evidence,
+            window_ids: inputs.window_ids(),
             patterns: inputs.patterns,
         })
     };
@@ -975,7 +1237,7 @@ pub(crate) async fn role_evidence(
         None => compute().await?,
     };
 
-    Ok((cached.evidence, cached.patterns))
+    Ok(cached)
 }
 
 /// The cached half of a coaching read.
@@ -988,6 +1250,10 @@ pub(crate) async fn role_evidence(
 struct CachedEvidence {
     evidence: Vec<Evidence>,
     patterns: Vec<RecurringPattern>,
+    /// The matches behind the evidence, so a reader can tell how many are new
+    /// since a stored analysis without gathering everything again.
+    #[serde(default)]
+    window_ids: Vec<Uuid>,
 }
 
 /// A key that stops matching the moment anything behind the value moves.
@@ -1063,7 +1329,9 @@ async fn evidence_cache_key(
     .flatten()?;
 
     Some(cache::CacheKey::new(
-        "coach-evidence",
+        // v3: hero kits and evidence figures. Bump whenever the evidence
+        // shape changes, or old entries keep serving the old shape.
+        "coach-evidence-v3",
         player.id,
         scope.role.slug(),
         &short_hash(&fingerprint),
@@ -1113,6 +1381,8 @@ pub(crate) struct RoleInputs {
     /// The role's own rollup, used for the stored performance score.
     pub hero_stats: Vec<HeroStats>,
     pub focus: Option<TrainingFocus>,
+    /// Abilities and usual items for the heroes the advice will be about.
+    pub kits: Vec<crate::domain::hero::HeroKit>,
 }
 
 impl RoleInputs {
@@ -1145,6 +1415,9 @@ impl RoleInputs {
             benchmarks: &self.benchmark.results,
             benchmark_hero: (!self.benchmark.hero_name.is_empty())
                 .then_some(self.benchmark.hero_name.as_str()),
+            benchmark_hero_id: (!self.benchmark.hero_name.is_empty())
+                .then_some(self.benchmark.hero_id),
+            kits: &self.kits,
             pool: &self.heroes.pool,
             recommendations: &self.heroes.recommendations,
             patterns: &self.patterns,
@@ -1227,6 +1500,8 @@ pub(crate) async fn role_inputs(
     )
     .await?;
 
+    let kits = hero_kits(state, &benchmark, &hero_stats).await;
+
     Ok(RoleInputs {
         stats,
         history: refreshed.history,
@@ -1237,7 +1512,49 @@ pub(crate) async fn role_inputs(
         heroes,
         hero_stats,
         focus,
+        kits,
     })
+}
+
+/// How many heroes' kits the coach is shown.
+const KIT_HEROES: usize = 2;
+/// A kit is an extra; a slow provider must not hold up the page.
+const KIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Kits for the benchmarked hero and the role's other most-played heroes.
+/// Failures are logged and dropped.
+async fn hero_kits(
+    state: &AppState,
+    benchmark: &benchmark::BenchmarkResponse,
+    hero_stats: &[HeroStats],
+) -> Vec<crate::domain::hero::HeroKit> {
+    let mut ids: Vec<i32> = Vec::new();
+    if !benchmark.hero_name.is_empty() {
+        ids.push(benchmark.hero_id);
+    }
+    for hero in hero_stats {
+        if ids.len() >= KIT_HEROES {
+            break;
+        }
+        if !ids.contains(&hero.hero_id) {
+            ids.push(hero.hero_id);
+        }
+    }
+
+    let lookups = ids.into_iter().map(|id| async move {
+        match tokio::time::timeout(KIT_TIMEOUT, state.hero_kit.get_kit(id)).await {
+            Ok(Ok(kit)) => Some(kit),
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, hero_id = id, "hero kit unavailable");
+                None
+            }
+            Err(_) => {
+                tracing::debug!(hero_id = id, "hero kit timed out");
+                None
+            }
+        }
+    });
+    futures::future::join_all(lookups).await.into_iter().flatten().collect()
 }
 
 /// How many of the role's heroes a session records.
@@ -1510,6 +1827,8 @@ async fn match_evidence(
         recent: &[],
         benchmarks: &benchmark.results,
         benchmark_hero: (!benchmark.hero_name.is_empty()).then_some(benchmark.hero_name.as_str()),
+        benchmark_hero_id: (!benchmark.hero_name.is_empty()).then_some(benchmark.hero_id),
+        kits: &[],
         pool: &heroes.pool,
         recommendations: &[],
         // A single match read against the player's habits, not just their
@@ -1652,4 +1971,34 @@ async fn load_linked_player(state: &AppState, user: &User) -> AppResult<DotaPlay
     repositories::dota_player::find_by_user_id(&state.db, user.id)
         .await?
         .ok_or(AppError::DotaAccountNotLinked)
+}
+
+#[cfg(test)]
+mod auto_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn three_new_matches_or_a_week_makes_an_analysis_due() {
+        let fresh = Duration::hours(1);
+        assert!(!auto_refresh_due(Some(2), fresh));
+        assert!(auto_refresh_due(Some(3), fresh));
+        assert!(!auto_refresh_due(None, fresh));
+        assert!(!auto_refresh_due(Some(0), Duration::days(7)));
+        assert!(auto_refresh_due(Some(0), Duration::days(7) + Duration::minutes(1)));
+        assert!(auto_refresh_due(None, Duration::days(8)));
+    }
+
+    #[test]
+    fn a_player_gets_one_automatic_refresh_per_interval() {
+        let player = Uuid::new_v4();
+        let now = Utc::now();
+        assert!(claim_auto_refresh(player, now));
+        assert!(!claim_auto_refresh(player, now + Duration::minutes(5)));
+        assert!(claim_auto_refresh(
+            player,
+            now + Duration::hours(AUTO_REFRESH_MIN_INTERVAL_HOURS) + Duration::minutes(1)
+        ));
+        // Another player is unaffected.
+        assert!(claim_auto_refresh(Uuid::new_v4(), now));
+    }
 }

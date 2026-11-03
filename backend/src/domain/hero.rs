@@ -397,3 +397,18 @@ mod tests {
         assert_eq!(w.player_performance, 0.30);
     }
 }
+
+/// A hero's kit: what it can cast and what players usually build on it.
+///
+/// Facts about the hero, never about a player.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct HeroKit {
+    pub hero_id: i32,
+    pub hero_name: String,
+    /// The hero's tags, e.g. "Support", "Disabler".
+    pub roles: Vec<String>,
+    /// Display names, in the order the game lists them.
+    pub abilities: Vec<String>,
+    /// Most-bought items costing 1000 gold or more, early and mid game.
+    pub core_items: Vec<String>,
+}

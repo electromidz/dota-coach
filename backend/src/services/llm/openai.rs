@@ -77,6 +77,31 @@ impl LlmProvider for OpenAiLlmProvider {
             return Err(LlmError::NotConfigured);
         };
 
+        match self.send(key, request, request.json_only).await {
+            // The provider's JSON mode rejected the output before we saw it.
+            // Our own parser extracts and validates the object anyway, so one
+            // retry without the provider's check is safe.
+            Err(LlmError::InvalidResponse(message))
+                if request.json_only && message.contains(JSON_MODE_REJECTED) =>
+            {
+                tracing::warn!(%message, "provider JSON mode rejected the answer; retrying without it");
+                self.send(key, request, false).await
+            }
+            other => other,
+        }
+    }
+}
+
+/// The error code a provider sends when its JSON mode refuses an answer.
+const JSON_MODE_REJECTED: &str = "json_validate_failed";
+
+impl OpenAiLlmProvider {
+    async fn send(
+        &self,
+        key: &str,
+        request: &LlmRequest,
+        json_mode: bool,
+    ) -> Result<LlmCompletion, LlmError> {
         let mut body = json!({
             "model": self.model,
             "temperature": request.temperature,
@@ -87,7 +112,7 @@ impl LlmProvider for OpenAiLlmProvider {
             "stream_options": {"include_usage": true},
             "messages": messages(request),
         });
-        if request.json_only {
+        if json_mode {
             body["response_format"] = json!({"type": "json_object"});
         }
 
@@ -175,6 +200,20 @@ fn parse_stream(body: &str, fallback_model: &str) -> Result<LlmCompletion, LlmEr
             continue;
         };
         frames += 1;
+
+        // A provider can fail mid-stream with an error frame instead of a
+        // status code (Groq does when its JSON mode rejects the output).
+        // Reporting that as an empty completion would hide the real reason.
+        if let Some(error) = frame.get("error") {
+            let message = error
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
+            let code = error.get("code").and_then(|c| c.as_str()).unwrap_or("");
+            return Err(LlmError::InvalidResponse(format!(
+                "provider error mid-stream: {code} {message}"
+            )));
+        }
 
         if model.is_none() {
             model = frame
@@ -314,6 +353,17 @@ mod tests {
         assert_eq!(completion.model, "served-model", "attribute what answered");
         assert_eq!(completion.input_tokens, Some(120));
         assert_eq!(completion.output_tokens, Some(40));
+    }
+
+    #[test]
+    fn an_error_frame_mid_stream_is_reported_not_called_empty() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"...\"}}]}\n\n",
+            "data: {\"error\":{\"message\":\"Failed to generate JSON\",\"code\":\"json_validate_failed\"}}\n\n",
+        );
+        let err = parse_stream(body, "m").unwrap_err().to_string();
+        assert!(err.contains("json_validate_failed"), "{err}");
+        assert!(!err.contains("empty completion"), "{err}");
     }
 
     #[test]
