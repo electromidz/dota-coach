@@ -15,6 +15,7 @@ export const INSIGHT_CLASS: Record<InsightKind, string> = {
   recommendation: "border-keyword/50 bg-keyword/10 text-keyword",
   recurring_pattern: "border-operator/50 bg-operator/10 text-operator",
   weakness: "border-error/50 bg-error/10 text-error",
+  key_moment: "border-warn/50 bg-warn/10 text-warn",
   warning: "border-error/50 bg-error/10 text-error",
 };
 

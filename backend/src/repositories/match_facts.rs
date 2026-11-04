@@ -83,3 +83,18 @@ pub async fn store_snapshot(
 
     Ok(())
 }
+
+/// Drop a cached "not parsed yet" answer for one match, so the next read asks
+/// the provider again instead of waiting out the short TTL. Parsed snapshots
+/// are kept: a parse that already arrived does not need asking for again.
+pub async fn forget_unparsed(pool: &PgPool, match_id: i64, account_id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM match_fact_snapshots
+          WHERE match_id = $1 AND account_id = $2 AND parsed = false",
+    )
+    .bind(match_id)
+    .bind(account_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}

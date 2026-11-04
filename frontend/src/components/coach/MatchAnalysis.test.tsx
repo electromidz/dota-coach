@@ -8,10 +8,11 @@ import { MatchAnalysis } from "./MatchAnalysis";
 
 const getMatchAnalysis = vi.hoisted(() => vi.fn());
 const analyzeMatch = vi.hoisted(() => vi.fn());
+const requestReplayParse = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
-  return { ...actual, getMatchAnalysis, analyzeMatch };
+  return { ...actual, getMatchAnalysis, analyzeMatch, requestReplayParse };
 });
 
 const ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
@@ -110,34 +111,39 @@ describe("MatchAnalysis", () => {
     expect(analyzeMatch).not.toHaveBeenCalled();
   });
 
-  it("ranks the mistakes and shows what happened, why it mattered and what to do", async () => {
+  it("shows compact findings with the better play up front and the story behind a toggle", async () => {
     getMatchAnalysis.mockResolvedValue(
       analysed([mistake(), mistake({ title: "Your item came late", severity: "minor", timestamp: null })]),
     );
 
     render(<MatchAnalysis id={ID} />);
 
-    expect(await screen.findByText("What went wrong?")).toBeDefined();
+    expect(await screen.findByText("Coach findings")).toBeDefined();
 
-    // The three questions the phase exists to answer, as headings rather than a
-    // paragraph the reader has to mine.
-    expect(screen.getAllByText("What happened")).toHaveLength(2);
+    // Better play is on the card; what happened and why sit in a disclosure.
+    expect(screen.getAllByText("Better play")).toHaveLength(4);
     expect(screen.getAllByText("Why it mattered")).toHaveLength(2);
-    expect(screen.getAllByText("Better play")).toHaveLength(2);
+    expect(document.querySelectorAll("details summary").length).toBeGreaterThanOrEqual(2);
 
     // Severity and the timestamp, both from the backend.
     expect(screen.getByText("major")).toBeDefined();
     expect(screen.getByText("minor")).toBeDefined();
     expect(screen.getByText("10:45")).toBeDefined();
 
-    // Ranked most-costly-first, and the ranking is visible.
-    expect(screen.getByText("1")).toBeDefined();
-    expect(screen.getByText("2")).toBeDefined();
+  });
 
-    // The evidence behind the claim is on the card, not in a footnote.
-    expect(
-      screen.getAllByText(/You died 2 times, at 10:00 to Lion/).length,
-    ).toBeGreaterThan(0);
+  it("never shows more than three findings", async () => {
+    getMatchAnalysis.mockResolvedValue(
+      analysed([
+        mistake({ title: "One" }),
+        mistake({ title: "Two" }),
+        mistake({ title: "Three" }),
+        mistake({ title: "Four" }),
+      ]),
+    );
+    render(<MatchAnalysis id={ID} />);
+    expect(await screen.findByText("Three")).toBeDefined();
+    expect(screen.queryByText("Four")).toBeNull();
   });
 
   it("presents the single training focus as the focus rather than step one of a plan", async () => {
@@ -165,18 +171,24 @@ describe("MatchAnalysis", () => {
 
   // The most misleading thing this page could do is let a thin reading pass for
   // a complete one.
-  it("says up front when no second-by-second data exists for the match", async () => {
+  it("says up front when no timeline exists, with a way to fix it", async () => {
     getMatchAnalysis.mockResolvedValue(response({ evidence: [NO_TIMELINE] }));
+    requestReplayParse.mockResolvedValue({
+      requested: true,
+      note: "Parse requested. The timeline appears once a parsed replay is available.",
+    });
 
     render(<MatchAnalysis id={ID} />);
 
-    expect(
-      await screen.findByText("No second-by-second data for this match"),
-    ).toBeDefined();
-    // Twice over: once at the top as the warning, once in the evidence list —
-    // it is a measured statement about the match as well as a caveat about the
-    // reading, and both places are correct.
-    expect(screen.getAllByText(/the replay was never parsed/)).toHaveLength(2);
+    expect(await screen.findByText("No timeline data")).toBeDefined();
+    expect(screen.getByRole("link", { name: "How to make your profile public" })).toBeDefined();
+    // The reason sits behind the (i); the evidence list still states it.
+    expect(screen.getAllByText(/the replay was never parsed/)).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Request replay parse" }));
+    expect(await screen.findByText(/Parse requested\. The timeline appears/)).toBeDefined();
+    expect(requestReplayParse).toHaveBeenCalledWith(ID);
+    expect(screen.getByRole("button", { name: "Parse requested" })).toHaveProperty("disabled", true);
   });
 
   it("does not show the warning for a match that has a timeline", async () => {
@@ -185,7 +197,7 @@ describe("MatchAnalysis", () => {
     render(<MatchAnalysis id={ID} />);
 
     await screen.findByRole("button", { name: "Analyse this match" });
-    expect(screen.queryByText("No second-by-second data for this match")).toBeNull();
+    expect(screen.queryByText("No timeline data")).toBeNull();
   });
 
   it("reports a failed load instead of rendering an empty analysis", async () => {
@@ -248,7 +260,7 @@ describe("MatchAnalysis", () => {
     );
 
     await waitFor(() =>
-      expect(screen.getByText("Analysing your match…")).toBeDefined(),
+      expect(screen.getByText(/Analysing your match…/)).toBeDefined(),
     );
   });
 
@@ -280,7 +292,16 @@ describe("MatchAnalysis", () => {
 
     render(<MatchAnalysis id={ID} />);
 
-    expect(await screen.findByText("You died twice in the same fight.")).toBeDefined();
+    expect((await screen.findAllByText("You died twice in the same fight.")).length).toBeGreaterThan(0);
     expect(screen.queryByText("What happened")).toBeNull();
+  });
+
+  it("offers one compact re-read when the baseline has moved", async () => {
+    getMatchAnalysis.mockResolvedValue({ ...analysed([]), stale: true });
+    render(<MatchAnalysis id={ID} />);
+
+    expect(await screen.findByText("Your baseline changed since this analysis")).toBeDefined();
+    expect(screen.getAllByRole("button", { name: "Re-read" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Analyse this match" })).toBeNull();
   });
 });

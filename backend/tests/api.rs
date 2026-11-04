@@ -955,7 +955,7 @@ async fn a_thin_sample_is_shown_without_a_percentile() {
     // The player's own value and the reference are still shown.
     assert!(gpm["player_value"].as_f64().unwrap() > 0.0);
     assert_eq!(gpm["peer_median"], 500.0);
-    assert!(gpm["note"].as_str().unwrap().contains("Not enough matches"));
+    assert!(gpm["note"].as_str().unwrap().contains("Your average: needs"));
 
     app.cleanup(&[steam_id]).await;
 }
@@ -1620,8 +1620,9 @@ async fn a_match_analysis_reads_the_game_against_the_players_own_averages() {
         .find(|e| e["id"] == "match.kda")
         .expect("match KDA evidence");
     assert!(
-        kda["statement"].as_str().unwrap().contains("your average"),
-        "a single match is only coachable against the player's own baseline: {}",
+        kda["statement"].as_str().unwrap().contains("average over"),
+        "a single match is only coachable against the player's own baseline, \
+         which says what it is over: {}",
         kda["statement"]
     );
 

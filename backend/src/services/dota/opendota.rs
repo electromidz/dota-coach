@@ -161,6 +161,27 @@ impl DotaDataProvider for OpenDotaProvider {
         *self.heroes.write().await = Some(Arc::new(map.clone()));
         Ok(map)
     }
+
+    /// `POST /request/{match_id}`, verified against OpenDota's published
+    /// spec: submits a parse job and counts as ten calls against the rate
+    /// limit, so callers must not repeat it freely.
+    async fn request_parse(&self, match_id: i64) -> Result<(), ProviderError> {
+        let url = format!("{}/request/{match_id}", self.base_url);
+        let mut request = self.http.post(&url);
+        if let Some(key) = &self.api_key {
+            request = request.query(&[("api_key", key)]);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
+        match response.status() {
+            StatusCode::TOO_MANY_REQUESTS => Err(ProviderError::RateLimited),
+            StatusCode::NOT_FOUND => Err(ProviderError::NotFound),
+            s if s.is_success() => Ok(()),
+            s => Err(ProviderError::Unavailable(format!("HTTP {s}"))),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

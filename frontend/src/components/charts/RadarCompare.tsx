@@ -27,10 +27,16 @@ export function RadarCompare({
   points,
   rankLabel,
   targetLabel,
+  youLegend = "You",
+  targetLegend,
 }: {
   points: PercentilePoint[];
   rankLabel: string;
   targetLabel?: string;
+  /** Legend text for the filled shape. */
+  youLegend?: string;
+  /** Legend text for the dashed target shape, when it is not a median. */
+  targetLegend?: string;
 }) {
   const [active, setActive] = useState<number | null>(null);
   const n = points.length;
@@ -186,7 +192,7 @@ export function RadarCompare({
             <p className="mb-1.5 font-semibold text-ink">{focus.label}</p>
             <Row
               swatch="bg-you"
-              name="You"
+              name={youLegend}
               value={formatMetricValue(focus.raw.you)}
               extra={focus.you !== null ? ordinal(focus.you) : undefined}
             />
@@ -210,9 +216,11 @@ export function RadarCompare({
       </div>
 
       <ul className="flex flex-wrap justify-center gap-x-4 gap-y-1 text-xs text-ink-muted">
-        <LegendItem kind="you">You</LegendItem>
+        <LegendItem kind="you">{youLegend}</LegendItem>
         {showRank ? <LegendItem kind="rank">{rankLabel} median</LegendItem> : null}
-        {showTarget ? <LegendItem kind="target">{targetLabel} median</LegendItem> : null}
+        {showTarget ? (
+          <LegendItem kind="target">{targetLegend ?? `${targetLabel} median`}</LegendItem>
+        ) : null}
       </ul>
 
       <table className="sr-only">

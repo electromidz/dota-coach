@@ -131,3 +131,12 @@ export function useSession(): SessionValue {
   }
   return value;
 }
+
+/**
+ * Whether the signed-in account is an admin. False outside a provider, so a
+ * component can ask without requiring one (tests render without it).
+ */
+export function useIsAdmin(): boolean {
+  const value = useContext(SessionContext);
+  return value?.session.kind === "signed-in" && value.session.me.user.is_admin;
+}

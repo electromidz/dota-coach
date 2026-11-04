@@ -13,7 +13,8 @@ use crate::domain::scope::MatchScope;
 /// queries; `concat!` keeps the composed SQL a compile-time literal.
 macro_rules! columns {
     () => {
-        "m.id, m.dota_player_id, m.match_id, m.hero_id, m.hero_name, m.role, m.lane_role, \
+        "m.id, m.dota_player_id, m.match_id, m.hero_id, m.hero_name, m.role, m.role_source, \
+         m.lane_role, \
          m.won, m.duration_seconds, m.kills, m.deaths, m.assists, m.gpm, m.xpm, \
          m.last_hits, m.denies, m.net_worth, m.hero_damage, m.tower_damage, \
          m.hero_healing, m.game_mode, m.lobby_type, m.party_size, m.started_at, \
@@ -422,9 +423,11 @@ pub async fn hero_facets(
     pool: &PgPool,
     dota_player_id: Uuid,
     scope: &MatchScope,
+    mode: ModeFilter,
 ) -> Result<Vec<HeroFacet>, sqlx::Error> {
     sqlx::query_as::<_, HeroFacet>(AssertSqlSafe(facet_sql(
         scope,
+        mode,
         "m.hero_id, m.hero_name, COUNT(*) AS matches",
         "m.hero_id, m.hero_name",
         "matches DESC, m.hero_name ASC",
@@ -438,9 +441,11 @@ pub async fn role_facets(
     pool: &PgPool,
     dota_player_id: Uuid,
     scope: &MatchScope,
+    mode: ModeFilter,
 ) -> Result<Vec<RoleFacet>, sqlx::Error> {
     sqlx::query_as::<_, RoleFacet>(AssertSqlSafe(facet_sql(
         scope,
+        mode,
         "m.role, COUNT(*) AS matches",
         "m.role",
         "matches DESC, m.role ASC",
@@ -451,7 +456,13 @@ pub async fn role_facets(
 }
 
 /// One grouped count over a scope. Every fragment is a caller-side literal.
-fn facet_sql(scope: &MatchScope, select: &str, group_by: &str, order_by: &str) -> String {
+fn facet_sql(
+    scope: &MatchScope,
+    mode: ModeFilter,
+    select: &str,
+    group_by: &str,
+    order_by: &str,
+) -> String {
     // A career scope reads every stored row and needs no window; anything
     // narrower joins the same CTE the scoped aggregates do, so the counts
     // beside a filter describe exactly the page it will produce.
@@ -467,8 +478,10 @@ fn facet_sql(scope: &MatchScope, select: &str, group_by: &str, order_by: &str) -
            FROM matches m
            {join}
           WHERE m.dota_player_id = $1
+                {mode}
           GROUP BY {group_by}
-          ORDER BY {order_by}"
+          ORDER BY {order_by}",
+        mode = mode.sql_clause(),
     )
 }
 
@@ -722,6 +735,7 @@ pub async fn farm_ranked_matches(pool: &PgPool) -> Result<Vec<(Uuid, i64, i64, S
            FROM matches m
            JOIN dota_players p ON p.id = m.dota_player_id
           WHERE m.lane_role IS NULL
+            AND m.role_source = 'estimated'
             AND m.role IN ('Core', 'Support', 'Hard Support', 'Unknown')
           ORDER BY m.started_at DESC",
     )
@@ -766,4 +780,48 @@ pub async fn set_net_worth(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Set a match's position by hand, or hand it back to the estimator.
+///
+/// `Some(label)`: the player's correction, written to `role` so every filter
+/// uses it; the first estimate is kept in `role_estimated`. `None`: restore
+/// the estimate. Scoped to the owner; `false` when no such match is theirs.
+pub async fn set_role_by_player(
+    pool: &PgPool,
+    match_id: Uuid,
+    dota_player_id: Uuid,
+    label: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let result = match label {
+        Some(label) => {
+            sqlx::query(
+                "UPDATE matches
+                    SET role_estimated = COALESCE(role_estimated, role),
+                        role = $3,
+                        role_source = 'user',
+                        updated_at = now()
+                  WHERE id = $1 AND dota_player_id = $2",
+            )
+            .bind(match_id)
+            .bind(dota_player_id)
+            .bind(label)
+            .execute(pool)
+            .await?
+        }
+        None => {
+            sqlx::query(
+                "UPDATE matches
+                    SET role = COALESCE(role_estimated, role),
+                        role_source = 'estimated',
+                        updated_at = now()
+                  WHERE id = $1 AND dota_player_id = $2",
+            )
+            .bind(match_id)
+            .bind(dota_player_id)
+            .execute(pool)
+            .await?
+        }
+    };
+    Ok(result.rows_affected() == 1)
 }

@@ -25,7 +25,7 @@ use utoipa::ToSchema;
 /// 5: single-match analysis asks for the three-part form (what happened, why it
 /// matters, what to do instead), a severity, and a timestamp — and is told that
 /// timestamps are verified against the evidence as strings.
-pub const PROMPT_VERSION: u32 = 7;
+pub const PROMPT_VERSION: u32 = 9;
 
 /// The instructions.
 ///
@@ -35,8 +35,19 @@ pub const PROMPT_VERSION: u32 = 7;
 /// arithmetic, cite everything, nothing unverified survives — are identical, and
 /// are stated once.
 pub fn system(scope: AnalysisScope, max_insights: usize, max_plan_steps: usize) -> String {
-    let kinds = InsightKind::ALL
+    // A single match uses its own three kinds; a role analysis everything
+    // but the match-only "key moment".
+    let allowed: Vec<InsightKind> = match scope {
+        AnalysisScope::Match => InsightKind::MATCH.to_vec(),
+        _ => InsightKind::ALL
+            .into_iter()
+            .filter(|k| *k != InsightKind::KeyMoment)
+            .collect(),
+    };
+    let kinds = allowed
+        .iter()
         .map(|k| format!("\"{}\"", k.slug()))
+        .collect::<Vec<_>>()
         .join(", ");
     // "at most 1 plan steps" reads as a formatting bug, and a model that is
     // reading the sentence to find out how many to write deserves a sentence
@@ -181,10 +192,22 @@ player bought and when, when they died and to whom, and when objectives fell. \
 You do not know what they were thinking, where they walked, what they had on \
 cooldown, or what their team said.
 
+KINDS
+Use only \"strength\", \"weakness\" or \"key_moment\". A weakness must be a metric \
+that was below the peer median or worse than the player's own baseline in the \
+evidence; anything else is dropped. Do not write a finding about the match \
+length or result unless it is tied to a decision. Every finding carries a \
+\"better_action\": that is the recommendation, so there is no separate \
+recommendation kind. Ids beginning \"match.peer.\" place this game among peers \
+(\"This game: 97th percentile\"); ids beginning \"benchmark.\" are the player's \
+average, which can be withheld for a small sample. Do not confuse the two. \
+Ids beginning \"match.item.\" compare a core item's completion with the peer \
+median on the hero; one stated as later than peers is a weakness worth citing, \
+one \"not compared\" is not.
+
 SEVERITY
-Mark each insight \"major\" or \"minor\". Major means it plausibly changed the \
-result of this game. Expect one to three majors in a normal game; a list where \
-everything is major has not ranked anything.
+Mark each insight \"major\" or \"minor\" as a guess; the system recomputes it \
+from the measured percentiles, so do not argue for it in the text.
 
 THE PLAN
 Exactly one step. It is the single thing this player should work on next, drawn \
@@ -370,9 +393,17 @@ mod tests {
         assert!(system.contains("must NOT calculate"));
         assert!(system.contains("At most 5 insights"));
         assert!(system.contains("4 plan steps"));
-        for kind in InsightKind::ALL {
+        for kind in InsightKind::ALL.into_iter().filter(|k| *k != InsightKind::KeyMoment) {
             assert!(system.contains(kind.slug()), "missing {}", kind.slug());
         }
+    }
+
+    #[test]
+    fn a_match_prompt_offers_only_strength_weakness_and_key_moment() {
+        let system = system(AnalysisScope::Match, 5, 1);
+        let listed = system.split("from [").nth(1).unwrap().split(']').next().unwrap();
+        assert_eq!(listed, r#""strength", "weakness", "key_moment""#);
+        assert!(system.contains("below the peer median or worse than the player's own baseline"));
     }
 
     /// The prompt has to say that numbers are checked, because the checker

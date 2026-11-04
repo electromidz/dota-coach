@@ -36,7 +36,7 @@ async fn newest_match_id(
     token: &str,
     mode_label: &str,
 ) -> Option<(String, serde_json::Value)> {
-    let list = app.get("/api/matches?limit=100", Some(token)).await.json();
+    let list = app.get("/api/matches?mode=all&limit=100", Some(token)).await.json();
 
     list["matches"]
         .as_array()?
@@ -88,6 +88,11 @@ async fn a_ranked_match_is_placed_against_the_players_own_bracket() {
     // The one-glance number, and what it is a median of.
     assert!(!body["standing"]["this_match"].is_null());
     assert!(body["standing"]["metrics_counted"].as_u64().unwrap() > 0);
+
+    // Always arrays, even when empty: the page draws from them directly.
+    // The test app has no item timing provider and unparsed matches.
+    assert!(body["item_timings"].is_array());
+    assert!(body["laning"].is_array());
 
     app.cleanup(&[]).await;
 }
@@ -268,4 +273,75 @@ async fn another_players_match_is_not_found_rather_than_forbidden() {
     assert_eq!(response.error_code(), "NOT_FOUND");
 
     app.cleanup(&[bob_steam]).await;
+}
+
+#[tokio::test]
+async fn your_average_on_a_match_page_never_includes_that_match() {
+    let Some(db) = support::pool().await else {
+        return skip("your_average_on_a_match_page_never_includes_that_match");
+    };
+
+    // Four Luna carry games at 400 GPM and one, the newest, at 900.
+    let mut history = support::batch(1_000, 5, RANKED_ALL_PICK, Lane::Carry, 3);
+    for (i, m) in history.iter_mut().enumerate() {
+        m.hero_id = 35;
+        m.gpm = if i == 4 { 900 } else { 400 };
+    }
+    let (app, session) = seed_app(db, history, 100).await;
+
+    let list = app.get("/api/matches?limit=100", Some(&session.token)).await.json();
+    let standout = list["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["gpm"] == 900)
+        .expect("the 900 GPM game")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = app
+        .get(&format!("/api/matches/{standout}/comparison"), Some(&session.token))
+        .await
+        .json();
+    let gpm = body["metrics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["metric"] == "gold_per_min")
+        .expect("gold_per_min row");
+
+    // 400 over the four other games, not 500 over all five.
+    assert_eq!(gpm["hero_average"]["value"], 400.0, "{gpm}");
+    assert_eq!(gpm["hero_average"]["sample"], 4);
+    assert_eq!(gpm["this_match"]["value"], 900.0);
+
+    app.cleanup(&[]).await;
+}
+
+#[tokio::test]
+async fn a_replay_parse_can_be_requested_once_an_hour_per_match() {
+    let Some(db) = support::pool().await else {
+        return skip("a_replay_parse_can_be_requested_once_an_hour_per_match");
+    };
+    let (app, session) = seed_app(db, luna_history(), 100).await;
+    let (id, _) = newest_match_id(&app, &session.token, "Ranked All Pick")
+        .await
+        .expect("a ranked match");
+
+    let first = app.post(&format!("/api/matches/{id}/parse"), Some(&session.token)).await;
+    assert_eq!(first.status, 200, "{}", first.body);
+    assert_eq!(first.json()["requested"], true);
+
+    // It counts as ten provider calls, so a second press is refused.
+    let again = app.post(&format!("/api/matches/{id}/parse"), Some(&session.token)).await;
+    assert_eq!(again.status, 429);
+
+    // Someone else's match id is not found, never forwarded to the provider.
+    let missing = app
+        .post("/api/matches/3fa85f64-5717-4562-b3fc-2c963f66afa6/parse", Some(&session.token))
+        .await;
+    assert_eq!(missing.status, 404);
+
+    app.cleanup(&[]).await;
 }

@@ -105,6 +105,11 @@ pub struct MatchScope {
     pub role: Option<CoachableRole>,
     /// Keep only the newest `n` matches that survive the filters above.
     pub limit: Option<i64>,
+    /// Only this hero.
+    pub hero_id: Option<i32>,
+    /// Never this match: a baseline must not include the game it is a
+    /// baseline for, or a match is compared with itself.
+    pub exclude: Option<uuid::Uuid>,
 }
 
 impl MatchScope {
@@ -118,6 +123,8 @@ impl MatchScope {
             eligible_only: false,
             role: None,
             limit: None,
+            hero_id: None,
+            exclude: None,
         }
     }
 
@@ -127,6 +134,8 @@ impl MatchScope {
             eligible_only: true,
             role: None,
             limit: Some(limit),
+            hero_id: None,
+            exclude: None,
         }
     }
 
@@ -136,8 +145,29 @@ impl MatchScope {
             eligible_only: true,
             role: Some(role),
             limit: Some(limit),
+            hero_id: None,
+            exclude: None,
         }
     }
+    /// The personal baseline for one match: the player's eligible games on
+    /// the same hero, in the same position when it is known, excluding the
+    /// match itself. What "your average" means on a match page, for the coach
+    /// and the UI alike.
+    pub fn baseline(
+        hero_id: i32,
+        role: Option<CoachableRole>,
+        exclude: uuid::Uuid,
+        limit: i64,
+    ) -> Self {
+        Self {
+            eligible_only: true,
+            role,
+            limit: Some(limit),
+            hero_id: Some(hero_id),
+            exclude: Some(exclude),
+        }
+    }
+
 
     /// The window as a common table expression.
     ///
@@ -174,6 +204,14 @@ impl MatchScope {
                     .collect::<Vec<_>>()
                     .join(", "),
             ));
+        }
+
+        // Both typed (an i32 and a Uuid), so their text cannot carry SQL.
+        if let Some(hero_id) = self.hero_id {
+            sql.push_str(&format!("\n                    AND m.hero_id = {hero_id}"));
+        }
+        if let Some(exclude) = self.exclude {
+            sql.push_str(&format!("\n                    AND m.id <> '{exclude}'"));
         }
 
         // Recency last, so the limit applies to what survived the filters.
@@ -275,5 +313,16 @@ mod tests {
         );
         assert_eq!(SampleConfidence::for_matches(60), SampleConfidence::Strong);
         assert_eq!(SampleConfidence::for_matches(100), SampleConfidence::Strong);
+    }
+
+    #[test]
+    fn a_baseline_is_one_hero_one_position_and_never_the_match_itself() {
+        let id = uuid::Uuid::nil();
+        let sql = MatchScope::baseline(9, Some(CoachableRole::SoftSupport), id, 100).cte();
+        assert!(sql.contains("AND m.hero_id = 9"), "{sql}");
+        assert!(sql.contains(&format!("AND m.id <> '{id}'")), "{sql}");
+        assert!(sql.contains("m.role = ANY(ARRAY['Support'])"), "{sql}");
+        assert!(sql.contains("game_mode"), "eligible only");
+        assert!(sql.find("m.id <>").unwrap() < sql.find("LIMIT").unwrap());
     }
 }

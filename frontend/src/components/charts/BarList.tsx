@@ -40,7 +40,7 @@ export function BarList({
             <span className="truncate text-ink">{d.label}</span>
             <span className="shrink-0 font-mono text-xs tabular-nums text-ink-muted">
               {d.meta ? `${d.meta} · ` : ""}
-              {d.value}
+              {d.value.toLocaleString("en-US")}
             </span>
           </div>
 

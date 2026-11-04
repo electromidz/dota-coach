@@ -330,13 +330,30 @@ fn role_affinity(roles: &[RoleStats]) -> Vec<RoleAffinity> {
         return Vec::new();
     }
 
-    let mut affinity: Vec<RoleAffinity> = roles
-        .iter()
-        .map(|role| RoleAffinity {
-            role: role.role.clone(),
-            matches: role.matches,
-            share: role.matches as f32 / total as f32,
-            win_rate: role.win_rate,
+    // One taxonomy: stored estimator labels become the five positions, or
+    // "Unknown" when the estimate cannot say which (a bare "Core"). Labels
+    // that land on the same position are merged, win rates weighted by games.
+    let mut merged: Vec<(&'static str, i64, f32)> = Vec::new();
+    for role in roles {
+        let label = crate::domain::role::CoachableRole::from_stored(&role.role)
+            .map_or("Unknown", crate::domain::role::CoachableRole::label);
+        let wins = role.win_rate * role.matches as f32;
+        match merged.iter_mut().find(|(l, _, _)| *l == label) {
+            Some(entry) => {
+                entry.1 += role.matches;
+                entry.2 += wins;
+            }
+            None => merged.push((label, role.matches, wins)),
+        }
+    }
+
+    let mut affinity: Vec<RoleAffinity> = merged
+        .into_iter()
+        .map(|(label, matches, wins)| RoleAffinity {
+            role: label.to_string(),
+            matches,
+            share: matches as f32 / total as f32,
+            win_rate: if matches > 0 { wins / matches as f32 } else { 0.0 },
         })
         .filter(|role| role.share >= ROLE_SHARE_FLOOR)
         .collect();
@@ -394,6 +411,7 @@ mod tests {
             hero_id,
             hero_name: format!("Hero {hero_id}"),
             role: "Carry".into(),
+            position_label: "Carry",
             matches: 20,
             wins: 11,
             losses: 9,
@@ -607,5 +625,29 @@ mod tests {
         assert!(built.weaknesses.is_empty());
         assert_eq!(built.recent_form.win_rate, None);
         assert_eq!(built.recent_form.streak, 0);
+    }
+
+    #[test]
+    fn role_affinity_speaks_the_one_position_taxonomy() {
+        let stats = |role: &str, matches: i64, win_rate: f32| RoleStats {
+            role: role.into(),
+            matches,
+            wins: (win_rate * matches as f32).round() as i64,
+            win_rate,
+            avg_kda: 3.0,
+            avg_gpm: 400.0,
+        };
+        let affinity = role_affinity(&[
+            stats("Support", 10, 0.6),
+            stats("Hard Support", 6, 0.5),
+            stats("Core", 4, 0.25),
+            stats("Roamer", 2, 0.5),
+        ]);
+        let labels: Vec<&str> = affinity.iter().map(|r| r.role.as_str()).collect();
+        assert_eq!(labels, vec!["Soft Support", "Hard Support", "Unknown"]);
+        // "Core" and "Roamer" cannot be placed: both are Unknown, merged.
+        let unknown = affinity.iter().find(|r| r.role == "Unknown").unwrap();
+        assert_eq!(unknown.matches, 6);
+        assert!((unknown.win_rate - 2.0 / 6.0).abs() < 0.01);
     }
 }

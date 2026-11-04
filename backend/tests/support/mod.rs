@@ -180,6 +180,10 @@ impl DotaDataProvider for MockDota {
             (5, "Crystal Maiden".to_string()),
         ]))
     }
+
+    async fn request_parse(&self, _match_id: i64) -> Result<(), ProviderError> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1027,6 +1031,7 @@ fn build(
             benchmarks,
             hero_meta,
             hero_kit: Arc::new(dota_coach_backend::services::hero_kit::NullHeroKitProvider),
+            item_timing: Arc::new(dota_coach_backend::services::item_timing::NullItemTimingProvider),
             match_facts,
             llm,
             payments,

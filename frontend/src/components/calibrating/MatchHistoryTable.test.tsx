@@ -56,6 +56,7 @@ function match(overrides: Partial<MatchView> = {}): MatchView {
     mode_label: "Ranked All Pick",
     position: "carry",
     position_label: "Carry",
+    position_source: "lane",
     peer_gpm: 500,
     peer_xpm: 550,
     rating: 7.4,

@@ -218,6 +218,8 @@ pub struct Match {
     pub hero_id: i32,
     pub hero_name: String,
     pub role: String,
+    /// `estimated`, or `user` when the player corrected the position.
+    pub role_source: String,
     pub lane_role: Option<i16>,
     pub won: bool,
     pub duration_seconds: i32,

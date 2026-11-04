@@ -141,6 +141,7 @@ mod tests {
                 previous: None,
                 percent_change: None,
                 status: None,
+                baseline: None,
             }),
         }
     }

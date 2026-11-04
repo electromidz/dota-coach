@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::api::extract::{AppPath, AppQuery, CurrentUser, EntitledUser};
 use crate::api::handlers::{benchmark, players};
 use crate::config::CalibrationConfig;
-use crate::domain::benchmark::{BenchmarkContext, ResolvedBracket};
+use crate::domain::benchmark::{BenchmarkContext, BenchmarkMetric, ResolvedBracket};
 use crate::domain::eligibility;
 use crate::domain::match_comparison::{MatchComparison, Standing};
 use crate::domain::player::DotaPlayer;
@@ -26,6 +26,7 @@ use crate::error::{AppError, AppResult};
 use crate::repositories;
 use crate::repositories::r#match::{MatchFilter, MatchSort, ModeFilter};
 use crate::services::metrics::rating;
+use crate::services::benchmarks::percentile;
 use crate::services::{calibration, match_comparison, sync};
 use crate::state::AppState;
 use utoipa::ToSchema;
@@ -83,15 +84,8 @@ impl PageQuery {
             }
         };
 
-        let mode = match self.mode.as_deref().map(str::trim) {
-            None | Some("") => ModeFilter::default(),
-            Some(slug) => ModeFilter::parse(slug).ok_or_else(|| {
-                AppError::BadRequest(format!(
-                    "Unknown mode '{slug}'. Use 'all', 'ranked' or 'turbo'."
-                ))
-            })?,
-        };
-
+        // Set from the list's mode by the handler; see `ListMode`.
+        let mode = ModeFilter::All;
         let sort = match self.sort.as_deref().map(str::trim) {
             None | Some("") => MatchSort::default(),
             Some(slug) => MatchSort::parse(slug).ok_or_else(|| {
@@ -149,31 +143,56 @@ pub struct FilterOptions {
 /// for the callers that are *analysing* rather than browsing: the dashboard's
 /// trend line and form strip read the same games the dashboard's numbers do,
 /// which is what stops a chart and the statistic above it disagreeing.
+/// Which games the list shows. One control rather than a scope and a mode:
+///
+///   - `eligible` (default): Ranked and public All Pick, the newest N, the
+///     exact window Coach, Heroes and Benchmark read, so a hero's count here
+///     matches theirs. Eligibility is `domain::eligibility`, applied in SQL.
+///   - `ranked`: the ranked-lobby part of `eligible`, the games that move a
+///     medal. For the rank page.
+///   - `turbo`: Turbo games only. Stored, never coached.
+///   - `all`: every stored game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ListScope {
+pub enum ListMode {
+    Eligible,
+    Ranked,
+    Turbo,
     All,
-    Competitive,
 }
 
-impl ListScope {
+impl ListMode {
     fn slug(self) -> &'static str {
         match self {
-            ListScope::All => "all",
-            ListScope::Competitive => "competitive",
+            ListMode::Eligible => "eligible",
+            ListMode::Ranked => "ranked",
+            ListMode::Turbo => "turbo",
+            ListMode::All => "all",
         }
     }
 
-    /// Rejected rather than defaulted: a client that misspells the scope is
-    /// asking for a population it will not get, and silently serving the other
-    /// one is how a Turbo game ends up on a competitive chart.
+    /// Rejected rather than defaulted: a misspelt mode is asking for a
+    /// population it will not get, and silently serving another is how a
+    /// Turbo game ends up on a competitive chart.
     fn parse(value: Option<&str>) -> AppResult<Self> {
         match value.map(str::trim) {
-            None | Some("") | Some("all") => Ok(ListScope::All),
-            Some("competitive") => Ok(ListScope::Competitive),
+            None | Some("") | Some("eligible") => Ok(ListMode::Eligible),
+            Some("ranked") => Ok(ListMode::Ranked),
+            Some("turbo") => Ok(ListMode::Turbo),
+            Some("all") => Ok(ListMode::All),
             Some(other) => Err(AppError::BadRequest(format!(
-                "Unknown scope '{other}'. Use 'all' or 'competitive'."
+                "Unknown mode '{other}'. Use 'eligible', 'ranked', 'turbo' or 'all'."
             ))),
+        }
+    }
+
+    /// The window of matches, and the narrowing applied inside it.
+    fn population(self, window: i64) -> (MatchScope, ModeFilter) {
+        match self {
+            ListMode::Eligible => (MatchScope::competitive(window), ModeFilter::All),
+            ListMode::Ranked => (MatchScope::competitive(window), ModeFilter::Ranked),
+            ListMode::Turbo => (MatchScope::career(), ModeFilter::Turbo),
+            ListMode::All => (MatchScope::career(), ModeFilter::All),
         }
     }
 }
@@ -193,6 +212,19 @@ pub struct MatchView {
     pub eligible: bool,
     /// What it was: `Ranked All Pick`, `Turbo`, `Other mode`…
     pub mode_label: &'static str,
+    /// The position as one of the five, or `null` when it cannot be told
+    /// (a stored "Core" could be any of three). The one role taxonomy.
+    pub position: Option<CoachableRole>,
+    /// The position's label, or "Unknown".
+    pub position_label: &'static str,
+    /// How the position was decided: `user` (corrected by the player),
+    /// `lane` (from the provider's lane data, the stronger estimate),
+    /// `estimated` (from farm priority alone), or `unknown`.
+    pub position_source: &'static str,
+    /// Peer medians for this hero in the player's bracket, for eligible games
+    /// only: there is no peer distribution for Turbo to measure against.
+    pub peer_gpm: Option<f32>,
+    pub peer_xpm: Option<f32>,
     /// How this game went, 1.0–10.0, against the player's own typical game on
     /// this hero. Computed here, never by the model — see
     /// [`crate::services::metrics::rating`].
@@ -209,8 +241,18 @@ pub struct MatchView {
 
 impl MatchView {
     fn of(match_: Match, context: &RowContext, config: &CalibrationConfig) -> Self {
+        let eligible = eligibility::is_eligible(match_.game_mode, match_.lobby_type);
+        let position = CoachableRole::from_stored(&match_.role);
+        let peer = eligible
+            .then(|| context.peers.get(&match_.hero_id).copied())
+            .flatten();
         Self {
-            eligible: eligibility::is_eligible(match_.game_mode, match_.lobby_type),
+            eligible,
+            position,
+            position_label: position.map_or("Unknown", CoachableRole::label),
+            position_source: position_source(&match_, position.is_some()),
+            peer_gpm: peer.and_then(|p| p.0),
+            peer_xpm: peer.and_then(|p| p.1),
             mode_label: eligibility::mode_label(match_.game_mode, match_.lobby_type),
             rating: rating::rating(&match_, &context.baselines.for_match(&match_)),
             mmr_delta_estimate: calibration::estimated_mmr_delta(
@@ -229,12 +271,262 @@ impl MatchView {
 /// otherwise be forty queries, and — worse — rows would be comparable only to
 /// themselves. Both figures are about the player, not about the page, so they do
 /// not change as someone flips through it.
+fn position_source(match_: &Match, known: bool) -> &'static str {
+    if match_.role_source == "user" {
+        "user"
+    } else if !known {
+        "unknown"
+    } else if match_.lane_role.is_some() {
+        "lane"
+    } else {
+        "estimated"
+    }
+}
+
+/// `POST /api/matches/:id/role` body.
+#[derive(Deserialize, ToSchema)]
+pub struct SetRoleRequest {
+    /// A position slug (`carry` ... `hard_support`), or `auto` to hand the
+    /// match back to the estimator.
+    pub role: String,
+}
+
+/// `POST /api/matches/:id/role`
+///
+/// Correct the position a match was played in. Stored on the match, so every
+/// page that filters by position (Coach, Heroes, Benchmark, Matches) uses it.
+#[utoipa::path(
+    post, path = "/api/matches/{id}/role", tag = "matches",
+    summary = "Correct a match's position",
+    description = "Overrides the estimated position for one match, or restores the estimate with `auto`. The correction is stored on the match and used everywhere a position matters.",
+    security(("session" = [])),
+    params(
+        ("id" = Uuid, Path,
+            description = "Internal match id — the `id` from `/api/matches`.",
+            example = "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+    ),
+    request_body = SetRoleRequest,
+    responses(
+        (status = 200, description = "The match with its new position", body = MatchResponse),
+        (status = 400, description = "Not a position slug or `auto`", body = crate::error::ErrorBody),
+        (status = 404, description = "No such match, or it belongs to another player", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
+pub async fn set_role(
+    State(state): State<AppState>,
+    EntitledUser(user): EntitledUser,
+    AppPath(id): AppPath<Uuid>,
+    crate::api::extract::AppJson(body): crate::api::extract::AppJson<SetRoleRequest>,
+) -> AppResult<Json<MatchResponse>> {
+    let player = load_linked_player(&state, &user).await?;
+    let label = match body.role.trim() {
+        "auto" => None,
+        slug => Some(
+            CoachableRole::parse(slug)
+                .ok_or_else(|| {
+                    AppError::BadRequest(format!(
+                        "'{slug}' is not a position. Use one of: {}, or 'auto'.",
+                        CoachableRole::ALL.iter().map(|r| r.slug()).collect::<Vec<_>>().join(", ")
+                    ))
+                })?
+                // The estimator's own label for the position, so filters
+                // treat a correction exactly like an estimate of the same.
+                .stored_labels()[0],
+        ),
+    };
+    let updated =
+        repositories::r#match::set_role_by_player(&state.db, id, player.id, label).await?;
+    if !updated {
+        return Err(AppError::NotFound("Match not found.".into()));
+    }
+    get(State(state), EntitledUser(user), AppPath(id)).await
+}
+
+/// `POST /api/matches/:id/parse` response.
+#[derive(Serialize, ToSchema)]
+pub struct ParseRequestResponse {
+    pub requested: bool,
+    /// One line for the page.
+    pub note: &'static str,
+}
+
+/// One parse request per match per this many seconds: OpenDota counts each
+/// as ten calls.
+const PARSE_COOLDOWN_SECONDS: i64 = 3600;
+
+static PARSE_REQUESTS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<Uuid, DateTime<Utc>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// `POST /api/matches/:id/parse`
+///
+/// Ask OpenDota to parse this match's replay, for when no timeline exists.
+/// One match's own timeline, for the page's net worth and deaths chart.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MatchTimelineResponse {
+    /// False when there is no parsed replay (or the provider is down or not
+    /// configured). Then the lists are empty and `note` says why.
+    pub available: bool,
+    pub note: Option<String>,
+    pub duration_seconds: i32,
+    /// The player's net worth at each completed minute, index 0 = minute 0.
+    pub net_worth_per_minute: Vec<i32>,
+    /// The player's deaths, in time order.
+    pub deaths: Vec<TimelineDeath>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TimelineDeath {
+    pub time_seconds: i32,
+    pub killer_hero_name: Option<String>,
+}
+
+#[utoipa::path(
+    get, path = "/api/matches/{id}/timeline", tag = "matches",
+    summary = "One match's net worth curve and deaths",
+    description = "The player's own net worth per minute and death times from a parsed replay, via the match facts provider (cached). Never fails on a provider problem: `available` is false and `note` says why.",
+    security(("session" = [])),
+    params(
+        ("id" = Uuid, Path,
+            description = "Internal match id — the `id` from `/api/matches`.",
+            example = "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+    ),
+    responses(
+        (status = 200, description = "The timeline, or why there is none", body = MatchTimelineResponse),
+        (status = 404, description = "No such match, or it belongs to another player", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
+pub async fn timeline(
+    State(state): State<AppState>,
+    EntitledUser(user): EntitledUser,
+    AppPath(id): AppPath<Uuid>,
+) -> AppResult<Json<MatchTimelineResponse>> {
+    let player = load_linked_player(&state, &user).await?;
+    let match_ = repositories::r#match::find_owned(&state.db, id, player.id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Match not found.".into()))?;
+
+    let empty = |note: &str| MatchTimelineResponse {
+        available: false,
+        note: Some(note.to_string()),
+        duration_seconds: match_.duration_seconds,
+        net_worth_per_minute: Vec::new(),
+        deaths: Vec::new(),
+    };
+
+    let provider = state.match_facts.as_ref();
+    if !provider.is_configured() {
+        return Ok(Json(empty("No timeline provider is configured.")));
+    }
+    let facts = match provider
+        .get_match_facts(match_.match_id, player.dota_account_id)
+        .await
+    {
+        Ok(facts) => facts,
+        Err(e) => {
+            tracing::warn!(error = %e, match_id = match_.match_id, "match timeline unavailable");
+            return Ok(Json(empty("The timeline provider is unavailable right now.")));
+        }
+    };
+    if !facts.parsed || facts.player.net_worth_per_minute.is_empty() {
+        return Ok(Json(empty("This replay has not been parsed.")));
+    }
+
+    Ok(Json(MatchTimelineResponse {
+        available: true,
+        note: None,
+        duration_seconds: facts.duration_seconds,
+        net_worth_per_minute: facts.player.net_worth_per_minute,
+        deaths: facts
+            .deaths
+            .into_iter()
+            .map(|d| TimelineDeath {
+                time_seconds: d.time_seconds,
+                killer_hero_name: d.killer_hero_name,
+            })
+            .collect(),
+    }))
+}
+
+#[utoipa::path(
+    post, path = "/api/matches/{id}/parse", tag = "matches",
+    summary = "Request a replay parse",
+    description = "Submits a parse request to OpenDota for one of the player's matches, at most once an hour per match, and clears the cached \"not parsed yet\" answer so the next read asks again. A timeline appears once a parsed replay is available; that is not immediate and not guaranteed.",
+    security(("session" = [])),
+    params(
+        ("id" = Uuid, Path,
+            description = "Internal match id — the `id` from `/api/matches`.",
+            example = "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+    ),
+    responses(
+        (status = 200, description = "The request was submitted", body = ParseRequestResponse),
+        (status = 404, description = "No such match, or it belongs to another player", body = crate::error::ErrorBody),
+        (status = 429, description = "Already requested for this match within the hour", body = crate::error::ErrorBody),
+        (status = 502, description = "The provider refused or is unavailable", body = crate::error::ErrorBody),
+        (status = 402, description = "Trial expired and no active subscription", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
+        (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
+    )
+)]
+pub async fn request_parse(
+    State(state): State<AppState>,
+    EntitledUser(user): EntitledUser,
+    AppPath(id): AppPath<Uuid>,
+) -> AppResult<Json<ParseRequestResponse>> {
+    let player = load_linked_player(&state, &user).await?;
+    let match_ = repositories::r#match::find_owned(&state.db, id, player.id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Match not found.".into()))?;
+
+    {
+        let now = Utc::now();
+        let mut requested = PARSE_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
+        if requested
+            .get(&id)
+            .is_some_and(|at| now - *at < Duration::seconds(PARSE_COOLDOWN_SECONDS))
+        {
+            return Err(AppError::TooManyRequests(
+                "A parse was already requested for this match in the last hour.".into(),
+            ));
+        }
+        requested.insert(id, now);
+    }
+
+    state
+        .dota
+        .request_parse(match_.match_id)
+        .await
+        .map_err(|e| AppError::Upstream(e.to_string()))?;
+    if let Err(e) = repositories::match_facts::forget_unparsed(
+        &state.db,
+        match_.match_id,
+        player.dota_account_id,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "could not clear the unparsed timeline snapshot");
+    }
+
+    Ok(Json(ParseRequestResponse {
+        requested: true,
+        note: "Parse requested. The timeline appears once a parsed replay is available.",
+    }))
+}
+
 struct RowContext {
     baselines: rating::RatingBaselines,
     /// The median KDA of the newest ranked window, which is exactly what the
     /// momentum curve measures against. Shared so a row's delta and its point on
     /// that curve are one number.
     median_kda: f32,
+    /// Hero id -> (peer median GPM, peer median XPM).
+    peers: HashMap<i32, (Option<f32>, Option<f32>)>,
 }
 
 impl RowContext {
@@ -250,7 +542,42 @@ impl RowContext {
         Ok(Self {
             baselines: rating::RatingBaselines::from_rows(&baselines),
             median_kda: calibration::recent_ranked_median_kda(&ranked),
+            peers: HashMap::new(),
         })
+    }
+
+    /// Fill in peer medians for these heroes. Best effort: a provider outage
+    /// leaves a row without a reference, never fails the page.
+    async fn with_peers(mut self, state: &AppState, player: &DotaPlayer, heroes: &[i32]) -> Self {
+        let lookups = heroes.iter().copied().map(|hero_id| async move {
+            let context = BenchmarkContext {
+                hero_id,
+                role: None,
+                rank_tier: player.rank_tier,
+                bracket: None,
+                patch: None,
+            };
+            let lookup = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                state.benchmarks.get_distribution(&context),
+            )
+            .await;
+            let Ok(Ok(distribution)) = lookup else {
+                return None;
+            };
+            let median = |metric: BenchmarkMetric| {
+                distribution
+                    .buckets
+                    .get(&metric)
+                    .and_then(|b| percentile::value_at(0.5, b))
+            };
+            Some((
+                hero_id,
+                (median(BenchmarkMetric::GoldPerMin), median(BenchmarkMetric::XpPerMin)),
+            ))
+        });
+        self.peers = futures::future::join_all(lookups).await.into_iter().flatten().collect();
+        self
     }
 }
 
@@ -261,8 +588,6 @@ pub struct MatchListResponse {
     pub limit: i64,
     pub total: i64,
     pub total_pages: i64,
-    /// Which population this page was drawn from.
-    pub scope: &'static str,
     /// How this page was filtered and ordered — echoed back so a client can
     /// tell a page it asked for from one it inherited.
     pub filtered: bool,
@@ -271,6 +596,12 @@ pub struct MatchListResponse {
     pub mode: &'static str,
     /// What this population *can* be filtered by, from the player's own rows.
     pub filters: FilterOptions,
+    /// Matches in this mode before any hero, role or result filter.
+    pub mode_total: i64,
+    /// Stored Turbo games this mode leaves out.
+    pub hidden_turbo: i64,
+    /// Every other stored game this mode leaves out.
+    pub hidden_other: i64,
     /// Every match stored for this player, whatever mode, hero or result.
     ///
     /// The denominator behind "20 of 143": `total` describes the filtered list,
@@ -305,10 +636,6 @@ A read never waits on the Dota provider. When the stored history has gone stale 
         ("limit" = Option<i64>, Query,
             description = "Matches per page. Defaults to 20.",
             example = 20, minimum = 1, maximum = 100),
-        ("scope" = Option<String>, Query,
-            description = "`all` (default) lists every stored match. `competitive` lists only the \
-latest eligible Ranked and public All Pick matches — the same population `/api/stats` reads.",
-            example = "competitive"),
         ("hero_id" = Option<i32>, Query,
             description = "Show only matches on this hero. Omit for every hero.",
             example = 26, minimum = 1),
@@ -321,10 +648,12 @@ the five are excluded by any role filter rather than guessed at.",
             description = "`win`, `loss`, or `all` (default).",
             example = "loss"),
         ("mode" = Option<String>, Query,
-            description = "`all` (default), `ranked` — ranked matchmaking only, the lobby that \
-moves a medal — or `turbo`. Narrower than `scope` and a different question: this is which games \
-you want to *look at*, not which games may be analysed.",
-            example = "ranked"),
+            description = "`eligible` (default): Ranked and public All Pick, the newest \
+matches in the same window Coach, Heroes and Benchmark read. `turbo`: Turbo games only, \
+stored but never coached. `all`: every stored game. `ranked`: the ranked-lobby part of \
+`eligible`, the games that move a medal. Filter option counts are taken inside the chosen \
+mode.",
+            example = "turbo"),
         ("sort" = Option<String>, Query,
             description = "`newest` (default), `oldest`, `gpm_desc`, `gpm_asc` or `kda_desc`. \
 Matches with no computed metrics sort last under `kda_desc` rather than counting as zero.",
@@ -332,7 +661,7 @@ Matches with no computed metrics sort last under `kda_desc` rather than counting
     ),
     responses(
         (status = 200, description = "One page of matches, newest first unless sorted otherwise", body = MatchListResponse),
-        (status = 400, description = "An unknown scope, role, result, mode or sort value", body = crate::error::ErrorBody),
+        (status = 400, description = "An unknown role, result, mode or sort value", body = crate::error::ErrorBody),
         (status = 409, description = "No Dota account linked to this user yet", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
         (status = 500, description = "Database or internal failure", body = crate::error::ErrorBody),
@@ -345,46 +674,77 @@ pub async fn list(
 ) -> AppResult<Json<MatchListResponse>> {
     let player = load_linked_player(&state, &user).await?;
     let (page, limit) = validate_pagination(query.page, query.limit)?;
-    let scope = ListScope::parse(query.scope.as_deref())?;
-    let filter = query.filter()?;
+    let mode = ListMode::parse(query.mode.as_deref())?;
+    let mut filter = query.filter()?;
+    let filtered = filter.hero_id.is_some() || filter.won.is_some() || filter.role.is_some();
     let offset = (page - 1) * limit;
 
-    // The scope is the population; the filter is a view of it. Both are pushed
+    // The mode is the population; the filter is a view of it. Both are pushed
     // into SQL rather than trimmed afterwards, so `total` and `total_pages`
     // describe the filtered list and the client never has to hold a page it
     // was not shown.
-    let window = match scope {
-        ListScope::All => MatchScope::career(),
-        ListScope::Competitive => MatchScope::competitive(state.config.roles.analysis_match_limit),
+    let (window, mode_filter) = mode.population(state.config.roles.analysis_match_limit);
+    filter.mode = mode_filter;
+    let unfiltered = MatchFilter {
+        mode: mode_filter,
+        ..MatchFilter::default()
     };
 
-    let (matches, total) = if window.is_career() {
-        (
-            repositories::r#match::list_by_player(&state.db, player.id, &filter, limit, offset)
-                .await?,
-            repositories::r#match::count_by_player(&state.db, player.id, &filter).await?,
-        )
-    } else {
-        (
-            repositories::r#match::list_by_player_scoped(
-                &state.db, player.id, &window, &filter, limit, offset,
-            )
-            .await?,
-            repositories::r#match::count_by_player_scoped(&state.db, player.id, &window, &filter)
-                .await?,
-        )
+    let count = |f: MatchFilter| {
+        let (state, window) = (&state, &window);
+        async move {
+            if window.is_career() {
+                repositories::r#match::count_by_player(&state.db, player.id, &f).await
+            } else {
+                repositories::r#match::count_by_player_scoped(&state.db, player.id, window, &f)
+                    .await
+            }
+        }
     };
 
-    // An unfiltered career page has already counted exactly this, so the
-    // denominator is free in the common case.
-    let lifetime_games = if window.is_career() && filter.is_empty() {
-        total
+    let matches = if window.is_career() {
+        repositories::r#match::list_by_player(&state.db, player.id, &filter, limit, offset).await?
     } else {
+        repositories::r#match::list_by_player_scoped(
+            &state.db, player.id, &window, &filter, limit, offset,
+        )
+        .await?
+    };
+    let total = count(filter.clone()).await?;
+    let mode_total = if filtered { count(unfiltered).await? } else { total };
+
+    // What this mode leaves out, so the header can say "+M Turbo hidden".
+    let lifetime_games =
         repositories::r#match::count_by_player(&state.db, player.id, &MatchFilter::default())
+            .await?;
+    let hidden_turbo = match mode {
+        ListMode::Eligible | ListMode::Ranked => {
+            repositories::r#match::count_by_player(
+                &state.db,
+                player.id,
+                &MatchFilter {
+                    mode: ModeFilter::Turbo,
+                    ..MatchFilter::default()
+                },
+            )
             .await?
+        }
+        ListMode::Turbo | ListMode::All => 0,
     };
+    let hidden_other = (lifetime_games - mode_total - hidden_turbo).max(0);
 
-    let context = RowContext::load(&state, player.id).await?;
+    // Peer references for the heroes on this page, eligible games only.
+    let mut heroes: Vec<i32> = matches
+        .iter()
+        .filter(|m| eligibility::is_eligible(m.game_mode, m.lobby_type))
+        .map(|m| m.hero_id)
+        .collect();
+    heroes.sort_unstable();
+    heroes.dedup();
+    let context = RowContext::load(&state, player.id)
+        .await?
+        .with_peers(&state, &player, &heroes)
+        .await;
     let syncing = refresh_in_background(&state, &user, &player);
 
     Ok(Json(MatchListResponse {
@@ -396,11 +756,13 @@ pub async fn list(
         limit,
         total,
         total_pages: total_pages(total, limit),
-        scope: scope.slug(),
-        filtered: !filter.is_empty(),
+        filtered,
         sort: filter.sort.slug(),
-        mode: filter.mode.slug(),
-        filters: filter_options(&state, player.id, &window).await?,
+        mode: mode.slug(),
+        filters: filter_options(&state, player.id, &window, mode_filter).await?,
+        mode_total,
+        hidden_turbo,
+        hidden_other,
         lifetime_games,
         last_synced_at: player.last_synced_at,
         syncing,
@@ -483,9 +845,12 @@ async fn filter_options(
     state: &AppState,
     dota_player_id: Uuid,
     window: &MatchScope,
+    mode: ModeFilter,
 ) -> AppResult<FilterOptions> {
-    let heroes = repositories::r#match::hero_facets(&state.db, dota_player_id, window).await?;
-    let roles = repositories::r#match::role_facets(&state.db, dota_player_id, window).await?;
+    let heroes =
+        repositories::r#match::hero_facets(&state.db, dota_player_id, window, mode).await?;
+    let roles =
+        repositories::r#match::role_facets(&state.db, dota_player_id, window, mode).await?;
 
     // Several stored labels can map onto one coachable role, so they are summed
     // rather than listed — and a label that maps to none of the five is dropped,
@@ -627,8 +992,18 @@ pub async fn comparison(
         .unwrap_or_default();
     let match_values = figures.values();
 
+    // The personal baseline: this hero, this position, eligible games, never
+    // this match. The same scope the coach's match analysis reads, so "your
+    // average" is one number on the whole page.
+    let baseline = MatchScope::baseline(
+        match_.hero_id,
+        CoachableRole::from_stored(&match_.role),
+        match_.id,
+        state.config.roles.analysis_match_limit,
+    );
     let averages =
-        repositories::metrics::hero_averages(&state.db, player.id, match_.hero_id, &scope).await?;
+        repositories::metrics::hero_averages(&state.db, player.id, match_.hero_id, &baseline)
+            .await?;
     let average_values = averages.figures.values();
 
     let history =
@@ -738,7 +1113,28 @@ pub async fn comparison(
         .map(|d| d.segmented_by.clone())
         .unwrap_or_default();
 
+    let lane = repositories::metrics::laning_averages(&state.db, player.id, &baseline).await?;
+    let laning = crate::domain::match_comparison::laning(
+        match_.last_hits_at_10,
+        match_.gold_at_10,
+        lane.last_hits_at_10,
+        lane.lh_sample,
+        lane.gold_at_10,
+        lane.gold_sample,
+    );
+
+    let item_timings = crate::services::item_timing::for_match(
+        state.item_timing.as_ref(),
+        match_.hero_id,
+        match_.bkb_seconds,
+        match_.blink_seconds,
+        match_.midas_seconds,
+    )
+    .await;
+
     Ok(Json(MatchComparison {
+        item_timings,
+        laning,
         hero_id: match_.hero_id,
         bracket,
         comparable: eligible && distribution.is_some(),
@@ -825,77 +1221,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_scope_is_the_players_whole_history() {
-        assert_eq!(ListScope::parse(None).unwrap(), ListScope::All);
-        assert_eq!(ListScope::parse(Some("")).unwrap(), ListScope::All);
-        assert_eq!(ListScope::parse(Some("all")).unwrap(), ListScope::All);
+    fn the_default_mode_is_ranked_and_all_pick() {
+        assert_eq!(ListMode::parse(None).unwrap(), ListMode::Eligible);
+        assert_eq!(ListMode::parse(Some("")).unwrap(), ListMode::Eligible);
+        assert_eq!(ListMode::parse(Some(" eligible ")).unwrap(), ListMode::Eligible);
     }
 
     #[test]
-    fn the_competitive_scope_is_requested_by_name() {
-        assert_eq!(
-            ListScope::parse(Some("competitive")).unwrap(),
-            ListScope::Competitive
-        );
-        assert_eq!(
-            ListScope::parse(Some(" competitive ")).unwrap(),
-            ListScope::Competitive
-        );
+    fn ranked_turbo_and_all_are_requested_by_name() {
+        assert_eq!(ListMode::parse(Some("ranked")).unwrap(), ListMode::Ranked);
+        assert_eq!(ListMode::parse(Some("turbo")).unwrap(), ListMode::Turbo);
+        assert_eq!(ListMode::parse(Some("all")).unwrap(), ListMode::All);
     }
 
+    /// A value the server does not understand is rejected, never quietly
+    /// replaced with a population the caller did not ask for.
     #[test]
-    fn an_unknown_scope_is_rejected_rather_than_served_the_other_population() {
-        assert!(ListScope::parse(Some("ranked")).is_err());
-        assert!(ListScope::parse(Some("turbo")).is_err());
-        assert!(ListScope::parse(Some("Competitive")).is_err());
-    }
-
-    fn query(mode: Option<&str>) -> PageQuery {
-        PageQuery {
-            page: None,
-            limit: None,
-            scope: None,
-            hero_id: None,
-            role: None,
-            result: None,
-            mode: mode.map(str::to_string),
-            sort: None,
+    fn an_unknown_mode_is_rejected() {
+        for bad in ["competitive", "Turbo", "all_pick", "unranked"] {
+            assert!(ListMode::parse(Some(bad)).is_err(), "{bad}");
         }
     }
 
     #[test]
-    fn the_default_mode_is_every_kind_of_game() {
-        assert_eq!(query(None).filter().unwrap().mode, ModeFilter::All);
-        assert_eq!(query(Some("")).filter().unwrap().mode, ModeFilter::All);
-        assert_eq!(query(Some("all")).filter().unwrap().mode, ModeFilter::All);
-    }
+    fn each_mode_reads_its_own_population() {
+        // The default is the coaching window, so counts match Coach and Heroes.
+        let (window, filter) = ListMode::Eligible.population(100);
+        assert!(!window.is_career());
+        assert_eq!(filter, ModeFilter::All);
 
-    #[test]
-    fn ranked_and_turbo_are_requested_by_name() {
-        assert_eq!(
-            query(Some("ranked")).filter().unwrap().mode,
-            ModeFilter::Ranked
-        );
-        assert_eq!(
-            query(Some(" turbo ")).filter().unwrap().mode,
-            ModeFilter::Turbo
-        );
-    }
+        let (window, filter) = ListMode::Turbo.population(100);
+        assert!(window.is_career());
+        assert_eq!(filter, ModeFilter::Turbo);
 
-    /// Same rule as every other filter: a value the server does not understand
-    /// is rejected, never quietly replaced with a population the caller did not
-    /// ask for.
-    #[test]
-    fn an_unknown_mode_is_rejected() {
-        assert!(query(Some("Ranked")).filter().is_err());
-        assert!(query(Some("unranked")).filter().is_err());
-        assert!(query(Some("all_pick")).filter().is_err());
-    }
-
-    #[test]
-    fn a_mode_narrows_the_list_so_the_page_reports_itself_as_filtered() {
-        assert!(query(None).filter().unwrap().is_empty());
-        assert!(!query(Some("turbo")).filter().unwrap().is_empty());
+        let (window, filter) = ListMode::All.population(100);
+        assert!(window.is_career());
+        assert_eq!(filter, ModeFilter::All);
     }
 
     #[test]

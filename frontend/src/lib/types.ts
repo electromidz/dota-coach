@@ -299,6 +299,8 @@ export interface MatchView extends Match {
   position: CoachableRole | null;
   /** The position's label, or "Unknown". The one role taxonomy. */
   position_label: string;
+  /** How the position was decided. */
+  position_source: "user" | "lane" | "estimated" | "unknown";
   /** Peer medians on this hero in the player's bracket; eligible games only. */
   peer_gpm: number | null;
   peer_xpm: number | null;
@@ -639,8 +641,44 @@ export interface MatchComparisonResponse {
   pros: Highlight[];
   cons: Highlight[];
   suggestion: Suggestion | null;
+  /** Core items this match completed, against the peer median on the hero. */
+  item_timings: ItemTiming[];
+  /** Ten-minute laning figures against the player's own baseline. */
+  laning: LaningReading[];
   context: BenchmarkContextInfo;
   note: string | null;
+}
+
+export type TimingVerdict = "early" | "on_time" | "late";
+
+export interface ItemTiming {
+  item: "black_king_bar" | "blink_dagger" | "hand_of_midas";
+  label: string;
+  /** When this match completed it, seconds from the horn. */
+  seconds: number;
+  /** Null on a thin sample or an outage: then there is no comparison. */
+  peer_median_seconds: number | null;
+  peer_games: number;
+  verdict: TimingVerdict | null;
+}
+
+export interface LaningReading {
+  metric: "last_hits_at_10" | "gold_at_10";
+  label: string;
+  value: number;
+  /** Null below the sample floor. No peer reference exists for these. */
+  baseline: number | null;
+  baseline_sample: number;
+}
+
+/** One match's own net worth curve and deaths, from a parsed replay. */
+export interface MatchTimelineResponse {
+  available: boolean;
+  note: string | null;
+  duration_seconds: number;
+  /** Index 0 = minute 0. */
+  net_worth_per_minute: number[];
+  deaths: { time_seconds: number; killer_hero_name: string | null }[];
 }
 
 /* --- Coaching sessions, progress and conversation --------------------------- */
@@ -998,7 +1036,8 @@ export type InsightKind =
   | "recurring_pattern"
   | "recommendation"
   | "warning"
-  | "improvement";
+  | "improvement"
+  | "key_moment";
 
 export type AnalysisScope = "player" | "match" | "role";
 
@@ -1034,6 +1073,9 @@ export interface EvidenceFigure {
   previous: number | null;
   percent_change: number | null;
   status: ProgressStatus | null;
+  /** The player's own average on this hero and position, excluding the
+   *  match, for a single-match figure. */
+  baseline?: number | null;
 }
 
 /** A plan step made checkable. */
