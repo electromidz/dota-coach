@@ -190,6 +190,59 @@ async fn the_steam_login_flow_creates_an_account_a_dota_link_and_a_session() {
     app.cleanup(&[steam_id]).await;
 }
 
+/// The whole Steam round trip, as a browser would drive it.
+async fn steam_login(app: &support::TestApp) -> String {
+    let start = app.get("/api/auth/steam", None).await;
+    let nonce = start.cookie_value("dota_coach_login_state").unwrap();
+    let callback = app
+        .request(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/api/auth/steam/callback?state={nonce}&openid.mode=id_res"
+                ))
+                .header(header::COOKIE, format!("dota_coach_login_state={nonce}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(callback.location.as_deref(), Some("http://localhost:3000"));
+    callback
+        .cookie_value("dota_coach_session")
+        .expect("login must set a session cookie")
+}
+
+/// An expired trial is a paywall, never a lockout: the account must still be
+/// able to sign out and sign back in with Steam.
+#[tokio::test]
+async fn an_expired_account_can_log_out_and_log_back_in() {
+    let Some(db) = support::pool().await else {
+        return skip("an_expired_account_can_log_out_and_log_back_in");
+    };
+    let steam_id = unique_steam_id();
+    let app = app(
+        db,
+        MockDota::default().into(),
+        StubVerifier::accepting(steam_id),
+    );
+
+    let first = steam_login(&app).await;
+    app.expire_trial(steam_id).await;
+
+    let logout = app.post("/api/auth/logout", Some(&first)).await;
+    assert_eq!(logout.status, StatusCode::OK);
+
+    let second = steam_login(&app).await;
+    for path in ["/api/players/me", "/api/auth/me", "/api/billing"] {
+        let response = app.get(path, Some(&second)).await;
+        assert_eq!(response.status, StatusCode::OK, "{path}: {}", response.body);
+    }
+    let billing = app.get("/api/billing", Some(&second)).await.json();
+    assert_eq!(billing["entitlement"], "free");
+
+    app.cleanup(&[steam_id]).await;
+}
+
 #[tokio::test]
 async fn the_session_cookie_is_http_only() {
     let Some(db) = support::pool().await else {
