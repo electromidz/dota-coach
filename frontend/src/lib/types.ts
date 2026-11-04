@@ -1648,12 +1648,20 @@ export interface TrajectoryPoint {
   /** ISO 8601. */
   at: string;
   estimated: boolean;
+  /** No ranked game between the previous point and this one, days apart:
+   *  the line breaks here. */
+  gap_before: boolean;
 }
 
+/** Ranked games in the last `window_days` against `target_matches`. */
 export interface RankConfidence {
+  /** `matches_counted / target_matches`, capped at 100. */
   confidence_pct: number;
-  /** Ranked matches behind that percentage. */
+  /** Ranked games inside the window. */
   matches_counted: number;
+  target_matches: number;
+  window_days: number;
+  /** `matches_counted >= target_matches`. */
   is_calibrated: boolean;
 }
 
@@ -1804,8 +1812,8 @@ export interface EstablishedRank {
 export interface Methodology {
   win_base_mmr: number;
   loss_base_mmr: number;
-  confidence_per_match_pct: number;
-  confidence_threshold_pct: number;
+  confidence_window_days: number;
+  confidence_target_matches: number;
 }
 
 export interface CalibrationResponse {

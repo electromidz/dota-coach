@@ -1,10 +1,6 @@
 import { Icon } from "@/components/ui/Icon";
-import type {
-  BenchmarkResult,
-  Consistency,
-  EstablishedRank,
-  RankConfidence,
-} from "@/lib/types";
+import { InfoTip } from "@/components/ui/InfoTip";
+import type { BenchmarkResult, Consistency, EstablishedRank } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -16,6 +12,8 @@ import { cn } from "@/lib/utils";
  * own bracket's real peer distribution, and consistency is arithmetic over
  * stored matches.
  *
+ * Rank confidence is not repeated here: the header card shows it once.
+ *
  * Two things this deliberately does not show:
  *
  *   * **An MMR number.** Valve stopped publishing per-match MMR years ago, so
@@ -26,19 +24,14 @@ import { cn } from "@/lib/utils";
  */
 export function EstablishedRankPanel({
   rank,
-  confidence,
   consistency,
   metrics,
-  resemblancePct,
   className,
 }: {
   rank: EstablishedRank;
-  confidence: RankConfidence;
   consistency: Consistency | null;
   /** Placement against the player's own bracket, per metric. */
   metrics: BenchmarkResult[];
-  /** Share of resemblance for the player's own medal, when it was placed. */
-  resemblancePct: number | null;
   className?: string;
 }) {
   const ranked = metrics.filter((m) => m.percentile !== null);
@@ -57,27 +50,12 @@ export function EstablishedRankPanel({
           </span>
         ) : null}
 
-        {/* The share of resemblance for their own medal: "how much do my
-            numbers actually look like this rank's players". */}
-        {resemblancePct !== null ? (
-          <span className="rounded-full bg-keyword/15 px-2 py-0.5 font-mono text-xs font-semibold text-keyword">
-            {Math.round(resemblancePct)}% match
-          </span>
-        ) : null}
       </div>
 
       <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <Stat
-          label="Rank confidence"
-          value={`${Math.round(confidence.confidence_pct)}%`}
-          tone={confidence.is_calibrated ? "good" : "neutral"}
-          caption={`${confidence.matches_counted} ranked ${
-            confidence.matches_counted === 1 ? "match" : "matches"
-          }`}
-        />
-
-        <Stat
           label="Consistency"
+          info="How steady your KDA is from game to game in ranked matches: 100 means every game looks alike, 0 means they swing wildly. Not how good the games were."
           value={
             consistency ? `${Math.round(consistency.percentage)}%` : "Not yet"
           }
@@ -86,17 +64,6 @@ export function EstablishedRankPanel({
             consistency
               ? `over ${consistency.matches} matches`
               : "needs 10 ranked matches"
-          }
-        />
-
-        <Stat
-          label="Calibrated"
-          value={confidence.is_calibrated ? "Yes" : "Not yet"}
-          tone={confidence.is_calibrated ? "good" : "warn"}
-          caption={
-            confidence.is_calibrated
-              ? "rank is settled"
-              : "keep playing ranked"
           }
         />
       </dl>
@@ -138,19 +105,23 @@ export function EstablishedRankPanel({
 
 function Stat({
   label,
+  info,
   value,
   caption,
   tone,
 }: {
   label: string;
+  /** What the figure means, behind an (i). */
+  info?: string;
   value: string;
   caption: string;
   tone: "good" | "warn" | "neutral" | "muted";
 }) {
   return (
     <div className="flex flex-col gap-0.5 rounded-xl border border-glass-edge bg-surface-2/40 p-3">
-      <dt className="text-[0.625rem] uppercase tracking-widest text-ink-faint">
+      <dt className="flex items-center gap-1 text-[0.625rem] uppercase tracking-widest text-ink-faint">
         {label}
+        {info ? <InfoTip label={`About ${label.toLowerCase()}`}>{info}</InfoTip> : null}
       </dt>
       <dd
         className={cn(

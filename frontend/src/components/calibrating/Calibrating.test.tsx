@@ -34,11 +34,17 @@ const RESPONSE: CalibrationResponse = {
     leaderboard_rank: null,
     mmr: { low: 2926, high: 3079, midpoint: 3002 },
   },
-  confidence: { confidence_pct: 18, matches_counted: 12, is_calibrated: false },
+  confidence: {
+    confidence_pct: 60,
+    matches_counted: 12,
+    target_matches: 20,
+    window_days: 30,
+    is_calibrated: false,
+  },
   trajectory: [
-    { rank_tier: 44, label: "Archon 4", at: "2026-09-15T12:00:00Z", estimated: false },
-    { rank_tier: 45, label: "Archon 5", at: "2026-09-18T12:00:00Z", estimated: true },
-    { rank_tier: 45, label: "Archon 5", at: "2026-09-22T12:00:00Z", estimated: false },
+    { rank_tier: 44, label: "Archon 4", at: "2026-09-15T12:00:00Z", estimated: false, gap_before: false },
+    { rank_tier: 45, label: "Archon 5", at: "2026-09-18T12:00:00Z", estimated: true, gap_before: false },
+    { rank_tier: 45, label: "Archon 5", at: "2026-09-22T12:00:00Z", estimated: false, gap_before: false },
   ],
   streak: { count: 3, kind: "win" },
   momentum: {
@@ -59,8 +65,8 @@ const RESPONSE: CalibrationResponse = {
   methodology: {
     win_base_mmr: 30,
     loss_base_mmr: 25,
-    confidence_per_match_pct: 1.5,
-    confidence_threshold_pct: 30,
+    confidence_window_days: 30,
+    confidence_target_matches: 20,
   },
   calibration_version: 1,
 };
@@ -76,7 +82,7 @@ describe("Calibrating", () => {
     render(<Calibrating />);
 
     expect(await screen.findByText("Archon 5")).toBeDefined();
-    expect(screen.getByText("18%")).toBeDefined();
+    expect(screen.getByText(/12 \/ 20/)).toBeDefined();
     expect(screen.getByText("Win streak")).toBeDefined();
     expect(screen.getByText("Carry")).toBeDefined();
     expect(screen.getByText("Mid")).toBeDefined();
@@ -116,20 +122,21 @@ describe("Calibrating", () => {
     getCalibration.mockResolvedValue({
       ...RESPONSE,
       confidence: {
-        confidence_pct: 97,
-        matches_counted: 65,
+        confidence_pct: 100,
+        matches_counted: 21,
+        target_matches: 15,
+        window_days: 14,
         is_calibrated: true,
       },
-      methodology: { ...RESPONSE.methodology, confidence_threshold_pct: 42 },
     });
 
     render(<Calibrating />);
 
-    expect(await screen.findByText("97%")).toBeDefined();
+    // The server's target and window, not the usual 20 and 30.
+    expect(await screen.findByText(/21 \/ 15/)).toBeDefined();
     expect(screen.getByText("Calibrated")).toBeDefined();
-    // The threshold in the caption is the server's 42, not the model's usual 30.
     await waitFor(() =>
-      expect(screen.getByText(/Past the 42% mark/)).toBeDefined(),
+      expect(screen.getByText("Ranked games in the last 14 days")).toBeDefined(),
     );
   });
 });

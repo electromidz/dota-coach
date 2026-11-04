@@ -86,46 +86,29 @@ fn ranked_newest_first(matches: &[Match]) -> Vec<&Match> {
     ranked
 }
 
-/// How settled the player's rank is.
+/// How settled the player's rank is: ranked games in the last
+/// `confidence_window_days`, against `confidence_target_matches`.
 ///
-/// Counts ranked matches back from the most recent one, stopping at the first
-/// gap longer than `decay_days`: Valve lets an idle account's certainty decay,
-/// and games from before a six-month break are not evidence about where the
-/// player sits today. A player who has not queued ranked within that window at
-/// all reads as zero rather than as their pre-break total.
+/// A plain count a player can check against their own history. Only ranked
+/// games count, since nothing else moves a medal.
 pub fn rank_confidence(
     matches: &[Match],
     config: &CalibrationConfig,
     now: DateTime<Utc>,
 ) -> RankConfidence {
-    let ranked = ranked_newest_first(matches);
-    let decay = Duration::days(config.decay_days);
-
-    let counted = match ranked.first() {
-        // Nothing ranked at all, or nothing recent enough to still count.
-        None => 0,
-        Some(newest) if now.signed_duration_since(newest.started_at) > decay => 0,
-        Some(newest) => {
-            let mut counted = 1_i64;
-            let mut previous = newest.started_at;
-
-            for m in ranked.iter().skip(1) {
-                if previous.signed_duration_since(m.started_at) > decay {
-                    break;
-                }
-                counted += 1;
-                previous = m.started_at;
-            }
-            counted
-        }
-    };
-
-    let confidence_pct = (counted as f32 * config.confidence_per_match_pct).min(100.0);
+    let since = now - Duration::days(config.confidence_window_days);
+    let counted = matches
+        .iter()
+        .filter(|m| is_ranked(m) && m.started_at >= since && m.started_at <= now)
+        .count() as i64;
+    let target = config.confidence_target_matches.max(1);
 
     RankConfidence {
-        confidence_pct,
+        confidence_pct: (counted as f32 / target as f32 * 100.0).min(100.0),
         matches_counted: counted,
-        is_calibrated: confidence_pct >= config.confidence_threshold_pct,
+        target_matches: target,
+        window_days: config.confidence_window_days,
+        is_calibrated: counted >= target,
     }
 }
 
@@ -468,6 +451,7 @@ pub fn trajectory(
                     label: rank_label(i32::from(from.0)),
                     at: from.1,
                     estimated: false,
+                    gap_before: false,
                 },
             );
 
@@ -489,12 +473,30 @@ pub fn trajectory(
                     label: rank_label(i32::from(last.0)),
                     at: last.1,
                     estimated: false,
+                    gap_before: false,
                 },
             );
         }
     }
 
+    mark_idle_gaps(&mut points, &ranked);
     points
+}
+
+/// Points further apart than this with no ranked game between them are not
+/// joined by a line.
+pub const IDLE_GAP_DAYS: i64 = 3;
+
+/// Flag each point that follows an idle stretch: days apart from the
+/// previous point with no ranked game in between. A line across that stretch
+/// would show movement nobody played.
+fn mark_idle_gaps(points: &mut [TrajectoryPoint], ranked: &[&Match]) {
+    let gap = Duration::days(IDLE_GAP_DAYS);
+    for i in 1..points.len() {
+        let (from, to) = (points[i - 1].at, points[i].at);
+        let played = ranked.iter().any(|m| m.started_at > from && m.started_at < to);
+        points[i].gap_before = to - from > gap && !played;
+    }
 }
 
 /// The disclosed model, straight from configuration.
@@ -502,8 +504,8 @@ pub fn methodology(config: &CalibrationConfig) -> Methodology {
     Methodology {
         win_base_mmr: config.win_base_mmr,
         loss_base_mmr: config.loss_base_mmr,
-        confidence_per_match_pct: config.confidence_per_match_pct,
-        confidence_threshold_pct: config.confidence_threshold_pct,
+        confidence_window_days: config.confidence_window_days,
+        confidence_target_matches: config.confidence_target_matches,
     }
 }
 
@@ -590,6 +592,7 @@ fn segment(
                 label: rank_label(i32::from(rank_tier)),
                 at: m.started_at,
                 estimated: true,
+                gap_before: false,
             }
         })
         .collect()

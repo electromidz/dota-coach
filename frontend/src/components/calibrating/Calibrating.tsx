@@ -8,7 +8,6 @@ import { MatchHistoryTable } from "@/components/calibrating/MatchHistoryTable";
 import { MethodologyNote } from "@/components/calibrating/MethodologyNote";
 import { MomentumChart } from "@/components/calibrating/MomentumChart";
 import { RankCard } from "@/components/calibrating/RankCard";
-import { RankDistributionBars } from "@/components/calibrating/RankDistributionBars";
 import { RolePreferenceBars } from "@/components/calibrating/RolePreferenceBars";
 import { StreakBadge } from "@/components/calibrating/StreakBadge";
 import { TrajectoryChart } from "@/components/calibrating/TrajectoryChart";
@@ -122,7 +121,6 @@ export function Calibrating() {
       <RankCard
         rank={data.established_rank}
         confidence={data.confidence}
-        thresholdPct={data.methodology.confidence_threshold_pct}
       />
 
       <Card className="flex flex-col gap-4">
@@ -156,29 +154,9 @@ export function Calibrating() {
           <ScopeLine hero={brackets.hero_name} role={brackets.role_label} matches={brackets.sample} />
           <EstablishedRankPanel
             rank={data.established_rank}
-            confidence={data.confidence}
             consistency={brackets.consistency}
             metrics={brackets.own_bracket_metrics}
-            resemblancePct={
-              brackets.resemblance.find((r) => r.is_player_bracket)
-                ?.percentage ?? null
-            }
           />
-        </Card>
-      ) : null}
-
-      {brackets ? (
-        <Card className="flex flex-col gap-4">
-          <div>
-            <p className="font-semibold text-ink">Rank distribution</p>
-            <p className="mt-1 text-sm text-ink-muted">
-              How closely your {brackets.hero_name} figures resemble each
-              bracket&rsquo;s real peers.
-            </p>
-            <ScopeLine hero={brackets.hero_name} role={brackets.role_label} matches={brackets.sample} className="mt-1" />
-          </div>
-
-          <RankDistributionBars distribution={brackets} />
         </Card>
       ) : null}
 

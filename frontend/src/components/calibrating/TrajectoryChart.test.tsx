@@ -10,12 +10,14 @@ function point(
   day: number,
   estimated: boolean,
   label: string | null = `Tier ${tier}`,
+  gap_before = false,
 ): TrajectoryPoint {
   return {
     rank_tier: tier,
     label,
     at: `2026-09-${String(day).padStart(2, "0")}T12:00:00Z`,
     estimated,
+    gap_before,
   };
 }
 
@@ -73,6 +75,23 @@ describe("TrajectoryChart", () => {
     // And the two differ in radius as well as fill, so the distinction
     // survives a forced-colors mode that flattens fills.
     expect(measured[0].getAttribute("r")).not.toBe(modeled[0].getAttribute("r"));
+  });
+
+  it("draws no line across a stretch with no ranked games", () => {
+    const { container } = render(
+      <TrajectoryChart
+        points={[
+          point(44, 1, false),
+          point(44, 2, false),
+          point(43, 20, false, "Tier 43", true),
+        ]}
+      />,
+    );
+    const { lines, circles } = marks(container);
+
+    expect(circles).toHaveLength(3);
+    expect(lines).toHaveLength(1);
+    expect(screen.getByText(/no ranked games/)).toBeDefined();
   });
 
   it("keeps a segment between two recorded readings solid", () => {

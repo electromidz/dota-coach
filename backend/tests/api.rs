@@ -4735,12 +4735,14 @@ async fn calibration_reports_rank_confidence_streak_and_roles() {
         "Legend is nowhere near the Immortal ladder"
     );
 
-    // 10 ranked matches at 1.5% each.
+    // 10 ranked games in the last 30 days, against a target of 20.
     assert_eq!(body["confidence"]["matches_counted"], 10);
-    assert_eq!(body["confidence"]["confidence_pct"], 15.0);
+    assert_eq!(body["confidence"]["target_matches"], 20);
+    assert_eq!(body["confidence"]["window_days"], 30);
+    assert_eq!(body["confidence"]["confidence_pct"], 50.0);
     assert_eq!(
         body["confidence"]["is_calibrated"], false,
-        "15% is under the 30% threshold"
+        "10 / 20 is not settled"
     );
 
     assert!(body["streak"]["count"].as_i64().unwrap() >= 1);
@@ -4749,8 +4751,8 @@ async fn calibration_reports_rank_confidence_streak_and_roles() {
     // The disclosed model travels with the response so no client hardcodes it.
     assert_eq!(body["methodology"]["win_base_mmr"], 30.0);
     assert_eq!(body["methodology"]["loss_base_mmr"], 25.0);
-    assert_eq!(body["methodology"]["confidence_per_match_pct"], 1.5);
-    assert_eq!(body["methodology"]["confidence_threshold_pct"], 30.0);
+    assert_eq!(body["methodology"]["confidence_window_days"], 30);
+    assert_eq!(body["methodology"]["confidence_target_matches"], 20);
 
     app.cleanup(&[steam_id]).await;
 }

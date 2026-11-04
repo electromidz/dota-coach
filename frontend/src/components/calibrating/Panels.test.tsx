@@ -16,27 +16,43 @@ const RANK: EstablishedRank = {
 };
 
 const CONFIDENCE: RankConfidence = {
-  confidence_pct: 18,
+  confidence_pct: 60,
   matches_counted: 12,
+  target_matches: 20,
+  window_days: 30,
   is_calibrated: false,
 };
 
 const METHODOLOGY: Methodology = {
   win_base_mmr: 30,
   loss_base_mmr: 25,
-  confidence_per_match_pct: 1.5,
-  confidence_threshold_pct: 30,
+  confidence_window_days: 30,
+  confidence_target_matches: 20,
 };
 
 describe("RankCard", () => {
   it("states the medal and how many matches back the confidence", () => {
     render(
-      <RankCard rank={RANK} confidence={CONFIDENCE} thresholdPct={30} />,
+      <RankCard rank={RANK} confidence={CONFIDENCE} />,
     );
 
     expect(screen.getByText("Archon 5")).toBeDefined();
-    expect(screen.getByText("18%")).toBeDefined();
-    expect(screen.getByText(/12 recent ranked matches/)).toBeDefined();
+    expect(screen.getByText(/12 \/ 20/)).toBeDefined();
+    expect(screen.getByText(/Settling/)).toBeDefined();
+    expect(screen.getByText("Ranked games in the last 30 days")).toBeDefined();
+  });
+
+  it("reads a count past the target as settled, without capping the count", () => {
+    render(
+      <RankCard
+        rank={RANK}
+        confidence={{ ...CONFIDENCE, matches_counted: 21, confidence_pct: 100, is_calibrated: true }}
+      />,
+    );
+
+    expect(screen.getByText(/21 \/ 20/)).toBeDefined();
+    expect(screen.getByText(/Settled/)).toBeDefined();
+    expect(screen.getByRole("meter").getAttribute("aria-valuenow")).toBe("21");
   });
 
   /**
@@ -49,7 +65,7 @@ describe("RankCard", () => {
       <RankCard
         rank={{ rank_tier: null, label: null, leaderboard_rank: null, mmr: null }}
         confidence={{ ...CONFIDENCE, matches_counted: 0, confidence_pct: 0 }}
-        thresholdPct={30}
+       
       />,
     );
 
@@ -65,7 +81,7 @@ describe("RankCard", () => {
    * sits, which nothing public can say.
    */
   it("shows the MMR estimate with the band it came from", () => {
-    render(<RankCard rank={RANK} confidence={CONFIDENCE} thresholdPct={30} />);
+    render(<RankCard rank={RANK} confidence={CONFIDENCE} />);
 
     expect(screen.getByText(/~3,002/)).toBeDefined();
     expect(screen.getByText(/2,926.3,079/)).toBeDefined();
@@ -82,7 +98,7 @@ describe("RankCard", () => {
           mmr: { low: 5421, high: null, midpoint: 5421 },
         }}
         confidence={CONFIDENCE}
-        thresholdPct={30}
+       
       />,
     );
 
@@ -94,7 +110,7 @@ describe("RankCard", () => {
       <RankCard
         rank={{ rank_tier: null, label: null, leaderboard_rank: null, mmr: null }}
         confidence={CONFIDENCE}
-        thresholdPct={30}
+       
       />,
     );
 
@@ -105,8 +121,8 @@ describe("RankCard", () => {
     render(
       <RankCard
         rank={RANK}
-        confidence={{ ...CONFIDENCE, confidence_pct: 97, is_calibrated: true }}
-        thresholdPct={30}
+        confidence={{ ...CONFIDENCE, matches_counted: 24, confidence_pct: 100, is_calibrated: true }}
+       
       />,
     );
 
@@ -123,7 +139,7 @@ describe("RankCard", () => {
           mmr: { low: 5421, high: null, midpoint: 5421 },
         }}
         confidence={CONFIDENCE}
-        thresholdPct={30}
+       
       />,
     );
 
@@ -183,16 +199,16 @@ describe("MethodologyNote", () => {
         methodology={{
           win_base_mmr: 27,
           loss_base_mmr: 19,
-          confidence_per_match_pct: 2,
-          confidence_threshold_pct: 42,
+          confidence_window_days: 14,
+          confidence_target_matches: 12,
         }}
       />,
     );
 
     expect(screen.getByText("+27")).toBeDefined();
     expect(screen.getByText("−19")).toBeDefined();
-    expect(screen.getByText("2%")).toBeDefined();
-    expect(screen.getByText("42%")).toBeDefined();
+    expect(screen.getByText("14")).toBeDefined();
+    expect(screen.getByText(/12 settles it/)).toBeDefined();
 
     // And not the defaults it would show if the numbers were baked in.
     expect(screen.queryByText("+30")).toBeNull();

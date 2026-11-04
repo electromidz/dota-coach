@@ -367,11 +367,10 @@ impl TrainingConfig {
 
 /// Rank calibration tuning.
 ///
-/// Two of these are Valve's, two are ours, and the difference matters.
-///
-/// `confidence_per_match_pct` and `confidence_threshold_pct` describe the Rank
-/// Confidence meter the game itself shows, so they are set to match observed
-/// behaviour and should only move if Valve's does.
+/// `confidence_window_days` and `confidence_target_matches` define how
+/// settled a rank is: ranked games in the last N days against a target
+/// ("21 / 20 · Settled"). A count a player can check, rather than a
+/// percentage reverse-engineered from a meter Valve does not document.
 ///
 /// `win_base_mmr` and `loss_base_mmr` are **ours**: Valve stopped publishing
 /// per-match MMR, so no public source can recover a real delta. They
@@ -381,11 +380,11 @@ impl TrainingConfig {
 /// can never disagree.
 #[derive(Clone, Debug)]
 pub struct CalibrationConfig {
-    pub confidence_per_match_pct: f32,
-    pub confidence_threshold_pct: f32,
-    /// A gap this long with no ranked match resets the confidence count —
-    /// Valve decays an idle account's certainty, and a player returning after
-    /// six months is not still calibrated on games from before the break.
+    /// Ranked games inside this many days count toward confidence.
+    pub confidence_window_days: i64,
+    /// That many ranked games in the window and the rank reads as settled.
+    pub confidence_target_matches: i64,
+    /// How far back the Rank screen reads matches and rank readings.
     pub decay_days: i64,
     pub win_base_mmr: f32,
     pub loss_base_mmr: f32,
@@ -394,8 +393,8 @@ pub struct CalibrationConfig {
 impl CalibrationConfig {
     fn from_env() -> Result<Self, ConfigError> {
         let config = Self {
-            confidence_per_match_pct: parsed("CALIB_CONFIDENCE_PER_MATCH", 1.5)?,
-            confidence_threshold_pct: parsed("CALIB_CONFIDENCE_THRESHOLD", 30.0)?,
+            confidence_window_days: parsed("CALIB_CONFIDENCE_WINDOW_DAYS", 30)?,
+            confidence_target_matches: parsed("CALIB_CONFIDENCE_TARGET", 20)?,
             decay_days: parsed("CALIB_DECAY_DAYS", 180)?,
             win_base_mmr: parsed("CALIB_WIN_BASE_MMR", 30.0)?,
             loss_base_mmr: parsed("CALIB_LOSS_BASE_MMR", 25.0)?,
@@ -406,19 +405,11 @@ impl CalibrationConfig {
     }
 }
 
-/// A zero or negative value here does not tune the model, it breaks it: zero
-/// percent per match never calibrates anyone, and a negative base MMR inverts
-/// what a win means.
+/// A zero or negative value here does not tune the model, it breaks it: a
+/// zero target settles everyone, and a negative base MMR inverts what a win
+/// means.
 fn validate_calibration(config: &CalibrationConfig) -> Result<(), ConfigError> {
     let named = [
-        (
-            "CALIB_CONFIDENCE_PER_MATCH",
-            config.confidence_per_match_pct,
-        ),
-        (
-            "CALIB_CONFIDENCE_THRESHOLD",
-            config.confidence_threshold_pct,
-        ),
         ("CALIB_WIN_BASE_MMR", config.win_base_mmr),
         ("CALIB_LOSS_BASE_MMR", config.loss_base_mmr),
     ];
@@ -432,10 +423,22 @@ fn validate_calibration(config: &CalibrationConfig) -> Result<(), ConfigError> {
         }
     }
 
-    if config.confidence_threshold_pct > 100.0 {
+    if config.confidence_window_days <= 0 {
         return Err(ConfigError::Invalid(
-            "CALIB_CONFIDENCE_THRESHOLD",
-            "a threshold above 100% can never be reached".into(),
+            "CALIB_CONFIDENCE_WINDOW_DAYS",
+            "must be at least one day".into(),
+        ));
+    }
+    if config.confidence_target_matches <= 0 {
+        return Err(ConfigError::Invalid(
+            "CALIB_CONFIDENCE_TARGET",
+            "must be at least one match".into(),
+        ));
+    }
+    if config.decay_days < config.confidence_window_days {
+        return Err(ConfigError::Invalid(
+            "CALIB_DECAY_DAYS",
+            "must cover at least the confidence window".into(),
         ));
     }
     if config.decay_days <= 0 {
@@ -987,10 +990,9 @@ mod tests {
     fn calibration_defaults_match_the_meter_the_game_shows() {
         let calibration = CalibrationConfig::from_env().unwrap();
 
-        // 1.5% per ranked match, calibrated at 30% — Valve's model, so these
-        // should only move if the game's does.
-        assert_eq!(calibration.confidence_per_match_pct, 1.5);
-        assert_eq!(calibration.confidence_threshold_pct, 30.0);
+        // Settled at 20 ranked games in the last 30 days.
+        assert_eq!(calibration.confidence_window_days, 30);
+        assert_eq!(calibration.confidence_target_matches, 20);
         assert_eq!(calibration.decay_days, 180);
         assert_eq!(calibration.win_base_mmr, 30.0);
         assert_eq!(calibration.loss_base_mmr, 25.0);
@@ -999,20 +1001,20 @@ mod tests {
     #[test]
     fn calibration_values_that_break_the_model_fail_the_boot() {
         let valid = CalibrationConfig {
-            confidence_per_match_pct: 1.5,
-            confidence_threshold_pct: 30.0,
+            confidence_window_days: 30,
+            confidence_target_matches: 20,
             decay_days: 180,
             win_base_mmr: 30.0,
             loss_base_mmr: 25.0,
         };
         assert!(validate_calibration(&valid).is_ok());
 
-        // Zero percent per match never calibrates anybody.
-        let mut stuck = valid.clone();
-        stuck.confidence_per_match_pct = 0.0;
+        // A zero target settles everybody.
+        let mut free = valid.clone();
+        free.confidence_target_matches = 0;
         assert!(matches!(
-            validate_calibration(&stuck),
-            Err(ConfigError::Invalid("CALIB_CONFIDENCE_PER_MATCH", _))
+            validate_calibration(&free),
+            Err(ConfigError::Invalid("CALIB_CONFIDENCE_TARGET", _))
         ));
 
         // A negative base inverts what winning means.
@@ -1023,12 +1025,19 @@ mod tests {
             Err(ConfigError::Invalid("CALIB_WIN_BASE_MMR", _))
         ));
 
-        // A threshold nobody can reach is a meter that never fills.
-        let mut unreachable = valid.clone();
-        unreachable.confidence_threshold_pct = 120.0;
+        let mut no_window = valid.clone();
+        no_window.confidence_window_days = 0;
         assert!(matches!(
-            validate_calibration(&unreachable),
-            Err(ConfigError::Invalid("CALIB_CONFIDENCE_THRESHOLD", _))
+            validate_calibration(&no_window),
+            Err(ConfigError::Invalid("CALIB_CONFIDENCE_WINDOW_DAYS", _))
+        ));
+
+        // The screen must read at least the games the count is made from.
+        let mut short = valid.clone();
+        short.decay_days = 7;
+        assert!(matches!(
+            validate_calibration(&short),
+            Err(ConfigError::Invalid("CALIB_DECAY_DAYS", _))
         ));
 
         let mut no_window = valid.clone();

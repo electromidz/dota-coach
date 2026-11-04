@@ -35,7 +35,8 @@ pub struct RankSnapshot {
     pub captured_at: DateTime<Utc>,
 }
 
-/// How settled the player's rank is, on Valve's 0→100% scale.
+/// How settled the player's rank is: ranked games in the last
+/// `window_days` against `target_matches` ("21 / 20 · Settled").
 ///
 /// Counted from **ranked** matches only. That is narrower than the
 /// `eligibility` module's competitive population, which also admits unranked
@@ -44,10 +45,16 @@ pub struct RankSnapshot {
 /// not share.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, ToSchema)]
 pub struct RankConfidence {
+    /// `matches_counted / target_matches`, capped at 100. For a progress bar.
     pub confidence_pct: f32,
-    /// Ranked matches behind that percentage. Published so a low confidence
-    /// reads as "play more", not as a verdict on the player.
+    /// Ranked matches inside the window. Published so a low confidence reads
+    /// as "play more", not as a verdict on the player.
     pub matches_counted: i64,
+    /// How many ranked games settle a rank.
+    pub target_matches: i64,
+    /// How far back the count reaches, in days.
+    pub window_days: i64,
+    /// `matches_counted >= target_matches`.
     pub is_calibrated: bool,
 }
 
@@ -68,6 +75,10 @@ pub struct TrajectoryPoint {
     /// it renders a measured one is presenting a guess as Valve's number, so
     /// the field is never defaulted and never dropped.
     pub estimated: bool,
+    /// No ranked game was played between the previous point and this one,
+    /// and they are days apart. Charts break the line here instead of
+    /// drawing movement across a stretch nobody played.
+    pub gap_before: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
@@ -337,8 +348,8 @@ pub struct RankDistribution {
 pub struct Methodology {
     pub win_base_mmr: f32,
     pub loss_base_mmr: f32,
-    pub confidence_per_match_pct: f32,
-    pub confidence_threshold_pct: f32,
+    pub confidence_window_days: i64,
+    pub confidence_target_matches: i64,
 }
 
 #[cfg(test)]

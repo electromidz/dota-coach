@@ -1,11 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import type {
-  BenchmarkResult,
-  EstablishedRank,
-  RankConfidence,
-} from "@/lib/types";
+import type { BenchmarkResult, EstablishedRank } from "@/lib/types";
 
 import { EstablishedRankPanel } from "./EstablishedRankPanel";
 
@@ -14,12 +10,6 @@ const RANK: EstablishedRank = {
   label: "Archon 5",
   leaderboard_rank: null,
   mmr: { low: 2926, high: 3079, midpoint: 3002 },
-};
-
-const CONFIDENCE: RankConfidence = {
-  confidence_pct: 97,
-  matches_counted: 65,
-  is_calibrated: true,
 };
 
 function metric(
@@ -48,27 +38,32 @@ function panel(props: Partial<Parameters<typeof EstablishedRankPanel>[0]> = {}) 
   return (
     <EstablishedRankPanel
       rank={RANK}
-      confidence={CONFIDENCE}
       consistency={{ percentage: 72, matches: 24 }}
       metrics={[
         metric("gold_per_min", "Gold per minute", 70),
         metric("kda", "KDA", 55),
       ]}
-      resemblancePct={46}
       {...props}
     />
   );
 }
 
 describe("EstablishedRankPanel", () => {
-  it("leads with the medal, its match share, and the confidence behind it", () => {
+  it("leads with the medal, and leaves confidence to the rank card", () => {
     render(panel());
 
     expect(screen.getByText("Official established rank")).toBeDefined();
     expect(screen.getByText("Archon 5")).toBeDefined();
-    expect(screen.getByText("46% match")).toBeDefined();
-    expect(screen.getByText("97%")).toBeDefined();
-    expect(screen.getByText(/65 ranked matches/)).toBeDefined();
+    // Shown once on the page, in the header card; no "% match" badge.
+    expect(screen.queryByText(/Rank confidence/)).toBeNull();
+    expect(screen.queryByText("Calibrated")).toBeNull();
+    expect(screen.queryByText(/% match/)).toBeNull();
+  });
+
+  it("defines consistency behind an (i)", () => {
+    render(panel());
+
+    expect(screen.getByRole("button", { name: /About consistency/ })).toBeDefined();
   });
 
   it("reports consistency with the sample behind it", () => {
@@ -121,7 +116,6 @@ describe("EstablishedRankPanel", () => {
     render(
       panel({
         rank: { rank_tier: null, label: null, leaderboard_rank: null, mmr: null },
-        resemblancePct: null,
       }),
     );
 

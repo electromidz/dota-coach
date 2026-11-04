@@ -6,8 +6,8 @@ use crate::domain::eligibility::{game_mode, lobby_type};
 
 fn config() -> CalibrationConfig {
     CalibrationConfig {
-        confidence_per_match_pct: 1.5,
-        confidence_threshold_pct: 30.0,
+        confidence_window_days: 30,
+        confidence_target_matches: 20,
         decay_days: 180,
         win_base_mmr: 30.0,
         loss_base_mmr: 25.0,
@@ -90,52 +90,61 @@ fn no_matches_is_no_confidence_rather_than_a_default() {
 }
 
 #[test]
-fn exactly_at_the_threshold_counts_as_calibrated() {
-    // 20 matches * 1.5% = 30.0%, the configured threshold exactly.
+fn twenty_ranked_games_in_thirty_days_is_settled() {
+    // One a day for 20 days, read on day 20.
     let matches: Vec<Match> = (0..20).map(|i| ranked(i, true, day(i))).collect();
 
     let confidence = rank_confidence(&matches, &config(), day(20));
 
     assert_eq!(confidence.matches_counted, 20);
-    assert_eq!(confidence.confidence_pct, 30.0);
-    assert!(
-        confidence.is_calibrated,
-        "the boundary is inclusive: 30% is calibrated, not one match short"
-    );
+    assert_eq!(confidence.target_matches, 20);
+    assert_eq!(confidence.window_days, 30);
+    assert_eq!(confidence.confidence_pct, 100.0);
+    assert!(confidence.is_calibrated, "the boundary is inclusive: 20 / 20 is settled");
 }
 
 #[test]
-fn confidence_is_capped_at_one_hundred_percent() {
-    let matches: Vec<Match> = (0..200).map(|i| ranked(i, true, day(i))).collect();
+fn one_short_of_the_target_is_not_settled() {
+    let matches: Vec<Match> = (0..19).map(|i| ranked(i, true, day(i))).collect();
 
-    let confidence = rank_confidence(&matches, &config(), day(200));
+    let confidence = rank_confidence(&matches, &config(), day(20));
 
+    assert_eq!(confidence.matches_counted, 19);
+    assert_eq!(confidence.confidence_pct, 95.0);
+    assert!(!confidence.is_calibrated);
+}
+
+#[test]
+fn the_count_can_pass_the_target_but_the_bar_stops_at_full() {
+    let matches: Vec<Match> = (0..21).map(|i| ranked(i, true, day(i))).collect();
+
+    let confidence = rank_confidence(&matches, &config(), day(21));
+
+    assert_eq!(confidence.matches_counted, 21, "\"21 / 20\" is shown as it is");
     assert_eq!(confidence.confidence_pct, 100.0);
     assert!(confidence.is_calibrated);
 }
 
 #[test]
-fn a_gap_longer_than_the_decay_window_resets_the_count() {
-    // Ten games, a seven-month break, then three more.
+fn games_older_than_the_window_do_not_count() {
+    // Ten games two months ago, three this week.
     let mut matches: Vec<Match> = (0..10).map(|i| ranked(i, true, day(i))).collect();
-    matches.extend((0..3).map(|i| ranked(100 + i, true, day(220 + i))));
+    matches.extend((0..3).map(|i| ranked(100 + i, true, day(60 + i))));
 
-    let confidence = rank_confidence(&matches, &config(), day(223));
+    let confidence = rank_confidence(&matches, &config(), day(63));
 
-    assert_eq!(
-        confidence.matches_counted, 3,
-        "games from before the break are not evidence about where the player sits now"
-    );
+    assert_eq!(confidence.matches_counted, 3);
+    assert!(!confidence.is_calibrated);
 }
 
 #[test]
-fn an_account_idle_past_the_decay_window_reads_as_zero() {
+fn an_account_idle_past_the_window_reads_as_zero() {
     let matches: Vec<Match> = (0..40).map(|i| ranked(i, true, day(i))).collect();
 
-    // Every match is real, but the newest is a year old.
     let confidence = rank_confidence(&matches, &config(), day(400));
 
     assert_eq!(confidence.matches_counted, 0);
+    assert_eq!(confidence.confidence_pct, 0.0);
     assert!(!confidence.is_calibrated);
 }
 
@@ -442,14 +451,14 @@ fn unranked_games_do_not_appear_on_the_ranked_trajectory() {
 fn the_methodology_block_reports_the_configuration_actually_in_force() {
     let mut config = config();
     config.win_base_mmr = 27.0;
-    config.confidence_threshold_pct = 42.0;
+    config.confidence_target_matches = 25;
 
     let m = methodology(&config);
 
     assert_eq!(m.win_base_mmr, 27.0);
     assert_eq!(m.loss_base_mmr, 25.0);
-    assert_eq!(m.confidence_threshold_pct, 42.0);
-    assert_eq!(m.confidence_per_match_pct, 1.5);
+    assert_eq!(m.confidence_target_matches, 25);
+    assert_eq!(m.confidence_window_days, 30);
 }
 
 #[test]
@@ -945,4 +954,35 @@ fn a_wildly_swingy_record_scores_lower_than_a_steady_one() {
         "swingy {swingy_pct} should sit below steady {steady_pct}"
     );
     assert!((0.0..=100.0).contains(&swingy_pct));
+}
+
+// ---------------------------------------------------------------------------
+// idle gaps
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_stretch_with_no_ranked_games_breaks_the_line() {
+    // Readings on day 0 and day 1, then nothing until day 20.
+    let snapshots = vec![
+        snapshot(Some(45), day(0)),
+        snapshot(Some(45), day(1)),
+        snapshot(Some(44), day(20)),
+    ];
+
+    let points = trajectory(&snapshots, &[], &config());
+
+    assert_eq!(points.len(), 3);
+    assert!(!points[0].gap_before);
+    assert!(!points[1].gap_before, "a day apart is not a gap");
+    assert!(points[2].gap_before, "nineteen idle days are not drawn as movement");
+}
+
+#[test]
+fn days_apart_but_with_games_played_is_not_a_gap() {
+    let snapshots = vec![snapshot(Some(45), day(0)), snapshot(Some(46), day(10))];
+    let matches: Vec<Match> = (1..10).map(|i| ranked(i, true, day(i))).collect();
+
+    let points = trajectory(&snapshots, &matches, &config());
+
+    assert!(points.iter().all(|p| !p.gap_before));
 }

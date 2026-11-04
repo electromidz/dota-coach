@@ -61,18 +61,25 @@ export function TrajectoryChart({
   // the two ends that touch a reading are not. Drawing a single polyline
   // could only be all-solid or all-dashed, which is exactly the claim this
   // chart must not make.
-  const segments = points.slice(1).map((point, i) => {
+  //
+  // No segment at all across an idle stretch: a line there would show
+  // movement in days nobody played.
+  const segments = points.slice(1).flatMap((point, i) => {
+    if (point.gap_before) return [];
     const previous = points[i];
-    return {
-      key: `${previous.at}-${point.at}`,
-      x1: x(i),
-      y1: y(previous.rank_tier),
-      x2: x(i + 1),
-      y2: y(point.rank_tier),
-      // A segment is only as certain as its least certain end.
-      estimated: previous.estimated || point.estimated,
-    };
+    return [
+      {
+        key: `${previous.at}-${point.at}`,
+        x1: x(i),
+        y1: y(previous.rank_tier),
+        x2: x(i + 1),
+        y2: y(point.rank_tier),
+        // A segment is only as certain as its least certain end.
+        estimated: previous.estimated || point.estimated,
+      },
+    ];
   });
+  const hasGaps = points.some((p) => p.gap_before);
 
   const measured = points.filter((p) => !p.estimated);
   const modeled = points.length - measured.length;
@@ -144,6 +151,7 @@ export function TrajectoryChart({
             <Swatch estimated />
             Estimated
           </li>
+          {hasGaps ? <li className="text-ink-faint">Break · no ranked games</li> : null}
         </ul>
 
         {/* Where the line runs from and to. Without this the reader sees a
