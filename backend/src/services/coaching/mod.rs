@@ -14,6 +14,7 @@
 
 pub mod chat;
 pub mod evidence;
+pub mod findings;
 pub mod goals;
 pub mod numbers;
 pub mod prompt;

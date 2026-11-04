@@ -29,6 +29,7 @@ fn ranked(match_id: i64, won: bool, at: DateTime<Utc>) -> Match {
         hero_id: 1,
         hero_name: "Anti-Mage".into(),
         role: "Carry".into(),
+        role_source: "estimated".into(),
         lane_role: Some(1),
         won,
         duration_seconds: 2_400,

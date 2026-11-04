@@ -12,6 +12,8 @@ use dota_coach_backend::services::billing;
 use dota_coach_backend::services::dota::opendota::OpenDotaProvider;
 use dota_coach_backend::services::hero_kit::opendota::OpenDotaHeroKitProvider;
 use dota_coach_backend::services::hero_kit::HeroKitProvider;
+use dota_coach_backend::services::item_timing::opendota::OpenDotaItemTimingProvider;
+use dota_coach_backend::services::item_timing::ItemTimingProvider;
 use dota_coach_backend::services::hero_meta::opendota::OpenDotaHeroMetaProvider;
 use dota_coach_backend::services::llm::openai::OpenAiLlmProvider;
 use dota_coach_backend::services::match_facts::stratz::StratzMatchFactsProvider;
@@ -107,6 +109,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     let hero_kit: Arc<dyn HeroKitProvider> = hero_kit;
+    let item_timing: Arc<dyn ItemTimingProvider> = OpenDotaItemTimingProvider::new(
+        reqwest::Client::new(),
+        &config.dota.base_url,
+        config.dota.api_key.clone(),
+    );
 
     // Single-match analysis is the only caller. Optional in the same way billing
     // is: without a token the product runs in full and one section of one page
@@ -176,6 +183,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             benchmarks,
             hero_meta,
             hero_kit,
+            item_timing,
             match_facts,
             llm,
             payments,

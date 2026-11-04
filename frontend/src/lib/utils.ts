@@ -73,6 +73,19 @@ export function timeAgo(iso: string, now: Date = new Date()): string {
   return say(Math.floor(days / 365), "y");
 }
 
+/** "Sep 28, 2026 · 17:53" in the viewer's timezone, no seconds. */
+export function formatMatchDate(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const day = date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  const time = date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  return `${day} · ${time}`;
+}
+
 /** The full date and time, for the tooltip behind a relative time. */
 export function fullDate(iso: string): string {
   const date = new Date(iso);

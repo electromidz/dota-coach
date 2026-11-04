@@ -17,6 +17,7 @@ pub mod conversation;
 pub mod eligibility;
 pub mod event;
 pub mod hero;
+pub mod item_timing;
 pub mod r#match;
 pub mod match_comparison;
 pub mod match_facts;

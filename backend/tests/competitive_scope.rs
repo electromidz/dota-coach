@@ -342,27 +342,25 @@ async fn the_competitive_match_list_serves_the_same_population_as_the_statistics
 
     let (app, session) = seed_app(db, history, 100).await;
 
-    // The default list is the player's real history: their Turbo games are
-    // theirs, and hiding them from their own match list would be odd.
-    let all = app
+    // The default list is Ranked + All Pick: the same population the
+    // statistics read. Turbo games stay stored and one click away.
+    let competitive = app
         .get("/api/matches?limit=100", Some(&session.token))
         .await
         .json();
-    assert_eq!(all["total"], 20);
-    assert_eq!(all["scope"], "all");
+    assert_eq!(competitive["total"], 12);
+    assert_eq!(competitive["mode"], "eligible");
+    assert_eq!(competitive["hidden_turbo"], 8);
+    for m in competitive["matches"].as_array().unwrap() {
+        assert_ne!(m["game_mode"], 23, "a Turbo match reached the default list");
+    }
 
-    let competitive = app
-        .get(
-            "/api/matches?limit=100&scope=competitive",
-            Some(&session.token),
-        )
+    let all = app
+        .get("/api/matches?limit=100&mode=all", Some(&session.token))
         .await
         .json();
-    assert_eq!(competitive["total"], 12);
-    assert_eq!(competitive["scope"], "competitive");
-    for m in competitive["matches"].as_array().unwrap() {
-        assert_ne!(m["game_mode"], 23, "a Turbo match reached the trend data");
-    }
+    assert_eq!(all["total"], 20);
+    assert_eq!(all["mode"], "all");
 
     // The number the dashboard charts and the number it prints must agree.
     let stats = app.get("/api/stats", Some(&session.token)).await.json();
@@ -372,15 +370,15 @@ async fn the_competitive_match_list_serves_the_same_population_as_the_statistics
 }
 
 #[tokio::test]
-async fn an_unknown_list_scope_is_rejected() {
+async fn an_unknown_list_mode_is_rejected() {
     let Some(db) = support::pool().await else {
-        return skip("an_unknown_list_scope_is_rejected");
+        return skip("an_unknown_list_mode_is_rejected");
     };
 
     let (app, session) = seed_app(db, batch(1_000, 3, RANKED_ALL_PICK, Lane::Carry, 2), 100).await;
 
     let response = app
-        .get("/api/matches?scope=ranked", Some(&session.token))
+        .get("/api/matches?mode=competitive", Some(&session.token))
         .await;
     assert_eq!(response.status, 400, "{}", response.body);
 
@@ -403,7 +401,7 @@ async fn the_match_list_says_what_each_game_was_and_whether_coaching_reads_it() 
     // The full history is still the full history — a player's Turbo games are
     // theirs to see — but each row now says what it is.
     let body = app
-        .get("/api/matches?limit=100", Some(&session.token))
+        .get("/api/matches?limit=100&mode=all", Some(&session.token))
         .await
         .json();
 

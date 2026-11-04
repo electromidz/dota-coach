@@ -84,6 +84,9 @@ pub fn build(state: AppState, config: &Config) -> Router {
         .route("/matches", get(matches::list))
         .route("/matches/{id}", get(matches::get))
         .route("/matches/{id}/comparison", get(matches::comparison))
+        .route("/matches/{id}/role", post(matches::set_role))
+        .route("/matches/{id}/parse", post(matches::request_parse))
+        .route("/matches/{id}/timeline", get(matches::timeline))
         .route("/matches/{id}/analysis", get(coach::match_analysis))
         // Admin panel. Gated by `AdminUser` in every handler, not by a layer —
         // same reasoning as the session requirement above.

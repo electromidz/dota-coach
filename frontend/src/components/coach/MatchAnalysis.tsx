@@ -3,17 +3,18 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-import { EvidenceList } from "@/components/coach/EvidenceList";
-import { InsightCard } from "@/components/coach/InsightCard";
+import { FindingCard, MeasuredTable } from "@/components/coach/FindingCard";
 import { TrainingPlan } from "@/components/coach/TrainingPlan";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { analyzeMatch, ApiError, getMatchAnalysis } from "@/lib/api";
+import { InfoTip } from "@/components/ui/InfoTip";
+import { analyzeMatch, ApiError, getMatchAnalysis, requestReplayParse } from "@/lib/api";
 import { formatGeneratedAt } from "@/lib/coach";
+import { useIsAdmin } from "@/lib/session-context";
 import type { CoachResponse, Evidence } from "@/lib/types";
 import { useGeneration } from "@/lib/useGeneration";
-import { fixOrdinals } from "@/lib/utils";
+import { cn, fixOrdinals } from "@/lib/utils";
 
 /**
  * The evidence id the backend uses to say a match has no measured timeline.
@@ -85,6 +86,7 @@ function Loaded({ id, data }: { id: string; data: CoachResponse }) {
   );
 
   const { analysis } = current;
+  const isAdmin = useIsAdmin();
   const missing = current.evidence.find((item) => item.id === NO_TIMELINE);
 
   return (
@@ -107,16 +109,12 @@ function Loaded({ id, data }: { id: string; data: CoachResponse }) {
       ) : null}
 
       {/* What could not be concluded, and why, before anything that was. */}
-      {missing ? <MissingTimeline evidence={missing} /> : null}
+      {missing ? <MissingTimeline id={id} evidence={missing} /> : null}
 
       {busy ? (
         <Card className="flex flex-col gap-2" glow="function">
           <p className="text-sm text-ink" aria-busy="true">
-            Analysing your match…
-          </p>
-          <p className="text-xs leading-relaxed text-ink-faint">
-            The coach is reading the timeline below. This usually takes under a
-            minute.
+            Analysing your match… usually under a minute.
           </p>
         </Card>
       ) : null}
@@ -125,45 +123,43 @@ function Loaded({ id, data }: { id: string; data: CoachResponse }) {
         <>
           <section className="flex flex-col gap-4">
             <h2 className="font-display text-sm uppercase tracking-[0.2em] text-ink-faint">
-              What went wrong?
+              Coach findings
             </h2>
 
-            {analysis.summary ? (
-              <Card className="flex flex-col gap-2" glow="keyword">
-                <p className="leading-relaxed text-ink">{fixOrdinals(analysis.summary)}</p>
-                <p className="font-mono text-[0.625rem] text-ink-faint">
-                  {formatGeneratedAt(analysis.generated_at)} · {analysis.model}
-                </p>
-              </Card>
-            ) : (
-              <Card className="flex flex-col gap-2">
-                <p className="text-sm leading-relaxed text-ink-muted">
-                  The coach&apos;s headline could not be verified against this
-                  match&apos;s data, so it was discarded. Everything below was.
-                </p>
-                <p className="font-mono text-[0.625rem] text-ink-faint">
-                  {formatGeneratedAt(analysis.generated_at)} · {analysis.model}
-                </p>
-              </Card>
-            )}
+            <Card className="flex items-start gap-2" glow="keyword">
+              <p className="line-clamp-2 min-w-0 flex-1 text-sm leading-relaxed text-ink">
+                {analysis.summary
+                  ? fixOrdinals(analysis.summary)
+                  : "The headline could not be verified against this match's data, so it was discarded."}
+              </p>
+              <InfoTip label="About this analysis">
+                {analysis.summary ? <>{fixOrdinals(analysis.summary)} </> : null}
+                Generated {formatGeneratedAt(analysis.generated_at)}
+                {isAdmin ? <> · {analysis.model}</> : null}.
+              </InfoTip>
+            </Card>
 
             {current.stale ? (
-              <Alert tone="info">
-                Your record has changed since this was written, so it was read
-                against slightly different averages than the ones shown now.
-              </Alert>
+              <div className="glass flex flex-wrap items-center justify-between gap-3 rounded-card px-4 py-3">
+                <span className="text-sm text-ink">Your baseline changed since this analysis</span>
+                {current.llm_available ? (
+                  <Button onClick={generate} disabled={busy}>
+                    {busy ? "Reading…" : "Re-read"}
+                  </Button>
+                ) : null}
+              </div>
             ) : null}
 
-            {/* Numbered, because the backend ranks them most-costly-first and
-                that ranking is part of the answer. */}
-            {analysis.insights.map((insight, index) => (
-              <InsightCard
-                key={`${insight.kind}-${index}`}
-                insight={insight}
-                evidence={analysis.evidence}
-                rank={index + 1}
-              />
-            ))}
+            {/* At most three, already ordered by severity on the server. */}
+            <div className="grid gap-4 lg:grid-cols-3 lg:items-start">
+              {analysis.insights.slice(0, 3).map((insight, index) => (
+                <FindingCard
+                  key={`${insight.kind}-${index}`}
+                  insight={insight}
+                  evidence={analysis.evidence}
+                />
+              ))}
+            </div>
           </section>
 
           {/* The one thing to work on, last and on its own — a reader who stops
@@ -186,37 +182,36 @@ function Loaded({ id, data }: { id: string; data: CoachResponse }) {
               Coaching
             </h2>
             <Card>
-              <p className="text-sm leading-relaxed text-ink-muted">
-                No analysis of this match yet. It will be read against your own
-                averages in this role, not against a generic standard, and only
-                from the evidence below.
+              <p className="text-sm text-ink-muted">
+                No analysis yet. It reads only the measured data below, against
+                your own average here.
               </p>
             </Card>
           </section>
         )
       )}
 
-      {current.llm_available && current.evidence.length > 0 ? (
-        <div className="flex flex-col gap-2">
-          <Button onClick={generate} disabled={busy} className="self-start">
-            {busy
-              ? "Analysing…"
-              : analysis
-                ? "Read this match again"
-                : "Analyse this match"}
-          </Button>
-          {analysis && !current.stale ? (
-            // The backend answers an identical question from storage, so say
-            // so rather than implying a fresh opinion is one click away.
-            <p className="text-xs text-ink-faint">
-              Nothing behind this analysis has changed, so asking again returns
-              the same answer.
-            </p>
-          ) : null}
-        </div>
+      {/* Only before the first reading: afterwards, a re-read is offered by
+          the banner when, and only when, the baseline has moved. */}
+      {!analysis && current.llm_available && current.evidence.length > 0 ? (
+        <Button onClick={generate} disabled={busy} className="self-start">
+          {busy ? "Analysing…" : "Analyse this match"}
+        </Button>
       ) : null}
 
-      <EvidenceList evidence={current.evidence} />
+      {current.evidence.length > 0 ? (
+        <details className="glass group rounded-card px-4 py-3">
+          <summary className="focus-neon cursor-pointer list-none rounded text-xs font-semibold uppercase tracking-[0.2em] text-ink-faint hover:text-ink">
+            What the coach measured
+            <span className="ml-2 font-mono normal-case tracking-normal">
+              ({current.evidence.length})
+            </span>
+          </summary>
+          <div className="mt-3">
+            <MeasuredTable evidence={current.evidence} />
+          </div>
+        </details>
+      ) : null}
     </div>
   );
 }
@@ -230,10 +225,51 @@ function Loaded({ id, data }: { id: string; data: CoachResponse }) {
  * one place, and keeps this component from having to distinguish cases it cannot
  * see.
  */
-function MissingTimeline({ evidence }: { evidence: Evidence }) {
+function MissingTimeline({ id, evidence }: { id: string; evidence: Evidence }) {
+  const [state, setState] = useState<"idle" | "sending" | "sent" | "failed">("idle");
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function request() {
+    setState("sending");
+    try {
+      const response = await requestReplayParse(id);
+      setMessage(response.note);
+      setState("sent");
+    } catch (e) {
+      setMessage(e instanceof ApiError ? e.message : "Could not request a parse.");
+      setState("failed");
+    }
+  }
+
   return (
-    <Alert tone="info" title="No second-by-second data for this match">
-      {fixOrdinals(evidence.statement)}
-    </Alert>
+    <div className="glass flex flex-wrap items-center gap-3 rounded-card px-4 py-3">
+      <span className="flex items-center gap-1.5 text-sm text-ink">
+        No timeline data
+        <InfoTip label="Why there is no timeline">{fixOrdinals(evidence.statement)}</InfoTip>
+      </span>
+      <span className="ml-auto flex flex-wrap items-center gap-2">
+        <Button
+          variant="ghost"
+          onClick={request}
+          disabled={state === "sending" || state === "sent"}
+          className="px-3 text-xs"
+        >
+          {state === "sending" ? "Requesting…" : state === "sent" ? "Parse requested" : "Request replay parse"}
+        </Button>
+        <a
+          href="https://www.opendota.com/faq"
+          target="_blank"
+          rel="noreferrer"
+          className="focus-neon rounded text-xs text-function hover:text-ink"
+        >
+          How to make your profile public
+        </a>
+      </span>
+      {message ? (
+        <p className={cn("w-full text-xs", state === "failed" ? "text-error" : "text-ink-faint")}>
+          {message}
+        </p>
+      ) : null}
+    </div>
   );
 }

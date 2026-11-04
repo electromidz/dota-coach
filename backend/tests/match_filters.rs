@@ -57,13 +57,13 @@ async fn each_filter_narrows_the_total_and_not_only_the_page() {
     let (app, session) = seed_app(db, history(), 100).await;
 
     // Eight stored matches: 5 on Luna (4 ranked + 1 Turbo), 3 on Lion.
-    let all = app.get("/api/matches", Some(&session.token)).await.json();
+    let all = app.get("/api/matches?mode=all", Some(&session.token)).await.json();
     assert_eq!(all["total"], 8);
     assert_eq!(all["filtered"], false);
     assert_eq!(all["sort"], "newest");
 
     let by_hero = app
-        .get("/api/matches?hero_id=26", Some(&session.token))
+        .get("/api/matches?mode=all&hero_id=26", Some(&session.token))
         .await
         .json();
     assert_eq!(by_hero["total"], 3, "every Lion game, not just this page");
@@ -75,13 +75,13 @@ async fn each_filter_narrows_the_total_and_not_only_the_page() {
         .all(|m| m["hero_id"] == 26));
 
     let by_role = app
-        .get("/api/matches?role=carry", Some(&session.token))
+        .get("/api/matches?mode=all&role=carry", Some(&session.token))
         .await
         .json();
     assert_eq!(by_role["total"], 5);
 
     let losses = app
-        .get("/api/matches?result=loss", Some(&session.token))
+        .get("/api/matches?mode=all&result=loss", Some(&session.token))
         .await
         .json();
     // 1 carry loss + 2 mid losses. The Turbo game was a win.
@@ -93,7 +93,7 @@ async fn each_filter_narrows_the_total_and_not_only_the_page() {
         .all(|m| m["won"] == false));
 
     let wins = app
-        .get("/api/matches?result=win", Some(&session.token))
+        .get("/api/matches?mode=all&result=win", Some(&session.token))
         .await
         .json();
     assert_eq!(wins["total"], 5);
@@ -108,7 +108,7 @@ async fn filters_combine_rather_than_replacing_one_another() {
 
     // Mid losses: two of the three Lion games.
     let role_and_result = app
-        .get("/api/matches?role=mid&result=loss", Some(&session.token))
+        .get("/api/matches?mode=all&role=mid&result=loss", Some(&session.token))
         .await
         .json();
     assert_eq!(role_and_result["total"], 2);
@@ -116,7 +116,7 @@ async fn filters_combine_rather_than_replacing_one_another() {
     // All three at once, and they agree: Lion is only ever played mid here.
     let all_three = app
         .get(
-            "/api/matches?hero_id=26&role=mid&result=loss",
+            "/api/matches?mode=all&hero_id=26&role=mid&result=loss",
             Some(&session.token),
         )
         .await
@@ -126,7 +126,7 @@ async fn filters_combine_rather_than_replacing_one_another() {
     // A combination nothing satisfies is an empty page, not an error — Luna is
     // never played mid.
     let impossible = app
-        .get("/api/matches?hero_id=35&role=mid", Some(&session.token))
+        .get("/api/matches?mode=all&hero_id=35&role=mid", Some(&session.token))
         .await;
     assert_eq!(impossible.status, StatusCode::OK);
     let body = impossible.json();
@@ -148,7 +148,7 @@ async fn a_filter_applies_inside_the_scope_rather_than_widening_it() {
     // hero filter must not drag the Turbo one back in to find a fifth.
     let scoped = app
         .get(
-            "/api/matches?scope=competitive&hero_id=35",
+            "/api/matches?mode=eligible&hero_id=35",
             Some(&session.token),
         )
         .await
@@ -181,7 +181,7 @@ async fn sorting_orders_the_whole_list_not_the_page() {
     // on the first page would be the best of the *newest three* — a mid game
     // at 250 — rather than the best of all eight.
     let by_gpm = app
-        .get("/api/matches?sort=gpm_desc&limit=3", Some(&session.token))
+        .get("/api/matches?mode=all&sort=gpm_desc&limit=3", Some(&session.token))
         .await
         .json();
     assert_eq!(by_gpm["sort"], "gpm_desc");
@@ -190,18 +190,18 @@ async fn sorting_orders_the_whole_list_not_the_page() {
     assert_eq!(by_gpm["matches"][2]["gpm"], 600);
 
     let lowest = app
-        .get("/api/matches?sort=gpm_asc&limit=1", Some(&session.token))
+        .get("/api/matches?mode=all&sort=gpm_asc&limit=1", Some(&session.token))
         .await
         .json();
     assert_eq!(lowest["matches"][0]["gpm"], 250);
 
     // Oldest first is the reverse end of the default, not a reversed page.
     let newest = app
-        .get("/api/matches?limit=1", Some(&session.token))
+        .get("/api/matches?mode=all&limit=1", Some(&session.token))
         .await
         .json();
     let oldest = app
-        .get("/api/matches?sort=oldest&limit=1", Some(&session.token))
+        .get("/api/matches?mode=all&sort=oldest&limit=1", Some(&session.token))
         .await
         .json();
     assert_ne!(
@@ -222,7 +222,7 @@ async fn a_filter_and_a_sort_apply_together() {
     // carry wins. The 400 carry is the one loss and must not appear.
     let body = app
         .get(
-            "/api/matches?role=carry&result=win&sort=gpm_desc",
+            "/api/matches?mode=all&role=carry&result=win&sort=gpm_desc",
             Some(&session.token),
         )
         .await
@@ -245,7 +245,7 @@ async fn filter_options_come_from_the_players_own_matches() {
     };
     let (app, session) = seed_app(db, history(), 100).await;
 
-    let body = app.get("/api/matches", Some(&session.token)).await.json();
+    let body = app.get("/api/matches?mode=all", Some(&session.token)).await.json();
     let heroes = body["filters"]["heroes"].as_array().unwrap();
     let roles = body["filters"]["roles"].as_array().unwrap();
 
@@ -273,7 +273,7 @@ async fn options_do_not_collapse_to_whatever_is_already_selected() {
 
     // Filtering to Lion must still offer Luna, or the dropdown is a trap.
     let body = app
-        .get("/api/matches?hero_id=26", Some(&session.token))
+        .get("/api/matches?mode=all&hero_id=26", Some(&session.token))
         .await
         .json();
 
@@ -322,10 +322,10 @@ async fn the_unfiltered_list_is_unchanged() {
     // Explicit `all` values mean the same thing as their absence: the filters
     // are additive, and their neutral position is the list that was always
     // there.
-    let bare = app.get("/api/matches", Some(&session.token)).await.json();
+    let bare = app.get("/api/matches?mode=all", Some(&session.token)).await.json();
     let neutral = app
         .get(
-            "/api/matches?role=all&result=all&sort=newest",
+            "/api/matches?mode=all&role=all&result=all&sort=newest",
             Some(&session.token),
         )
         .await
@@ -344,37 +344,49 @@ async fn the_mode_filter_narrows_the_total_and_not_only_the_page() {
     };
     let (app, session) = seed_app(db, history(), 100).await;
 
-    // Eight stored games: seven ranked (4 Luna + 3 Lion) and one Turbo.
-    let ranked = app
-        .get("/api/matches?mode=ranked", Some(&session.token))
-        .await
-        .json();
-    assert_eq!(ranked["total"], 7, "every ranked game, not just this page");
-    assert_eq!(ranked["mode"], "ranked");
-    assert_eq!(ranked["filtered"], true);
-    assert!(ranked["matches"]
+    // Eight stored games: seven Ranked All Pick (4 Luna + 3 Lion), one Turbo.
+    // The default is Ranked + All Pick, the population every other page reads.
+    let eligible = app.get("/api/matches", Some(&session.token)).await.json();
+    assert_eq!(eligible["total"], 7, "every eligible game, not just this page");
+    assert_eq!(eligible["mode"], "eligible");
+    assert_eq!(eligible["mode_total"], 7);
+    assert_eq!(eligible["hidden_turbo"], 1, "the header can say +1 Turbo hidden");
+    assert_eq!(eligible["hidden_other"], 0);
+    assert_eq!(eligible["filtered"], false, "a mode is not a filter");
+    assert!(eligible["matches"]
         .as_array()
         .unwrap()
         .iter()
-        .all(|m| m["lobby_type"] == 7));
+        .all(|m| m["eligible"] == true));
+    // Dropdown counts respect the mode: Luna's Turbo game is not counted.
+    let luna = eligible["filters"]["heroes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["value"] == "35")
+        .unwrap()
+        .clone();
+    assert_eq!(luna["matches"], 4);
 
     let turbo = app
         .get("/api/matches?mode=turbo", Some(&session.token))
         .await
         .json();
     assert_eq!(turbo["total"], 1);
-    assert_eq!(turbo["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(turbo["mode"], "turbo");
     assert_eq!(turbo["matches"][0]["game_mode"], 23);
     assert_eq!(turbo["matches"][0]["eligible"], false);
+    assert_eq!(turbo["hidden_turbo"], 0);
+    assert_eq!(turbo["hidden_other"], 7);
+    assert_eq!(turbo["filters"]["heroes"].as_array().unwrap().len(), 1);
 
-    // The neutral position is the list that was always there.
     let all = app
         .get("/api/matches?mode=all", Some(&session.token))
         .await
         .json();
     assert_eq!(all["total"], 8);
     assert_eq!(all["mode"], "all");
-    assert_eq!(all["filtered"], false);
+    assert_eq!(all["hidden_turbo"], 0);
 }
 
 #[tokio::test]
@@ -384,13 +396,14 @@ async fn a_mode_combines_with_the_other_filters() {
     };
     let (app, session) = seed_app(db, history(), 100).await;
 
-    // Five Luna games, but only four of them ranked: the mode must not be
+    // Five Luna games, but only four of them eligible: the mode must not be
     // dropped to find the fifth.
-    let ranked_luna = app
-        .get("/api/matches?mode=ranked&hero_id=35", Some(&session.token))
+    let luna = app
+        .get("/api/matches?hero_id=35", Some(&session.token))
         .await
         .json();
-    assert_eq!(ranked_luna["total"], 4);
+    assert_eq!(luna["total"], 4);
+    assert_eq!(luna["mode_total"], 7, "the header counts the mode, not the filter");
 
     // The Turbo game was a win, so asking for Turbo losses is an empty page
     // rather than an error.
@@ -413,7 +426,7 @@ async fn every_row_carries_a_rating_and_only_ranked_rows_carry_an_estimate() {
     };
     let (app, session) = seed_app(db, history(), 100).await;
 
-    let body = app.get("/api/matches", Some(&session.token)).await.json();
+    let body = app.get("/api/matches?mode=all", Some(&session.token)).await.json();
 
     for m in body["matches"].as_array().unwrap() {
         let rating = m["rating"].as_f64().expect("every row is rated");
@@ -459,7 +472,7 @@ async fn pagination_still_divides_the_filtered_list() {
 
     let first = app
         .get(
-            "/api/matches?role=carry&limit=2&page=1",
+            "/api/matches?mode=all&role=carry&limit=2&page=1",
             Some(&session.token),
         )
         .await
@@ -470,7 +483,7 @@ async fn pagination_still_divides_the_filtered_list() {
 
     let last = app
         .get(
-            "/api/matches?role=carry&limit=2&page=3",
+            "/api/matches?mode=all&role=carry&limit=2&page=3",
             Some(&session.token),
         )
         .await
@@ -479,4 +492,58 @@ async fn pagination_still_divides_the_filtered_list() {
 
     // No page holds a row from another one.
     assert_ne!(first["matches"][0]["id"], last["matches"][0]["id"]);
+}
+
+#[tokio::test]
+async fn a_corrected_position_is_used_everywhere_and_can_be_undone() {
+    let Some(db) = support::pool().await else {
+        return skip("a_corrected_position_is_used_everywhere_and_can_be_undone");
+    };
+    let (app, session) = seed_app(db, history(), 100).await;
+
+    let carries = app
+        .get("/api/matches?role=carry", Some(&session.token))
+        .await
+        .json();
+    let before = carries["total"].as_i64().unwrap();
+    let carry = carries["matches"][0].clone();
+    assert_eq!(carry["position_label"], "Carry");
+    assert_eq!(carry["position_source"], "lane", "the fixture has lane data");
+    let id = carry["id"].as_str().unwrap().to_string();
+
+    // Correct it to soft support.
+    let corrected = app
+        .post_json(
+            &format!("/api/matches/{id}/role"),
+            r#"{"role":"soft_support"}"#,
+            Some(&session.token),
+        )
+        .await;
+    assert_eq!(corrected.status, StatusCode::OK, "{}", corrected.body);
+    let body = corrected.json();
+    assert_eq!(body["match"]["position_label"], "Soft Support");
+    assert_eq!(body["match"]["position_source"], "user");
+
+    // Every position filter now sees it there, not as a carry.
+    let carries = app.get("/api/matches?role=carry", Some(&session.token)).await.json();
+    assert_eq!(carries["total"].as_i64().unwrap(), before - 1);
+    let supports = app
+        .get("/api/matches?role=soft_support", Some(&session.token))
+        .await
+        .json();
+    assert!(supports["matches"].as_array().unwrap().iter().any(|m| m["id"] == id.as_str()));
+
+    // `auto` hands it back to the estimate.
+    let restored = app
+        .post_json(&format!("/api/matches/{id}/role"), r#"{"role":"auto"}"#, Some(&session.token))
+        .await
+        .json();
+    assert_eq!(restored["match"]["position_label"], "Carry");
+    assert_eq!(restored["match"]["position_source"], "lane");
+
+    // Not a position: refused.
+    let bad = app
+        .post_json(&format!("/api/matches/{id}/role"), r#"{"role":"jungle"}"#, Some(&session.token))
+        .await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
 }

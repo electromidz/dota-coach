@@ -162,7 +162,9 @@ async fn a_parsed_match_is_analysed_from_its_timeline_with_real_timestamps() {
     assert_eq!(analysis["scope"], "match");
 
     let insight = &analysis["insights"][0];
-    assert_eq!(insight["severity"], "major");
+    // Severity is computed from measured percentiles, never taken from the
+    // model; a finding resting on timeline events alone carries none.
+    assert!(insight["severity"].is_null(), "{insight}");
     assert_eq!(insight["timestamp"], "10:45");
     assert!(insight["what_happened"].is_string());
     assert!(insight["why_it_matters"].is_string());
@@ -483,4 +485,56 @@ async fn reading_the_analysis_twice_asks_the_provider_once() {
     );
 
     app.cleanup(&[steam_id]).await;
+}
+
+#[tokio::test]
+async fn the_page_timeline_serves_net_worth_and_deaths_or_says_why_not() {
+    let Some(db) = support::pool().await else {
+        return skip("the_page_timeline_serves_net_worth_and_deaths_or_says_why_not");
+    };
+    let app = support::app_with_match_facts(
+        db.clone(),
+        MockDota::with_matches(sample_matches(20)),
+        StubVerifier::rejecting(),
+        StubLlm::answering(),
+        StubMatchFacts::serving(parsed_match_facts(0, 0)),
+        support::test_config(),
+    );
+    let (steam_id, session, id) = seed(&app).await;
+    let body = app
+        .get(&format!("/api/matches/{id}/timeline"), Some(&session.token))
+        .await;
+    assert_eq!(body.status, StatusCode::OK);
+    let body = body.json();
+    assert_eq!(body["available"], true);
+    assert_eq!(body["net_worth_per_minute"], serde_json::json!([0, 300, 700]));
+    assert_eq!(body["deaths"][0]["time_seconds"], 600);
+    app.cleanup(&[steam_id]).await;
+
+    for (facts, phrase) in [
+        (StubMatchFacts::serving(unparsed_match_facts(0, 0)), "not been parsed"),
+        (
+            StubMatchFacts::failing(ProviderError::Unavailable("down".into())),
+            "unavailable",
+        ),
+    ] {
+        let app = support::app_with_match_facts(
+            db.clone(),
+            MockDota::with_matches(sample_matches(20)),
+            StubVerifier::rejecting(),
+            StubLlm::answering(),
+            facts,
+            support::test_config(),
+        );
+        let (steam_id, session, id) = seed(&app).await;
+        let body = app
+            .get(&format!("/api/matches/{id}/timeline"), Some(&session.token))
+            .await;
+        assert_eq!(body.status, StatusCode::OK, "a provider problem is not an error");
+        let body = body.json();
+        assert_eq!(body["available"], false);
+        assert!(body["note"].as_str().unwrap().contains(phrase), "{body}");
+        assert_eq!(body["deaths"], serde_json::json!([]));
+        app.cleanup(&[steam_id]).await;
+    }
 }

@@ -47,7 +47,7 @@ export function PercentileRow({ row }: { row: MetricComparison }) {
             </span>
           ) : (
             <span className="rounded bg-mark-track px-1.5 py-0.5 text-[0.625rem] text-ink-faint">
-              not ranked
+              not compared
             </span>
           )}
         </span>
@@ -65,12 +65,19 @@ export function PercentileRow({ row }: { row: MetricComparison }) {
           <div className="absolute inset-y-0 right-0 w-[30%] bg-mark-win/25" />
         </div>
 
-        {/* The midpoint. Every row shares it, which is what lets the column be
-            scanned vertically. */}
+        {/* Peer p50 and p80. Every row shares them, which is what lets the
+            column be scanned vertically. */}
         <span
           aria-hidden
-          className="absolute top-1/2 h-4 w-px -translate-y-1/2 bg-ink-faint/60"
+          title="Peer median (p50)"
+          className="absolute top-1/2 h-4 w-px -translate-y-1/2 bg-rank"
           style={{ left: "50%" }}
+        />
+        <span
+          aria-hidden
+          title="Peer top 20% (p80)"
+          className="absolute top-1/2 h-4 w-0.5 -translate-y-1/2 rounded bg-target/80"
+          style={{ left: "80%" }}
         />
 
         {averagePercentile !== null ? (
@@ -94,9 +101,28 @@ export function PercentileRow({ row }: { row: MetricComparison }) {
           />
         ) : null}
       </div>
+
+      {/* The two readings, in the one phrasing used everywhere: a single game
+          is always placed; an average needs enough games behind it. */}
+      <p className="font-mono text-[0.6875rem] tabular-nums text-ink-faint">
+        {matchPercentile !== null ? `This game: ${ordinal(matchPercentile)}` : "This game: not compared"}
+        {average ? (
+          <>
+            {" · "}
+            {averagePercentile !== null
+              ? `Your average: ${ordinal(averagePercentile)}`
+              : average.sample < MIN_AVERAGE_GAMES
+                ? `Your average: needs ${MIN_AVERAGE_GAMES} games (you have ${average.sample})`
+                : "Your average: not compared"}
+          </>
+        ) : null}
+      </p>
     </div>
   );
 }
+
+/** Mirrors the backend's sample floor for ranking an average. */
+const MIN_AVERAGE_GAMES = 5;
 
 /** Keeps a mark inside the track when a percentile sits at either extreme. */
 function clamp(percentile: number): number {

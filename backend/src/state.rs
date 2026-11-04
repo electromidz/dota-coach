@@ -11,6 +11,7 @@ use crate::services::cache::postgres::PostgresCoachingCache;
 use crate::services::cache::{CoachingCache, NoCache};
 use crate::services::dota::DotaDataProvider;
 use crate::services::hero_kit::HeroKitProvider;
+use crate::services::item_timing::ItemTimingProvider;
 use crate::services::hero_meta::HeroMetaProvider;
 use crate::services::llm::LlmProvider;
 use crate::services::match_facts::MatchFactsProvider;
@@ -39,6 +40,8 @@ pub struct AppState {
     /// A hero's abilities and usual items, so advice can be hero-specific.
     /// Degradable: an outage drops those facts and nothing else.
     pub hero_kit: Arc<dyn HeroKitProvider>,
+    /// When peers complete core items. Degradable like hero kits.
+    pub item_timing: Arc<dyn ItemTimingProvider>,
     /// One match's timeline, second by second. STRATZ in production.
     ///
     /// Separate from `dota` on purpose: the two are different providers with
@@ -115,6 +118,7 @@ pub struct Providers {
     pub benchmarks: Arc<dyn BenchmarkProvider>,
     pub hero_meta: Arc<dyn HeroMetaProvider>,
     pub hero_kit: Arc<dyn HeroKitProvider>,
+    pub item_timing: Arc<dyn ItemTimingProvider>,
     pub match_facts: Arc<dyn MatchFactsProvider>,
     pub llm: Arc<dyn LlmProvider>,
     pub payments: Arc<dyn PaymentProvider>,
@@ -136,6 +140,7 @@ impl AppState {
             benchmarks: providers.benchmarks,
             hero_meta: providers.hero_meta,
             hero_kit: providers.hero_kit,
+            item_timing: providers.item_timing,
             match_facts: providers.match_facts,
             llm: providers.llm,
             payments: providers.payments,

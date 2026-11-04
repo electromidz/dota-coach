@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CoachResponse, MatchComparisonResponse, MatchView } from "@/lib/types";
@@ -8,10 +8,14 @@ import { MatchDetail } from "./MatchDetail";
 const getMatch = vi.hoisted(() => vi.fn());
 const getMatchAnalysis = vi.hoisted(() => vi.fn());
 const getMatchComparison = vi.hoisted(() => vi.fn());
+const setMatchRole = vi.hoisted(() => vi.fn());
+const getMatchTimeline = vi.hoisted(() =>
+  vi.fn(() => Promise.resolve({ available: false, note: "x", duration_seconds: 0, net_worth_per_minute: [], deaths: [] })),
+);
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
-  return { ...actual, getMatch, getMatchAnalysis, getMatchComparison };
+  return { ...actual, getMatch, getMatchAnalysis, getMatchComparison, setMatchRole, getMatchTimeline };
 });
 
 function match(overrides: Partial<MatchView> = {}): MatchView {
@@ -49,6 +53,7 @@ function match(overrides: Partial<MatchView> = {}): MatchView {
     mode_label: "Ranked All Pick",
     position: "carry",
     position_label: "Carry",
+    position_source: "lane",
     peer_gpm: 500,
     peer_xpm: 550,
     rating: 7.2,
@@ -187,6 +192,8 @@ const COMPARISON: MatchComparisonResponse = {
       note: "",
     },
   },
+  item_timings: [],
+  laning: [],
   note: null,
 };
 
@@ -197,41 +204,84 @@ afterEach(() => {
 });
 
 describe("MatchDetail", () => {
-  it("renders the combat, impact and comparison sections alongside the existing result", async () => {
+  it("leads with a game score and one strip of figures against peers and your average", async () => {
     getMatch.mockResolvedValue({ match: match() });
     getMatchAnalysis.mockResolvedValue(ANALYSIS);
     getMatchComparison.mockResolvedValue(COMPARISON);
 
     render(<MatchDetail id="3fa85f64-5717-4562-b3fc-2c963f66afa6" />);
 
-    // The existing result panel is untouched.
-    expect(await screen.findByText("Luna")).toBeDefined();
+    expect(await screen.findByText("Luna", { selector: "h1" })).toBeDefined();
     expect(screen.getByText("8/4/12")).toBeDefined();
+    expect(
+      await screen.findByRole("img", { name: /Game score against Legend players, 72nd percentile, your avg 54th/ }),
+    ).toBeDefined();
 
-    // The charts are attached, not swapped in.
-    expect(screen.getByText("Combat")).toBeDefined();
-    expect(screen.getByText("Impact")).toBeDefined();
-    expect(await screen.findByText("Against your rank")).toBeDefined();
-    // It appears both as a metric row and as a named strength, which is the
-    // point — so assert on presence, not on a single occurrence.
-    expect((await screen.findAllByText(/Gold per minute/)).length).toBeGreaterThan(0);
+    // GPM tile: the value, this game's percentile, and the gap to your average.
+    expect(screen.getAllByText("550").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("78th").length).toBeGreaterThan(0);
+    expect(screen.getByText("+10% vs your avg")).toBeDefined();
+    // Net worth has no peer metric, so no badge and no baseline.
+    expect(screen.getAllByText("no baseline").length).toBeGreaterThan(0);
+
+    // The duplicate bar cards are gone; the same-scale chart is central.
+    expect(screen.queryByText("Combat")).toBeNull();
+    expect(screen.queryByText("Impact")).toBeNull();
+    expect(screen.getByText("Every metric, same scale")).toBeDefined();
   });
 
-  it("skips the impact chart when detail was never synced", async () => {
+  it("shows a dash for figures the summary sync did not carry", async () => {
     getMatch.mockResolvedValue({
-      match: match({
-        detail_synced: false,
-        hero_damage: null,
-        tower_damage: null,
-        hero_healing: null,
-      }),
+      match: match({ detail_synced: false, hero_damage: null, tower_damage: null, hero_healing: null }),
     });
     getMatchAnalysis.mockResolvedValue(ANALYSIS);
     getMatchComparison.mockResolvedValue(COMPARISON);
 
     render(<MatchDetail id="3fa85f64-5717-4562-b3fc-2c963f66afa6" />);
 
-    expect(await screen.findByText("Combat")).toBeDefined();
-    expect(screen.queryByText("Impact")).toBeNull();
+    expect(await screen.findByText(/Only the summary was available/)).toBeDefined();
+    expect(screen.getAllByTitle("Not available").length).toBe(2);
+  });
+
+  it("shows the match id unformatted with provider links, and hides zero healing", async () => {
+    getMatchAnalysis.mockReturnValue(new Promise(() => {}));
+    getMatchComparison.mockReturnValue(new Promise(() => {}));
+    getMatch.mockResolvedValue({
+      match: match({ match_id: 8123456789, hero_healing: 0, started_at: "2026-09-28T14:23:00Z" }),
+    });
+    render(<MatchDetail id="m1" />);
+
+    expect(await screen.findByText("#8123456789")).toBeDefined();
+    expect(screen.queryByText("8,123,456,789")).toBeNull();
+    expect(screen.getByRole("link", { name: "OpenDota" }).getAttribute("href")).toBe(
+      "https://www.opendota.com/matches/8123456789",
+    );
+    expect(screen.queryByText("Hero healing")).toBeNull();
+    // "Sep 28, 2026 · HH:MM" in the viewer's zone, no seconds.
+    expect(screen.getByText(/^Sep 28, 2026 · \d{2}:\d{2}$/)).toBeDefined();
+  });
+
+  it("says how sure the position is and saves a correction", async () => {
+    getMatchAnalysis.mockReturnValue(new Promise(() => {}));
+    getMatchComparison.mockReturnValue(new Promise(() => {}));
+    getMatch.mockResolvedValue({
+      match: match({ position: "offlane", position_label: "Offlane", position_source: "estimated" }),
+    });
+    setMatchRole.mockResolvedValue({
+      match: match({ position: "soft_support", position_label: "Soft Support", position_source: "user" }),
+    });
+    render(<MatchDetail id="m1" />);
+
+    expect(await screen.findByText("estimated")).toBeDefined();
+    fireEvent.change(screen.getByLabelText("Correct the position"), {
+      target: { value: "soft_support" },
+    });
+    await waitFor(() => expect(setMatchRole).toHaveBeenCalledWith(
+        "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "soft_support",
+      ),
+    );
+    expect(await screen.findByText("set by you")).toBeDefined();
+    expect(screen.getByText("Soft Support", { selector: "span" })).toBeDefined();
   });
 });

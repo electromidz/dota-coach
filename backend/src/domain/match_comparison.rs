@@ -141,10 +141,79 @@ pub struct MatchComparison {
     pub cons: Vec<Highlight>,
     pub suggestion: Option<Suggestion>,
 
+    /// Core items this match completed, against the peer median on the hero.
+    /// Empty when none were completed or recorded.
+    pub item_timings: Vec<crate::domain::item_timing::ItemTiming>,
+    /// Ten-minute laning figures against the player's own baseline. No
+    /// provider publishes a peer distribution for these, so none is claimed.
+    pub laning: Vec<LaningReading>,
+
     /// The shared "what was compared against what" block, identical in shape
     /// to the one `/api/benchmark` returns.
     pub context: BenchmarkContextInfo,
     /// Set when the comparison as a whole is degraded rather than any one
     /// metric — a provider outage, or an ineligible game mode.
     pub note: Option<String>,
+}
+
+/// One ten-minute laning figure against the player's own baseline.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct LaningReading {
+    /// `last_hits_at_10` or `gold_at_10`.
+    pub metric: &'static str,
+    pub label: &'static str,
+    pub value: i32,
+    /// Average over the same baseline as every other "your average" on the
+    /// page. `None` below [`LANING_MIN_SAMPLE`] games.
+    pub baseline: Option<f32>,
+    /// Parsed games behind the baseline.
+    pub baseline_sample: i64,
+}
+
+/// Fewer parsed games than this and the baseline is withheld.
+pub const LANING_MIN_SAMPLE: i64 = 3;
+
+/// The readings this match has, against the averages.
+pub fn laning(
+    last_hits_at_10: Option<i32>,
+    gold_at_10: Option<i32>,
+    lh_avg: Option<f64>,
+    lh_sample: i64,
+    gold_avg: Option<f64>,
+    gold_sample: i64,
+) -> Vec<LaningReading> {
+    let reading = |metric, label, value: Option<i32>, avg: Option<f64>, sample: i64| {
+        value.map(|value| LaningReading {
+            metric,
+            label,
+            value,
+            baseline: avg.filter(|_| sample >= LANING_MIN_SAMPLE).map(|a| a as f32),
+            baseline_sample: sample,
+        })
+    };
+    [
+        reading("last_hits_at_10", "Last hits @10", last_hits_at_10, lh_avg, lh_sample),
+        reading("gold_at_10", "Gold @10", gold_at_10, gold_avg, gold_sample),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+#[cfg(test)]
+mod laning_tests {
+    use super::*;
+
+    #[test]
+    fn a_thin_baseline_is_withheld_and_a_missing_reading_is_skipped() {
+        let r = laning(Some(42), None, Some(38.5), 2, Some(4000.0), 9);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].metric, "last_hits_at_10");
+        assert_eq!(r[0].baseline, None);
+        assert_eq!(r[0].baseline_sample, 2);
+
+        let r = laning(Some(42), Some(3900), Some(38.5), 5, Some(4000.0), 5);
+        assert_eq!(r[0].baseline, Some(38.5));
+        assert_eq!(r[1].baseline, Some(4000.0));
+    }
 }

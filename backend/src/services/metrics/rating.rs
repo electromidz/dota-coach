@@ -201,6 +201,7 @@ mod tests {
             hero_id: 26,
             hero_name: "Lion".into(),
             role: "Hard Support".into(),
+            role_source: "estimated".into(),
             lane_role: Some(1),
             won: true,
             duration_seconds: 2_400,

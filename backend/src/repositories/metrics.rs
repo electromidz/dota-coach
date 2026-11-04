@@ -481,6 +481,38 @@ pub async fn hero_averages(
     .await
 }
 
+/// The player's laning averages over a scope: last hits and gold at ten
+/// minutes, from parsed replays only (others carry no ten-minute reading).
+#[derive(Debug, Default, sqlx::FromRow)]
+pub struct LaningAverages {
+    pub lh_sample: i64,
+    pub last_hits_at_10: Option<f64>,
+    pub gold_sample: i64,
+    pub gold_at_10: Option<f64>,
+}
+
+pub async fn laning_averages(
+    pool: &PgPool,
+    dota_player_id: Uuid,
+    scope: &MatchScope,
+) -> Result<LaningAverages, sqlx::Error> {
+    sqlx::query_as::<_, LaningAverages>(AssertSqlSafe(format!(
+        "{cte}
+         SELECT COUNT(m.last_hits_at_10) AS lh_sample,
+                AVG(m.last_hits_at_10)::float8 AS last_hits_at_10,
+                COUNT(m.gold_at_10) AS gold_sample,
+                AVG(m.gold_at_10)::float8 AS gold_at_10
+           FROM matches m
+           {join}
+          WHERE m.dota_player_id = $1",
+        cte = scope.cte(),
+        join = scope.join(),
+    )))
+    .bind(dota_player_id)
+    .fetch_one(pool)
+    .await
+}
+
 /// One match's benchmark-comparable figures, in the same units as
 /// [`HeroAverages`].
 ///

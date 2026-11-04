@@ -83,7 +83,7 @@ pub fn compare(values: &PlayerValues, distribution: &Distribution) -> Vec<Benchm
                 (Confidence::Insufficient, _) => (
                     None,
                     Some(format!(
-                        "Not enough matches yet — {} needed for a percentile, you have {}.",
+                        "Your average: needs {} games for a percentile (you have {}).",
                         percentile::MIN_SAMPLE,
                         values.sample
                     )),
@@ -168,7 +168,10 @@ mod tests {
 
         assert_eq!(gpm.confidence, Confidence::Insufficient);
         assert_eq!(gpm.percentile, None, "must not rank a two-game average");
-        assert!(gpm.note.as_deref().unwrap().contains("Not enough matches"));
+        assert_eq!(
+            gpm.note.as_deref().unwrap(),
+            "Your average: needs 5 games for a percentile (you have 2)."
+        );
         // The player's own value is still theirs to see.
         assert_eq!(gpm.player_value, 500.0);
         // And the reference distribution is not a secret either.

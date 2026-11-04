@@ -55,6 +55,18 @@ pub struct EvidenceScope {
 }
 
 /// Everything the builder needs, already fetched and already computed.
+/// One metric of the match being analysed, placed among peers on the hero.
+/// A single game is exact, so it always gets a percentile; the sample floor
+/// is about estimating a player's average, which this is not.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MatchPeerReading {
+    pub metric: crate::domain::benchmark::BenchmarkMetric,
+    pub value: f32,
+    pub percentile: f32,
+    pub median: Option<f32>,
+    pub top_20: Option<f32>,
+}
+
 pub struct EvidenceInputs<'a> {
     /// The population everything else describes.
     pub scope: EvidenceScope,
@@ -69,6 +81,8 @@ pub struct EvidenceInputs<'a> {
     pub benchmark_hero_id: Option<i32>,
     /// Abilities and usual items for the heroes the advice is about.
     pub kits: &'a [HeroKit],
+    /// The analysed match's own percentiles among peers, for match analysis.
+    pub focus_peers: &'a [MatchPeerReading],
     pub pool: &'a [HeroPoolEntry],
     pub recommendations: &'a [HeroFit],
     /// Recurring patterns, as detected across the whole history.
@@ -132,6 +146,12 @@ pub fn build(inputs: &EvidenceInputs<'_>) -> Vec<Evidence> {
 
     if let Some(match_) = inputs.focus_match {
         focus_match(match_, inputs.focus_metrics, inputs.stats, &mut evidence);
+        match_peers(
+            match_,
+            inputs.focus_peers,
+            inputs.benchmark_hero_id,
+            &mut evidence,
+        );
     }
 
     evidence
@@ -314,13 +334,13 @@ fn benchmarks(
             // Withheld percentiles keep the player's own value and say why —
             // the same honesty rule the benchmark endpoint enforces.
             (None, Some(median), _) => format!(
-                "On {hero}, your {} averages {:.1} against a peer median of {median:.1}. No percentile is claimed: {}",
+                "On {hero}, your {} averages {:.1} against a peer median of {median:.1}. {}",
                 result.label.to_lowercase(),
                 result.player_value,
                 result
                     .note
                     .clone()
-                    .unwrap_or_else(|| "the sample is too small.".into()),
+                    .unwrap_or_else(|| "Your average: needs more games for a percentile.".into()),
             ),
             _ => format!(
                 "On {hero}, your {} averages {:.1}. No peer distribution is available for it.",
@@ -348,6 +368,7 @@ fn benchmarks(
                 previous: None,
                 percent_change: None,
                 status: None,
+                baseline: None,
             }),
         });
     }
@@ -597,6 +618,8 @@ fn focus_match(
     out: &mut Vec<Evidence>,
 ) {
     let minutes = (match_.duration_seconds as f32 / 60.0).max(1.0);
+    let position = CoachableRole::from_stored(&match_.role)
+        .map_or("an unknown position", CoachableRole::label);
 
     push(
         out,
@@ -604,23 +627,46 @@ fn focus_match(
         EvidenceKind::Match,
         "Result",
         format!(
-            "This match was a {} on {} ({}), lasting {:.0} minutes.",
+            "This match was a {} on {} ({}, estimated), lasting {:.0} minutes.",
             if match_.won { "win" } else { "loss" },
             match_.hero_name,
-            match_.role,
+            position,
             minutes,
         ),
         1,
     );
 
-    push(
+    // The baseline is the player's other eligible games on this hero in this
+    // position; this match is never part of it.
+    let others = stats.matches;
+    let baseline = format!(
+        "your {} average over {} other {}",
+        match_.hero_name,
+        others,
+        plural(others, "game", "games"),
+    );
+    if others == 0 {
+        push(
+            out,
+            "match.baseline",
+            EvidenceKind::Match,
+            "Personal baseline",
+            format!(
+                "There are no other eligible games on {} in this position to compare this one with.",
+                match_.hero_name
+            ),
+            0,
+        );
+    }
+
+    push_figure(
         out,
         "match.kda",
         EvidenceKind::Match,
         "Kills, deaths, assists",
         match (metrics.map(|m| m.kda), stats.avg_kda) {
             (Some(kda), Some(average)) => format!(
-                "You finished {}/{}/{} for a KDA of {kda:.2}, against your average of {average:.2}.",
+                "You finished {}/{}/{} for a KDA of {kda:.2}, against {baseline} of {average:.2}.",
                 match_.kills, match_.deaths, match_.assists,
             ),
             (Some(kda), None) => format!(
@@ -633,32 +679,60 @@ fn focus_match(
             ),
         },
         1,
+        metrics.map(|m| EvidenceFigure {
+            metric: Some("kda".into()),
+            hero_id: Some(match_.hero_id),
+            value: m.kda,
+            higher_is_better: true,
+            unit: None,
+            median: None,
+            top_20: None,
+            percentile: None,
+            previous: None,
+            percent_change: None,
+            status: None,
+            baseline: stats.avg_kda,
+        }),
     );
 
     if let Some(deaths_per_10) = metrics.map(|m| m.deaths_per_10) {
-        push(
+        push_figure(
             out,
             "match.deaths",
             EvidenceKind::Match,
             "Death rate",
             match stats.avg_deaths_per_10 {
                 Some(average) => format!(
-                    "That is {deaths_per_10:.1} deaths per 10 minutes, against your average of {average:.1}.",
+                    "That is {deaths_per_10:.1} deaths per 10 minutes, against {baseline} of {average:.1}.",
                 ),
                 None => format!("That is {deaths_per_10:.1} deaths per 10 minutes."),
             },
             1,
+            Some(EvidenceFigure {
+            metric: Some("deaths_per_10".into()),
+            hero_id: Some(match_.hero_id),
+            value: deaths_per_10,
+            higher_is_better: false,
+            unit: None,
+            median: None,
+            top_20: None,
+            percentile: None,
+            previous: None,
+            percent_change: None,
+            status: None,
+            baseline: stats.avg_deaths_per_10,
+        }),
         );
     }
 
-    push(
+    push_figure(
         out,
         "match.economy",
         EvidenceKind::Match,
         "Economy",
         match (stats.avg_gpm, stats.avg_xpm) {
             (Some(gpm), Some(xpm)) => format!(
-                "You earned {} gold and {} XP per minute, against your averages of {gpm:.0} and {xpm:.0}.",
+                "You earned {} gold and {} XP per minute, against {baseline} of {gpm:.0} and {xpm:.0}.",
                 match_.gpm, match_.xpm,
             ),
             _ => format!(
@@ -667,17 +741,31 @@ fn focus_match(
             ),
         },
         1,
+        Some(EvidenceFigure {
+            metric: Some("gold_per_min".into()),
+            hero_id: Some(match_.hero_id),
+            value: match_.gpm as f32,
+            higher_is_better: true,
+            unit: None,
+            median: None,
+            top_20: None,
+            percentile: None,
+            previous: None,
+            percent_change: None,
+            status: None,
+            baseline: stats.avg_gpm,
+        }),
     );
 
     if let Some(kp) = metrics.and_then(|m| m.kill_participation) {
-        push(
+        push_figure(
             out,
             "match.kill_participation",
             EvidenceKind::Match,
             "Kill participation",
             match stats.avg_kill_participation {
                 Some(average) => format!(
-                    "You were involved in {} of your team's kills, against your average of {}.",
+                    "You were involved in {} of your team's kills, against {baseline} of {}.",
                     percent(Some(kp)),
                     percent(Some(average)),
                 ),
@@ -687,6 +775,20 @@ fn focus_match(
                 ),
             },
             1,
+            Some(EvidenceFigure {
+            metric: Some("kill_participation".into()),
+            hero_id: Some(match_.hero_id),
+            value: kp,
+            higher_is_better: true,
+            unit: None,
+            median: None,
+            top_20: None,
+            percentile: None,
+            previous: None,
+            percent_change: None,
+            status: None,
+            baseline: stats.avg_kill_participation,
+        }),
         );
     }
 
@@ -763,6 +865,50 @@ fn focus_match(
                 1,
             );
         }
+    }
+}
+
+/// "This game: 97th percentile" for each metric of the analysed match.
+///
+/// Worded apart from the average's percentile on purpose: the average can be
+/// withheld for a thin sample ("Your average: needs 5 games") while the game
+/// itself is always placed. One phrasing each, everywhere.
+fn match_peers(
+    match_: &Match,
+    readings: &[MatchPeerReading],
+    hero_id: Option<i32>,
+    out: &mut Vec<Evidence>,
+) {
+    for r in readings {
+        let label = r.metric.label();
+        push_figure(
+            out,
+            &format!("match.peer.{}", r.metric.slug()),
+            EvidenceKind::Match,
+            &format!("{label}, this game"),
+            format!(
+                "This game: {} {} on {}, the {} percentile of peers.",
+                round(r.value),
+                label.to_lowercase(),
+                match_.hero_name,
+                ordinal(r.percentile),
+            ),
+            1,
+            Some(EvidenceFigure {
+                metric: Some(r.metric.slug().to_string()),
+                hero_id: hero_id.or(Some(match_.hero_id)),
+                value: r.value,
+                higher_is_better: r.metric.higher_is_better(),
+                unit: None,
+                median: r.median,
+                top_20: r.top_20,
+                percentile: Some(r.percentile),
+                previous: None,
+                percent_change: None,
+                status: None,
+                baseline: None,
+            }),
+        );
     }
 }
 
@@ -926,6 +1072,7 @@ fn progress_figure(metric: &MetricProgress, current: f32, previous: f32) -> Evid
         previous: Some(previous),
         percent_change: metric.percent_change,
         status: Some(metric.status),
+        baseline: None,
     }
 }
 
@@ -970,6 +1117,68 @@ fn push(
     sample: i64,
 ) {
     push_figure(out, id, kind, label, statement, sample, None);
+}
+
+/// One match's core item completions against peers on the hero.
+///
+/// `match.item.{key}`, a figure with the completion time as `value` and the
+/// peer median as `median` (seconds), so the findings guard can tell a late
+/// item from an on-time one without parsing the sentence.
+pub fn item_timings(
+    timings: &[crate::domain::item_timing::ItemTiming],
+    hero: &str,
+) -> Vec<Evidence> {
+    use crate::domain::item_timing::TimingVerdict;
+    use crate::domain::match_facts::clock;
+
+    let mut out = Vec::new();
+    for t in timings {
+        let statement = match (t.peer_median_seconds, t.verdict) {
+            (Some(median), Some(verdict)) => {
+                let gap = (t.seconds - median).abs();
+                let reading = match verdict {
+                    TimingVerdict::Late => format!("{} later than peers", clock(gap)),
+                    TimingVerdict::Early => format!("{} earlier than peers", clock(gap)),
+                    TimingVerdict::OnTime => "on time".to_string(),
+                };
+                format!(
+                    "{} at {}: {reading}. Peers on {hero} complete it around {} (median of {} completions, all ranks).",
+                    t.label,
+                    clock(t.seconds),
+                    clock(median),
+                    t.peer_games,
+                )
+            }
+            _ => format!(
+                "{} at {}. Not compared: too few peer completions on {hero} recorded.",
+                t.label,
+                clock(t.seconds),
+            ),
+        };
+        push_figure(
+            &mut out,
+            &format!("match.item.{}", t.item.key()),
+            EvidenceKind::Match,
+            &format!("{} timing", t.label),
+            statement,
+            1,
+            Some(EvidenceFigure {
+                metric: Some("item_seconds".into()),
+                hero_id: None,
+                value: t.seconds as f32,
+                higher_is_better: false,
+                unit: None,
+                median: t.peer_median_seconds.map(|m| m as f32),
+                top_20: None,
+                percentile: None,
+                previous: None,
+                percent_change: None,
+                status: None,
+                baseline: None,
+            }),
+        );
+    }
+    out
 }
 
 /// The same, carrying the numbers the statement was written from.
@@ -1046,6 +1255,7 @@ mod tests {
             hero_id: 35,
             hero_name: "Luna".into(),
             role: "Carry".into(),
+            role_source: "estimated".into(),
             lane_role: Some(1),
             won,
             duration_seconds: 2_400,
@@ -1120,7 +1330,7 @@ mod tests {
             segmented_by: vec![Segment::Hero],
             note: percentile
                 .is_none()
-                .then(|| "you need 5 matches, you have 2.".to_string()),
+                .then(|| "Your average: needs 5 games for a percentile (you have 2).".to_string()),
         }
     }
 
@@ -1129,6 +1339,7 @@ mod tests {
             hero_id: 35,
             hero_name: "Luna".into(),
             role: "Carry".into(),
+            position_label: "Carry",
             matches: 20,
             wins: 11,
             losses: 9,
@@ -1184,6 +1395,7 @@ mod tests {
             benchmark_hero: Some("Luna"),
             benchmark_hero_id: Some(35),
             kits: &[],
+            focus_peers: &[],
             pool,
             recommendations,
             patterns: &[],
@@ -1343,9 +1555,37 @@ mod tests {
             .find(|e| e.id == "benchmark.gold_per_min")
             .unwrap();
 
-        assert!(gpm.statement.contains("No percentile is claimed"));
+        assert!(gpm.statement.contains("Your average: needs"), "{}", gpm.statement);
         assert!(gpm.statement.contains("you have 2"));
         assert_eq!(gpm.confidence, Confidence::Insufficient);
+    }
+
+    #[test]
+    fn a_single_game_is_always_placed_and_worded_as_this_game() {
+        use crate::domain::benchmark::BenchmarkMetric;
+        let stats = stats();
+        let focus = match_(true, 1);
+        let peers = [MatchPeerReading {
+            metric: BenchmarkMetric::GoldPerMin,
+            value: 812.0,
+            percentile: 97.0,
+            median: Some(540.0),
+            top_20: Some(690.0),
+        }];
+        let benchmarks = [benchmark(None)];
+        let mut input = inputs(&stats, &[], &benchmarks, &[], &[]);
+        input.focus_match = Some(&focus);
+        input.focus_peers = &peers;
+        let evidence = build(&input);
+
+        // The game: placed, whatever the sample behind the average.
+        let game = evidence.iter().find(|e| e.id == "match.peer.gold_per_min").unwrap();
+        assert!(game.statement.starts_with("This game: 812"), "{}", game.statement);
+        assert!(game.statement.contains("97th percentile"));
+        let f = game.figure.as_ref().unwrap();
+        assert_eq!((f.value, f.percentile, f.median), (812.0, Some(97.0), Some(540.0)));
+        // The average: withheld, and says so in the other phrasing.
+        assert!(find(&evidence, "benchmark.gold_per_min").contains("Your average: needs"));
     }
 
     #[test]
@@ -1429,13 +1669,39 @@ mod tests {
         let kda = evidence.iter().find(|e| e.id == "match.kda").unwrap();
 
         assert!(kda.statement.contains("8/4/12"));
-        assert!(kda.statement.contains("your average of 3.20"));
+        // Says what the average is over: this hero, other games only.
+        assert!(kda.statement.contains("your Luna average over 20 other games of 3.20"), "{}", kda.statement);
         assert_eq!(kda.sample, 1);
         assert_eq!(
             kda.confidence,
             Confidence::Insufficient,
             "one match generalizes to nothing, however exact it is"
         );
+    }
+
+    #[test]
+    fn a_match_with_no_other_games_says_so_instead_of_comparing_with_itself() {
+        let stats = PlayerStats {
+            matches: 0,
+            avg_kda: None,
+            avg_deaths_per_10: None,
+            avg_gpm: None,
+            avg_xpm: None,
+            avg_kill_participation: None,
+            ..stats()
+        };
+        let focus = match_(false, 1);
+        let metrics = metrics();
+        let mut input = inputs(&stats, &[], &[], &[], &[]);
+        input.focus_match = Some(&focus);
+        input.focus_metrics = Some(&metrics);
+
+        let evidence = build(&input);
+        assert!(find(&evidence, "match.baseline").contains("no other eligible games"));
+        let kda = find(&evidence, "match.kda");
+        assert!(!kda.contains("average"), "no average to compare with: {kda}");
+        // And no career evidence pretends there is one.
+        assert!(evidence.iter().all(|e| !e.id.starts_with("overall.")));
     }
 
     #[test]
@@ -1761,4 +2027,28 @@ mod progress_tests {
         assert!(items.iter().any(|e| e.id == "progress.overall.metric_7"));
         assert!(!items.iter().any(|e| e.id == "progress.overall.metric_1"));
     }
+
+    #[test]
+    fn a_late_bkb_is_stated_against_the_peer_median() {
+        use crate::domain::item_timing::{compare, CoreItem, TimingBucket};
+        let buckets = [
+            TimingBucket { seconds: 1200, games: 8 },
+            TimingBucket { seconds: 1500, games: 10 },
+            TimingBucket { seconds: 1800, games: 10 },
+        ];
+        let late = compare(CoreItem::BlackKingBar, 52 * 60 + 2, &buckets);
+        let thin = compare(CoreItem::BlinkDagger, 900, &[]);
+        let ev = item_timings(&[late, thin], "Mirana");
+
+        assert_eq!(ev[0].id, "match.item.black_king_bar");
+        assert!(
+            ev[0].statement.starts_with("Black King Bar at 52:02: 29:32 later than peers."),
+            "{}",
+            ev[0].statement
+        );
+        assert_eq!(ev[0].figure.as_ref().unwrap().median, Some(1350.0));
+        assert!(ev[1].statement.contains("Not compared"), "{}", ev[1].statement);
+        assert_eq!(ev[1].figure.as_ref().unwrap().median, None);
+    }
+
 }

@@ -101,6 +101,10 @@ pub struct EvidenceFigure {
     pub percent_change: Option<f32>,
     #[serde(default)]
     pub status: Option<crate::domain::progress::ProgressStatus>,
+    /// The player's own average on this hero and position, excluding the
+    /// match, for a single-match figure.
+    #[serde(default)]
+    pub baseline: Option<f32>,
 }
 
 /// The kinds of insight the coaching layer may produce.
@@ -116,17 +120,26 @@ pub enum InsightKind {
     Recommendation,
     Warning,
     Improvement,
+    /// A moment in one match that decided something: a fight, a pickoff, an
+    /// objective. Match analysis only.
+    KeyMoment,
 }
 
 impl InsightKind {
-    pub const ALL: [InsightKind; 6] = [
+    pub const ALL: [InsightKind; 7] = [
         InsightKind::Strength,
         InsightKind::Weakness,
         InsightKind::RecurringPattern,
         InsightKind::Recommendation,
         InsightKind::Warning,
         InsightKind::Improvement,
+        InsightKind::KeyMoment,
     ];
+
+    /// The kinds a single-match analysis may use. The "better play" on a
+    /// finding is the recommendation, so recommendation is not a kind here.
+    pub const MATCH: [InsightKind; 3] =
+        [InsightKind::Strength, InsightKind::Weakness, InsightKind::KeyMoment];
 
     pub fn slug(self) -> &'static str {
         match self {
@@ -136,6 +149,7 @@ impl InsightKind {
             InsightKind::Recommendation => "recommendation",
             InsightKind::Warning => "warning",
             InsightKind::Improvement => "improvement",
+            InsightKind::KeyMoment => "key_moment",
         }
     }
 
@@ -152,6 +166,7 @@ impl InsightKind {
             InsightKind::Recommendation => "Recommendation",
             InsightKind::Warning => "Warning",
             InsightKind::Improvement => "Improvement",
+            InsightKind::KeyMoment => "Key moment",
         }
     }
 }

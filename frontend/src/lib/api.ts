@@ -17,6 +17,7 @@ import type {
   HeroIntelligenceResponse,
   HeroPoolResponse,
   MatchComparisonResponse,
+  MatchTimelineResponse,
   MatchesMode,
   MatchListResponse,
   MatchResponse,
@@ -333,6 +334,24 @@ export function getMatches(
   return apiFetch<MatchListResponse>(`/api/matches?${query.toString()}`);
 }
 
+/** Correct a match's position, or `"auto"` to restore the estimate. */
+export function setMatchRole(
+  id: string,
+  role: CoachableRole | "auto",
+): Promise<MatchResponse> {
+  return apiFetch<MatchResponse>(`/api/matches/${id}/role`, {
+    method: "POST",
+    body: JSON.stringify({ role }),
+  });
+}
+
+/** Ask OpenDota to parse a match's replay (once an hour per match). */
+export function requestReplayParse(
+  id: string,
+): Promise<{ requested: boolean; note: string }> {
+  return apiFetch(`/api/matches/${id}/parse`, { method: "POST" });
+}
+
 export function getMatch(id: string): Promise<MatchResponse> {
   return apiFetch<MatchResponse>(`/api/matches/${id}`);
 }
@@ -348,6 +367,11 @@ export function getMatchComparison(
   id: string,
 ): Promise<MatchComparisonResponse> {
   return apiFetch<MatchComparisonResponse>(`/api/matches/${id}/comparison`);
+}
+
+/** Net worth per minute and deaths, when the replay was parsed. */
+export function getMatchTimeline(id: string): Promise<MatchTimelineResponse> {
+  return apiFetch<MatchTimelineResponse>(`/api/matches/${id}/timeline`);
 }
 
 /** One page of coaching history for a role. Newest first. */

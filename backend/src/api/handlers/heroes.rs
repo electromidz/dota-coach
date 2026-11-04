@@ -157,6 +157,9 @@ pub async fn pool(
             description = "How many recommendations to return. Defaults to HERO_RECOMMENDATION_LIMIT (8), \
 and is clamped to 50 however high it is set.",
             example = 8, minimum = 1, maximum = 50),
+        ("role" = Option<String>, Query,
+            description = "`all`, or a role slug (e.g. `soft_support`). Absent: the coaching role, or every role if none is chosen. Same match window as Coach.",
+            example = "soft_support"),
     ),
     responses(
         (status = 200, description = "Scored recommendations, best first", body = RecommendationsResponse),
@@ -172,7 +175,9 @@ pub async fn recommendations(
     EntitledUser(user): EntitledUser,
     AppQuery(query): AppQuery<HeroQuery>,
 ) -> AppResult<Json<RecommendationsResponse>> {
-    let built = build(&state, &user, query.limit, &MatchScope::career(), None).await?;
+    let player = load_linked_player(&state, &user).await?;
+    let (scope, info) = resolve_scope(&state, &player, query.role.as_deref()).await?;
+    let built = build(&state, &user, query.limit, &scope, info.role).await?;
 
     Ok(Json(RecommendationsResponse {
         recommendations: built.recommendations,

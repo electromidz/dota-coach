@@ -203,6 +203,8 @@ pub struct HeroPoolEntry {
     /// The position the player most often played this hero in, estimated
     /// per match ("played as"), not the hero's canonical role.
     pub role: String,
+    /// `role` in the one taxonomy: a position label, or "Unknown".
+    pub position_label: &'static str,
 
     pub matches: i64,
     pub wins: i64,

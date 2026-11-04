@@ -59,6 +59,11 @@ pub trait DotaDataProvider: Send + Sync {
 
     /// Hero id -> display name. Implementations are expected to cache this.
     async fn heroes(&self) -> Result<HashMap<i32, String>, ProviderError>;
+
+    /// Ask the provider to parse a match's replay. Unsupported by default.
+    async fn request_parse(&self, _match_id: i64) -> Result<(), ProviderError> {
+        Err(ProviderError::Unavailable("replay parse requests are not supported".into()))
+    }
 }
 
 /// Fallback label when the hero catalogue is unavailable, so a sync never fails

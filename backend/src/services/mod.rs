@@ -14,6 +14,7 @@ pub mod events;
 pub mod format;
 pub mod hero_kit;
 pub mod hero_meta;
+pub mod item_timing;
 pub mod heroes;
 pub mod llm;
 pub mod match_analysis;

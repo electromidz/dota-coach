@@ -95,6 +95,8 @@ pub fn build_pool(rows: &[HeroPoolRow], baseline: PlayerBaseline) -> Vec<HeroPoo
                 hero_id: row.hero_id,
                 hero_name: row.hero_name.clone(),
                 role: row.role.clone(),
+                position_label: crate::domain::role::CoachableRole::from_stored(&row.role)
+                    .map_or("Unknown", crate::domain::role::CoachableRole::label),
                 matches: row.matches,
                 wins: row.wins,
                 losses: row.matches - row.wins,

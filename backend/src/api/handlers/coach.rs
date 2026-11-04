@@ -616,11 +616,13 @@ pub async fn player_model(
         benchmark::TargetChoice::None,
     )
     .await?;
+    // Ranked and All Pick only, like every other read: a Turbo record would
+    // make a "signature" hero out of games nothing else counts.
     let heroes = heroes::build(
         &state,
         &user,
         Some(state.config.heroes.recommendation_limit),
-        &MatchScope::career(),
+        &MatchScope::competitive(state.config.roles.analysis_match_limit),
         None,
     )
     .await?;
@@ -1132,6 +1134,15 @@ fn respond(
 ) -> CoachResponse {
     let llm_available = state.llm.is_configured();
 
+    // A match analysis is checked against its own numbers on every read, so
+    // an analysis stored before a rule existed still renders by today's rules.
+    let analysis = analysis.map(|mut a| {
+        if a.scope == AnalysisScope::Match {
+            a.insights = coaching::findings::govern(a.insights, &a.evidence);
+        }
+        a
+    });
+
     // "Stale" compares the evidence behind the stored answer with the evidence
     // as it is now, so a player who has synced since their last analysis is
     // told the advice predates their recent games.
@@ -1294,7 +1305,8 @@ async fn evidence_cache_key(
                     to_char(tf.updated_at, 'YYYYMMDDHH24MISSUS'),
                     cs.id::text,
                     to_char(bs.newest, 'YYYYMMDDHH24MISSUS'),
-                    to_char(hms.newest, 'YYYYMMDDHH24MISSUS')
+                    to_char(hms.newest, 'YYYYMMDDHH24MISSUS'),
+                    to_char(mu.newest, 'YYYYMMDDHH24MISSUS')
                 )
            FROM dota_players p
            LEFT JOIN coaching_profiles cp ON cp.dota_player_id = p.id
@@ -1313,6 +1325,11 @@ async fn evidence_cache_key(
            LEFT JOIN LATERAL (
                     SELECT MAX(fetched_at) AS newest FROM hero_meta_snapshots
                 ) hms ON TRUE
+           -- A corrected position moves matches between roles without a sync.
+           LEFT JOIN LATERAL (
+                    SELECT MAX(updated_at) AS newest FROM matches
+                     WHERE dota_player_id = p.id
+                ) mu ON TRUE
           WHERE p.id = $1",
     )
     .bind(player.id)
@@ -1418,6 +1435,7 @@ impl RoleInputs {
             benchmark_hero_id: (!self.benchmark.hero_name.is_empty())
                 .then_some(self.benchmark.hero_id),
             kits: &self.kits,
+            focus_peers: &[],
             pool: &self.heroes.pool,
             recommendations: &self.heroes.recommendations,
             patterns: &self.patterns,
@@ -1764,6 +1782,46 @@ async fn role_benchmark(
 ///
 /// The career half is what makes a single game coachable: "six deaths" is a
 /// fact, "six deaths against your average of 3.2" is a lesson.
+/// The match's own figures placed among peers on the hero, in the player's
+/// bracket. Best effort: an unavailable distribution means no readings.
+async fn match_peer_readings(
+    state: &AppState,
+    player: &DotaPlayer,
+    match_: &Match,
+) -> Vec<coaching::evidence::MatchPeerReading> {
+    let figures = match repositories::metrics::match_figures(&state.db, match_.id).await {
+        Ok(Some(figures)) => figures.values(),
+        _ => return Vec::new(),
+    };
+    let context = crate::domain::benchmark::BenchmarkContext {
+        hero_id: match_.hero_id,
+        role: None,
+        rank_tier: player.rank_tier,
+        bracket: None,
+        patch: None,
+    };
+    let Ok(distribution) = state.benchmarks.get_distribution(&context).await else {
+        return Vec::new();
+    };
+    let percentiles = crate::services::match_comparison::percentiles_for(&figures, &distribution);
+    let mut readings: Vec<_> = BenchmarkMetric::ALL
+        .into_iter()
+        .filter_map(|metric| {
+            let percentile = *percentiles.get(&metric)?;
+            let buckets = distribution.buckets.get(&metric)?;
+            Some(coaching::evidence::MatchPeerReading {
+                metric,
+                value: *figures.get(&metric)?,
+                percentile,
+                median: crate::services::benchmarks::percentile::value_at(0.5, buckets),
+                top_20: crate::services::benchmarks::percentile::value_at(0.8, buckets),
+            })
+        })
+        .collect();
+    readings.sort_by_key(|r| BenchmarkMetric::ALL.iter().position(|m| *m == r.metric));
+    readings
+}
+
 async fn match_evidence(
     state: &AppState,
     user: &User,
@@ -1784,21 +1842,28 @@ async fn match_evidence(
         None => MatchScope::competitive(window),
     };
 
+    // "Your average" on a match page: this hero, this position, eligible
+    // games, never this match. Shared with the comparison endpoint, so the
+    // coach and the measured section quote the same baseline.
+    let baseline_scope = MatchScope::baseline(match_.hero_id, role, match_.id, window);
     let stats =
-        repositories::metrics::player_stats_scoped(&state.db, player.id, &match_scope).await?;
+        repositories::metrics::player_stats_scoped(&state.db, player.id, &baseline_scope).await?;
     let refreshed = player_model::analyze_scope(&state.db, player.id, &match_scope).await?;
     let detected = refreshed.patterns;
     let metrics = repositories::metrics::for_match(&state.db, match_.id).await?;
+    // The average's peer comparison reads the same baseline as everything
+    // else on the page.
     let benchmark = benchmark::build(
         state,
         player,
         Some(match_.hero_id),
         None,
-        &match_scope,
+        &baseline_scope,
         role,
         benchmark::TargetChoice::None,
     )
     .await?;
+    let peers = match_peer_readings(state, player, match_).await;
     let heroes = heroes::build(
         state,
         user,
@@ -1829,6 +1894,7 @@ async fn match_evidence(
         benchmark_hero: (!benchmark.hero_name.is_empty()).then_some(benchmark.hero_name.as_str()),
         benchmark_hero_id: (!benchmark.hero_name.is_empty()).then_some(benchmark.hero_id),
         kits: &[],
+        focus_peers: &peers,
         pool: &heroes.pool,
         recommendations: &[],
         // A single match read against the player's habits, not just their
@@ -1848,6 +1914,17 @@ async fn match_evidence(
     // context for "you died at 10:45, twenty-five seconds after respawning"
     // rather than the other way round.
     let mut evidence = evidence;
+    // Core items against peers on the hero: a late BKB is a finding the
+    // totals alone cannot show.
+    let timings = crate::services::item_timing::for_match(
+        state.item_timing.as_ref(),
+        match_.hero_id,
+        match_.bkb_seconds,
+        match_.blink_seconds,
+        match_.midas_seconds,
+    )
+    .await;
+    evidence.extend(coaching::evidence::item_timings(&timings, &match_.hero_name));
     evidence.extend(timeline(state, player, match_).await);
 
     Ok((evidence, detected))
