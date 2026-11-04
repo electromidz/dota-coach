@@ -986,3 +986,61 @@ fn days_apart_but_with_games_played_is_not_a_gap() {
 
     assert!(points.iter().all(|p| !p.gap_before));
 }
+
+// ---------------------------------------------------------------------------
+// rank page breakdown
+// ---------------------------------------------------------------------------
+
+#[test]
+fn momentum_reports_the_average_gain_per_win_and_loss_per_loss() {
+    let matches: Vec<Match> = (0..6).map(|i| ranked(i, i % 3 != 0, day(i))).collect();
+
+    let m = momentum(&matches, &config());
+
+    // Every game has the same KDA, so each delta is the base value.
+    assert_eq!(m.avg_win_delta, Some(30.0));
+    assert_eq!(m.avg_loss_delta, Some(-25.0));
+    assert_eq!(m.points[0].hero_id, 1);
+    assert_eq!((m.points[0].kills, m.points[0].deaths, m.points[0].assists), (6, 3, 9));
+}
+
+#[test]
+fn momentum_with_no_losses_has_no_loss_average() {
+    let matches: Vec<Match> = (0..3).map(|i| ranked(i, true, day(i))).collect();
+    assert_eq!(momentum(&matches, &config()).avg_loss_delta, None);
+}
+
+#[test]
+fn roles_are_grouped_by_position_with_one_unclassified_slice() {
+    let mut matches: Vec<Match> = (0..4).map(|i| ranked(i, true, day(i))).collect();
+    matches[1].role = "Support".into();
+    matches[2].role = "Core".into();
+    matches[3].role = "Roamer".into();
+
+    let roles = role_preference(&matches);
+
+    let labels: Vec<&str> = roles.iter().map(|r| r.role.as_str()).collect();
+    assert_eq!(labels, vec!["Unclassified", "Carry", "Soft Support"]);
+    assert_eq!(roles[0].matches, 2);
+    assert_eq!(roles[1].position, Some(CoachableRole::Carry));
+    assert_eq!(roles[0].position, None);
+}
+
+#[test]
+fn ranked_heroes_counts_ranked_games_only_most_played_first() {
+    let mut matches: Vec<Match> = (0..5).map(|i| ranked(i, i < 3, day(i))).collect();
+    matches[4].hero_id = 2;
+    matches[4].hero_name = "Axe".into();
+    let mut turbo = ranked(9, true, day(9));
+    turbo.hero_id = 2;
+    turbo.game_mode = Some(game_mode::TURBO);
+    matches.push(turbo);
+
+    let heroes = ranked_heroes(&matches, 5);
+
+    assert_eq!(heroes.len(), 2);
+    assert_eq!(heroes[0].hero_name, "Anti-Mage");
+    assert_eq!((heroes[0].matches, heroes[0].wins), (4, 3));
+    assert_eq!(heroes[0].win_rate, 75.0);
+    assert_eq!(heroes[1].matches, 1, "the Turbo Axe game does not count");
+}

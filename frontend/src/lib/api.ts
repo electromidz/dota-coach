@@ -313,6 +313,8 @@ export interface MatchListParams {
   /** Defaults to `eligible`: Ranked + All Pick, what every page reads. */
   mode?: MatchesMode;
   sort?: MatchSort;
+  /** Only the last this-many days. */
+  days?: number;
 }
 
 /**
@@ -344,6 +346,7 @@ export function getMatches(
     query.set("result", params.result);
   }
   if (params.sort && params.sort !== "newest") query.set("sort", params.sort);
+  if (params.days !== undefined) query.set("days", String(params.days));
 
   return apiFetch<MatchListResponse>(`/api/matches?${query.toString()}`);
 }

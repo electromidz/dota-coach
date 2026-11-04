@@ -33,8 +33,9 @@ use crate::config::CalibrationConfig;
 use crate::domain::benchmark::BenchmarkResult;
 use crate::domain::calibration::{
     rank_label, BracketFit, BracketResemblance, Consistency, Methodology, Momentum, MomentumPoint,
-    RankConfidence, RankSnapshot, RolePreference, Streak, StreakKind, TrajectoryPoint,
+    RankConfidence, RankSnapshot, RankedHero, RolePreference, Streak, StreakKind, TrajectoryPoint,
 };
+use crate::domain::role::CoachableRole;
 use crate::domain::eligibility::{self, lobby_type};
 use crate::domain::hero::RankBracket;
 use crate::domain::r#match::Match;
@@ -151,26 +152,56 @@ pub fn role_preference(matches: &[Match]) -> Vec<RolePreference> {
         return Vec::new();
     }
 
-    let mut counts: Vec<(String, i64)> = Vec::new();
+    // Grouped by position 1-5; anything the estimator could not place is
+    // one "Unclassified" group rather than a "Core" or "Roamer" slice.
+    let mut counts: Vec<(Option<CoachableRole>, i64)> = Vec::new();
     for m in &ranked {
-        match counts.iter_mut().find(|(role, _)| role == &m.role) {
+        let position = CoachableRole::from_stored(&m.role);
+        match counts.iter_mut().find(|(p, _)| *p == position) {
             Some((_, count)) => *count += 1,
-            None => counts.push((m.role.clone(), 1)),
+            None => counts.push((position, 1)),
         }
     }
 
-    // Most played first; ties broken by name so the order is stable across
-    // requests rather than dependent on iteration order.
-    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    // Most played first; ties in position order, unclassified last.
+    let order = |p: &Option<CoachableRole>| p.map_or(u8::MAX, |r| r.position());
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| order(&a.0).cmp(&order(&b.0))));
 
     counts
         .into_iter()
-        .map(|(role, matches)| RolePreference {
-            role,
+        .map(|(position, matches)| RolePreference {
+            role: position.map_or("Unclassified", CoachableRole::label).to_string(),
+            position,
             pct: (matches as f32 / total as f32) * 100.0,
             matches,
         })
         .collect()
+}
+
+/// Ranked record per hero, most played first, at most `limit` heroes.
+pub fn ranked_heroes(matches: &[Match], limit: usize) -> Vec<RankedHero> {
+    let mut heroes: Vec<RankedHero> = Vec::new();
+    for m in ranked_newest_first(matches) {
+        match heroes.iter_mut().find(|h| h.hero_id == m.hero_id) {
+            Some(h) => {
+                h.matches += 1;
+                h.wins += i64::from(m.won);
+            }
+            None => heroes.push(RankedHero {
+                hero_id: m.hero_id,
+                hero_name: m.hero_name.clone(),
+                matches: 1,
+                wins: i64::from(m.won),
+                win_rate: 0.0,
+            }),
+        }
+    }
+    for h in &mut heroes {
+        h.win_rate = h.wins as f32 / h.matches as f32 * 100.0;
+    }
+    heroes.sort_by(|a, b| b.matches.cmp(&a.matches).then_with(|| a.hero_id.cmp(&b.hero_id)));
+    heroes.truncate(limit);
+    heroes
 }
 
 /// Reduce one bracket's per-metric comparison to a single placement.
@@ -362,9 +393,21 @@ pub fn momentum(matches: &[Match], config: &CalibrationConfig) -> Momentum {
                 delta,
                 cumulative: running,
                 started_at: m.started_at,
+                id: m.id,
+                hero_id: m.hero_id,
+                kills: m.kills,
+                deaths: m.deaths,
+                assists: m.assists,
+                rating: None,
             }
         })
         .collect();
+
+    let average = |won: bool| {
+        let deltas: Vec<f32> = points.iter().filter(|p| p.won == won).map(|p| p.delta).collect();
+        (!deltas.is_empty()).then(|| deltas.iter().sum::<f32>() / deltas.len() as f32)
+    };
+    let (avg_win_delta, avg_loss_delta) = (average(true), average(false));
 
     Momentum {
         points,
@@ -372,6 +415,8 @@ pub fn momentum(matches: &[Match], config: &CalibrationConfig) -> Momentum {
         wins,
         losses,
         window: MOMENTUM_WINDOW,
+        avg_win_delta,
+        avg_loss_delta,
     }
 }
 

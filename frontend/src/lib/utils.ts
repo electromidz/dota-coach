@@ -147,3 +147,14 @@ export function scopeText({ hero, role, mode = "Ranked + All Pick", matches }: S
     `${matches.toLocaleString("en-US")} ${matches === 1 ? "match" : "matches"}`,
   ].join(" · ");
 }
+
+/** "Sep 28", with the year only when it is not the current one. */
+export function shortDate(iso: string, now: Date = new Date()): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
+  });
+}

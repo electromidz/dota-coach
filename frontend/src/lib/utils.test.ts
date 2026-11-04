@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { cn, formatDuration, formatRank, kda, timeAgo, ordinal, fixOrdinals, scopeText } from "./utils";
+import { cn, formatDuration, formatRank, kda, timeAgo, ordinal, fixOrdinals, scopeText, shortDate } from "./utils";
 
 describe("cn", () => {
   it("joins truthy class names", () => {
@@ -135,5 +135,15 @@ describe("scopeText", () => {
     expect(scopeText({ hero: null, role: null, matches: 1234 })).toBe(
       "All heroes · All roles · Ranked + All Pick · 1,234 matches",
     );
+  });
+});
+
+describe("shortDate", () => {
+  const now = new Date("2026-11-04T12:00:00");
+  it("leaves out the current year", () => {
+    expect(shortDate("2026-09-28T12:00:00", now)).toBe("Sep 28");
+  });
+  it("adds the year when it differs", () => {
+    expect(shortDate("2025-09-28T12:00:00", now)).toBe("Sep 28, 2025");
   });
 });

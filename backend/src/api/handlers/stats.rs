@@ -20,14 +20,15 @@ use serde::Serialize;
 
 use crate::api::extract::CurrentUser;
 use crate::domain::eligibility::{self, EligibilitySummary};
-use crate::domain::metrics::{HeroStats, PlayerStats};
+use crate::domain::metrics::{HeroStats, OverviewTrends, PlayerStats};
 use crate::domain::player::DotaPlayer;
 use crate::domain::role::RoleAnalysis;
 use crate::domain::scope::{MatchScope, SampleConfidence};
 use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
-use crate::services::metrics::METRICS_VERSION;
+use crate::repositories::r#match::MatchFilter;
+use crate::services::metrics::{trends, METRICS_VERSION};
 use crate::services::roles;
 use crate::state::AppState;
 use utoipa::ToSchema;
@@ -68,6 +69,8 @@ pub struct StatsResponse {
     /// two answers to the same question, computed differently — which is the
     /// failure the single scope exists to prevent.
     pub role_analysis: RoleAnalysis,
+    /// The KPI row: each headline number against the window before it.
+    pub trends: OverviewTrends,
     /// Which formula set produced these numbers.
     pub metrics_version: i32,
 }
@@ -100,12 +103,27 @@ pub async fn get(
 
     let (scope_info, role_analysis) = competitive_roles(&state, &player).await?;
 
+    let now = chrono::Utc::now();
+    let recent = repositories::r#match::list_by_player_scoped(
+        &state.db,
+        player.id,
+        &scope,
+        &MatchFilter::default(),
+        2 * trends::WINDOW as i64,
+        0,
+    )
+    .await?;
+    let since_60d =
+        repositories::r#match::list_since(&state.db, player.id, now - chrono::Duration::days(60))
+            .await?;
+
     Ok(Json(StatsResponse {
         scope: scope_info,
         eligibility,
         overall,
         heroes,
         role_analysis,
+        trends: trends::overview(&recent, &since_60d, now),
         metrics_version: METRICS_VERSION,
     }))
 }

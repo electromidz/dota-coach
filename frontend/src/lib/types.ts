@@ -278,8 +278,32 @@ export interface StatsResponse {
   overall: PlayerStats;
   heroes: HeroStats[];
   role_analysis: RoleAnalysis;
+  /** The KPI row, each number against the window before it. */
+  trends: OverviewTrends;
   /** Which formula set produced these numbers. */
   metrics_version: number;
+}
+
+/** A headline number, the window before it, and the server's delta. */
+export interface KpiTrend {
+  value: number | null;
+  previous: number | null;
+  /** `value - previous`; null when either window was empty. */
+  delta: number | null;
+  /** Oldest first. */
+  series: number[];
+}
+
+export interface OverviewTrends {
+  /** Games per comparison window ("last 20 vs the 20 before"). */
+  window: number;
+  /** 0-100; the series is a rolling win rate over `rolling` games. */
+  win_rate: KpiTrend;
+  kda: KpiTrend;
+  gpm: KpiTrend;
+  /** Eligible matches in the last 30 days; series is per week, 8 weeks. */
+  matches_30d: KpiTrend;
+  rolling: number;
 }
 
 /**
@@ -356,7 +380,26 @@ export interface FilterOptions {
   roles: FilterOption[];
 }
 
+/** The summary strip for the current filter. Computed on the server. */
+export interface MatchListSummary {
+  matches: number;
+  /** The filter matched more games than the summary reads. */
+  capped: boolean;
+  wins: number;
+  /** 0-100. */
+  win_rate: number | null;
+  avg_kda: number | null;
+  avg_gpm: number | null;
+  /** Newest results, oldest first. */
+  recent_results: boolean[];
+  /** Rolling win rate over `rolling` games, oldest first. */
+  rolling_win_rate: number[];
+  rolling: number;
+  best_gpm_match_id: string | null;
+}
+
 export interface MatchListResponse {
+  summary: MatchListSummary;
   matches: MatchView[];
   page: number;
   limit: number;
@@ -1674,7 +1717,9 @@ export interface Streak {
 }
 
 export interface RolePreference {
+  /** Position label, or "Unclassified". */
   role: string;
+  position: CoachableRole | null;
   pct: number;
   matches: number;
 }
@@ -1762,6 +1807,14 @@ export interface MomentumPoint {
    */
   cumulative: number;
   started_at: string;
+  /** The stored match, for its page. */
+  id: string;
+  hero_id: number;
+  kills: number;
+  deaths: number;
+  assists: number;
+  /** 1-10 against your usual game on that hero; null without a baseline. */
+  rating: number | null;
 }
 
 export interface Momentum {
@@ -1774,6 +1827,9 @@ export interface Momentum {
   /** How many matches the window may hold, so a short curve reads as
    *  "not enough games yet" rather than as a flat stretch. */
   window: number;
+  /** Mean modeled gain per win, and loss per loss (negative). */
+  avg_win_delta: number | null;
+  avg_loss_delta: number | null;
 }
 
 /**
@@ -1790,6 +1846,26 @@ export interface MmrEstimate {
   /** Null for Immortal, which has no ceiling. */
   high: number | null;
   midpoint: number;
+  /** The whole medal's band. `medal_high` is null for Immortal. */
+  medal_low: number;
+  medal_high: number | null;
+}
+
+/** The next medal up, estimated from the middle of the current star. */
+export interface NextMedal {
+  label: string;
+  mmr_needed: number;
+  wins_needed: number;
+}
+
+/** Ranked record on one hero. */
+export interface RankedHero {
+  hero_id: number;
+  hero_name: string;
+  matches: number;
+  wins: number;
+  /** 0-100. */
+  win_rate: number;
 }
 
 export interface EstablishedRank {
@@ -1800,6 +1876,8 @@ export interface EstablishedRank {
   leaderboard_rank: number | null;
   /** The band the medal implies. Null when there is no medal. */
   mmr: MmrEstimate | null;
+  /** Null at Immortal or with no medal. */
+  next_medal: NextMedal | null;
 }
 
 /**
@@ -1825,6 +1903,8 @@ export interface CalibrationResponse {
   momentum: Momentum;
   /** Most-played first. Empty when no ranked match is in the window. */
   role_preference: RolePreference[];
+  /** Ranked record on the most-played heroes, at most five. */
+  hero_win_rates: RankedHero[];
   methodology: Methodology;
   calibration_version: number;
 }

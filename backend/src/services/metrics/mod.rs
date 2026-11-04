@@ -10,6 +10,7 @@
 //! last-hit count and a genuine zero mean very different things to a coach.
 
 pub mod rating;
+pub mod trends;
 
 use crate::domain::metrics::MatchMetrics;
 use crate::domain::r#match::Match;
