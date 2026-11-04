@@ -31,6 +31,15 @@ export function formatPlanPrice(plan: Plan): string {
   return `${price} / ${period}`;
 }
 
+/**
+ * The plan's price per day, rounded to the cent: `$4.99 / 30 days` ->
+ * `"$0.17"`. Derived from the configured plan so it can never drift from
+ * what checkout charges.
+ */
+export function formatPerDay(plan: Plan): string {
+  return formatPrice(Math.round(plan.amount_cents / Math.max(1, plan.period_days)), plan.currency);
+}
+
 /** Short label for the current entitlement. */
 export function entitlementLabel(entitlement: Entitlement): string {
   switch (entitlement) {

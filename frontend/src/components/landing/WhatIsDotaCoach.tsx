@@ -64,8 +64,8 @@ export function WhatIsDotaCoach() {
           </h3>
           <p className="leading-relaxed text-ink-muted">
             A 480 GPM carry game means something very different in Archon than
-            in Divine. Benchmarks are scoped to your rank, your role, your hero
-            and the current patch, so &ldquo;behind&rdquo; means behind the
+            in Divine. Benchmarks are scoped to your rank, your role and your
+            hero, so &ldquo;behind&rdquo; means behind the
             players you are actually queuing against. Where the sample is too
             small to support a percentile, the coach says so instead of
             inventing precision.

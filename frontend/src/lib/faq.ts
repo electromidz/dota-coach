@@ -20,7 +20,11 @@ export const FAQ_ITEMS: FaqItem[] = [
   },
   {
     q: "Is there a free Dota 2 coach I can try?",
-    a: "Yes. Dota Coach starts with a free trial, no card required. Match analysis, rank-scoped benchmarks, hero intelligence and pattern detection stay free after it; the subscription only covers the AI coaching calls that cost money to run.",
+    a: "Yes. Dota Coach starts with a free trial that includes every feature, no card required. After the trial your overview stats and match history stay free; benchmarks, rank estimates, hero intelligence and the AI coach need Pro.",
+  },
+  {
+    q: "What's free vs Pro?",
+    a: "Free, for as long as you like: your overview stats and your match history. Pro (and the free trial) adds match analysis with peer percentiles, benchmarks against your rank and the next one, the rank and next-medal estimate, hero intelligence, pattern detection with a training focus, AI coach analyses with a daily fair-use cap, coach chat, and the training plan with session-to-session progress.",
   },
   {
     q: "Can a Dota coach actually help me climb MMR?",
@@ -43,8 +47,12 @@ export const FAQ_ITEMS: FaqItem[] = [
     a: "The coach still works — benchmarks are scoped to your bracket, not the pro scene, so a Herald is measured against Heralds. When the sample is too small for a percentile, it says so plainly rather than inventing one.",
   },
   {
+    q: "How accurate is the rank estimate?",
+    a: "Your medal is real: it is what your Dota profile reports. Everything built on it is an estimate and labelled as one. The MMR shown is the middle of the range your medal and stars cover, because Valve does not publish where inside that range you sit. Per-game changes and the next-medal figure come from a disclosed model of MMR per win and loss, adjusted for how you played, so treat \"≈ 13 wins\" as a guide rather than a promise.",
+  },
+  {
     q: "How do I cancel?",
-    a: "From your account's billing page, any time. Cancelling stops future charges; every measured feature — stats, benchmarks, hero intelligence, patterns — keeps working, and only new AI analysis is gated.",
+    a: "From your account's billing page, any time. Cancelling stops renewal and you keep Pro until the end of the period you paid for. After that your overview stats and match history stay available for free.",
   },
   {
     q: "How do voucher codes work?",

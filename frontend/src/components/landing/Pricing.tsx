@@ -6,22 +6,39 @@ import { Reveal } from "@/components/landing/Reveal";
 import { ButtonLink } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { steamLoginUrl } from "@/lib/api";
-import { formatPlanPrice } from "@/lib/billing";
+import { formatPerDay, formatPlanPrice } from "@/lib/billing";
 import type { PlanResponse } from "@/lib/types";
 import { usePlan } from "@/lib/usePlan";
 
 const TRIAL_FEATURES = [
-  "Full match analysis and benchmarks",
-  "Hero pool and hero intelligence",
-  "Recurring pattern detection",
-  "One AI coaching analysis to try it",
+  "Every Pro feature, nothing held back",
+  "No card needed to start",
+  "Overview and match history stay free after it",
 ];
 
 const PRO_FEATURES = [
-  "Everything in the free trial",
-  "Unlimited AI coaching analysis",
-  "Updated after every synced match",
-  "Cancel anytime, no long-term lock-in",
+  "Benchmarks, Rank and next-medal estimate",
+  "Hero intelligence and pattern detection",
+  "AI coach analyses, chat and training plan",
+  "Cancel anytime — you keep Pro until the period ends",
+];
+
+/**
+ * What each tier can open, mirroring the backend's entitlement gate: the
+ * free tier reads `/api/stats` and the match list; everything else needs a
+ * trial or a subscription. Keep this in step with the handlers that take
+ * `EntitledUser`.
+ */
+const COMPARISON: { feature: string; free: string | boolean; pro: string | boolean }[] = [
+  { feature: "Overview stats and match history", free: true, pro: true },
+  { feature: "Match analysis (peer percentiles, findings)", free: false, pro: true },
+  { feature: "Benchmarks vs your rank and the next", free: false, pro: true },
+  { feature: "Rank and next-medal estimate", free: false, pro: true },
+  { feature: "Hero intelligence", free: false, pro: true },
+  { feature: "Pattern detection and training focus", free: false, pro: true },
+  { feature: "AI coach analyses", free: false, pro: "Daily fair-use cap" },
+  { feature: "Coach chat", free: false, pro: true },
+  { feature: "Training plan and session progress", free: false, pro: true },
 ];
 
 /**
@@ -41,9 +58,8 @@ export function Pricing({ initialPlan }: { initialPlan?: PlanResponse | null }) 
           One plan. No surprises.
         </h2>
         <p className="mt-3 text-ink-muted">
-          Dota 2 coaching without a tier ladder: every measured feature is
-          free, and the subscription only covers the AI model calls that
-          actually cost money to run.
+          Try everything free{plan ? ` for ${plan.trial_days} days` : ""}. After that your
+          overview and match history stay free, and Pro unlocks the rest.
         </p>
       </Reveal>
 
@@ -76,17 +92,13 @@ export function Pricing({ initialPlan }: { initialPlan?: PlanResponse | null }) 
 
         <Reveal delayMs={100}>
           <div className="relative flex h-full flex-col gap-6 rounded-card border border-keyword/50 bg-glass p-6 shadow-[0_0_0_1px_oklch(from_#bb9af7_l_c_h_/_0.35),0_0_40px_-8px_oklch(from_#bb9af7_l_c_h_/_0.55)] sm:p-8">
-            <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-keyword px-3 py-1 text-xs font-semibold text-base">
-              Most popular
-            </span>
-
             <div>
               <p className="text-sm font-semibold text-keyword">Pro</p>
               <p className="mt-2 font-display text-4xl tracking-wide text-ink">
                 {plan ? formatPlanPrice(plan) : " "}
               </p>
               <p className="mt-1 text-sm text-ink-faint">
-                Paid in crypto · cancel anytime
+                {plan ? `About ${formatPerDay(plan)} a day · ` : ""}Paid in crypto
               </p>
             </div>
 
@@ -100,20 +112,63 @@ export function Pricing({ initialPlan }: { initialPlan?: PlanResponse | null }) 
               Start free trial
             </ButtonLink>
 
-            {!checkoutAvailable && plan ? (
+            {/* A configuration note for whoever runs this deployment, not
+                something to show the public. */}
+            {process.env.NODE_ENV !== "production" && !checkoutAvailable && plan ? (
               <p className="text-xs text-ink-faint">
-                This deployment has no payment provider configured yet — the
-                trial still works fully.
+                Dev note: no payment provider is configured — the trial still works fully.
               </p>
             ) : null}
           </div>
         </Reveal>
       </div>
 
+      <Reveal delayMs={150} className="mt-10">
+        <Comparison />
+      </Reveal>
+
       <Reveal delayMs={200} className="mt-6">
         <VoucherRedeemHint />
       </Reveal>
     </section>
+  );
+}
+
+function Comparison() {
+  return (
+    <div className="glass overflow-x-auto rounded-card">
+      <table className="w-full text-sm">
+        <caption className="sr-only">What the free tier and Pro include</caption>
+        <thead>
+          <tr className="border-b border-glass-edge text-left text-xs uppercase tracking-wider text-ink-faint">
+            <th scope="col" className="px-3 py-3 font-medium sm:px-4">Feature</th>
+            <th scope="col" className="w-12 px-1 py-3 text-center font-medium sm:w-24 sm:px-3">Free</th>
+            <th scope="col" className="w-20 px-1 py-3 text-center font-medium text-keyword sm:w-32 sm:px-3">Trial &amp; Pro</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-glass-edge">
+          {COMPARISON.map((row) => (
+            <tr key={row.feature}>
+              <th scope="row" className="px-3 py-2.5 text-left font-normal text-ink-muted sm:px-4">{row.feature}</th>
+              <td className="px-1 py-2.5 text-center sm:px-3"><Cell value={row.free} /></td>
+              <td className="px-1 py-2.5 text-center sm:px-3"><Cell value={row.pro} /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function Cell({ value }: { value: string | boolean }) {
+  if (typeof value === "string") return <span className="text-xs text-ink">{value}</span>;
+  return value ? (
+    <Icon name="check" className="mx-auto size-4 text-string" title="Included" />
+  ) : (
+    <span className="text-ink-faint">
+      <span aria-hidden>—</span>
+      <span className="sr-only">Not included</span>
+    </span>
   );
 }
 
@@ -150,7 +205,7 @@ function VoucherRedeemHint() {
           onChange={(e) => setCode(e.target.value)}
           placeholder="DOTA-XXXX-XXXX"
           aria-label="Voucher code"
-          className="min-h-10 flex-1 rounded-xl border border-glass-edge bg-surface-2/60 px-3 font-mono text-sm uppercase text-ink outline-none focus-neon"
+          className="min-h-10 w-full min-w-0 flex-1 rounded-xl border border-glass-edge bg-surface-2/60 px-3 font-mono text-sm uppercase text-ink outline-none focus-neon"
         />
         <ButtonLink
           href={steamLoginUrl()}
