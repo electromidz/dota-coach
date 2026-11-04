@@ -1,228 +1,256 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
-import { BarList } from "@/components/charts/BarList";
-import { MultiSparkline } from "@/components/charts/MultiSparkline";
+import { DateRangePicker } from "@/components/admin/DateRangePicker";
+import { KpiCard } from "@/components/admin/KpiCard";
+import { DashboardSkeleton } from "@/components/admin/Skeletons";
+import { TimeSeriesChart } from "@/components/charts/TimeSeriesChart";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
-import { StatTile } from "@/components/dashboard/StatTile";
-import { ApiError, getAdminStats } from "@/lib/api";
-import { formatPercentPoints } from "@/lib/admin";
+import { ApiError } from "@/lib/api";
+import { formatCount, formatPercentPoints } from "@/lib/admin/format";
+import { getStats } from "@/lib/admin/queries";
+import { rangeLabel, rangeToApi, rangeToParams, resolveRange } from "@/lib/admin/range";
+import type { AdminStats, Funnel } from "@/lib/admin/types";
+import { useUrlState } from "@/lib/admin/url-state";
 import { formatPrice } from "@/lib/billing";
-import { formatWhole } from "@/lib/stats";
-import type { AdminStats } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
-/** `Date` -> `"2026-08-01"`, what an `<input type="date">` reads and writes. */
-function toDateInputValue(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
+const SERIES = [
+  { key: "signups", label: "Signups", color: "var(--color-series-1)" },
+  { key: "logins", label: "Active users", color: "var(--color-series-2)" },
+  { key: "purchases", label: "Purchases", color: "var(--color-series-3)" },
+];
 
 /**
- * How many users use the panel, what happens during their trial, and how
- * many buy — the three questions this whole feature exists to answer, read
- * top to bottom: usage, then the funnel, then revenue.
+ * Usage, the trial funnel and revenue for a date range kept in the URL.
  *
- * Every number here is computed in Rust (`services::admin::stats`); nothing
- * on this page does its own arithmetic beyond formatting.
+ * Every figure, including the previous-period comparison and the funnel
+ * rates, is computed by the backend; this screen formats and lays out.
  */
 export function AdminDashboard() {
-  const [data, setData] = useState<AdminStats | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  // Empty means "let the backend pick" — its own default is the last 30 days.
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
+  const [params, setParams] = useUrlState();
+  const range = resolveRange(params);
+  const { from, to } = range;
+  const key = `${from}|${to}`;
 
-  const load = useCallback((from: string, to: string) => {
-    // A date-only input is a whole day; `to` needs its last instant included,
-    // or picking "today" would exclude every event that already happened today.
-    const fromIso = from ? `${from}T00:00:00Z` : undefined;
-    const toIso = to ? `${to}T23:59:59Z` : undefined;
-
-    getAdminStats(fromIso, toIso)
-      .then((response) => {
-        setData(response);
-        setError(null);
-      })
-      .catch((e) =>
-        setError(e instanceof ApiError ? e.message : "Could not load admin stats."),
-      );
-  }, []);
+  // Results are stored with the range they answer, so "loading" is simply
+  // "the latest result is for a different range" — the old numbers stay up
+  // (dimmed) until the new ones land, instead of flashing a skeleton.
+  const [result, setResult] = useState<{ key: string; stats: AdminStats } | null>(null);
+  const [failure, setFailure] = useState<{ key: string; message: string } | null>(null);
 
   useEffect(() => {
-    load(fromDate, toDate);
-  }, [load, fromDate, toDate]);
+    let cancelled = false;
+    getStats(rangeToApi({ preset: "custom", from, to }))
+      .then((stats) => {
+        if (!cancelled) setResult({ key, stats });
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setFailure({ key, message: e instanceof ApiError ? e.message : "Could not load admin stats." });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [key, from, to]);
 
-  function resetRange() {
-    setFromDate("");
-    setToDate("");
-  }
+  const error = failure?.key === key ? failure.message : null;
+  const loading = result?.key !== key && !error;
 
-  if (error) return <Alert>{error}</Alert>;
-  if (!data) return <DashboardSkeleton />;
+  if (!result) return error ? <Alert>{error}</Alert> : <DashboardSkeleton />;
 
-  const rangeActive = fromDate !== "" || toDate !== "";
+  const s = result.stats;
+  const money = (cents: number) => formatPrice(cents, s.currency);
 
   return (
-    <div className="flex flex-col gap-6 pb-4">
+    <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-xs text-ink-faint">{formatRangeLabel(data.from, data.to)}</p>
-
-        <form
-          className="flex flex-wrap items-center gap-2 text-xs text-ink-faint"
-          aria-label="Date range"
-        >
-          <label className="flex items-center gap-1.5">
-            From
-            <input
-              type="date"
-              value={fromDate}
-              max={toDate || toDateInputValue(new Date())}
-              onChange={(e) => setFromDate(e.target.value)}
-              className="min-h-9 rounded-lg border border-glass-edge bg-surface-2/60 px-2 text-ink outline-none focus-neon"
-            />
-          </label>
-          <label className="flex items-center gap-1.5">
-            To
-            <input
-              type="date"
-              value={toDate}
-              min={fromDate || undefined}
-              max={toDateInputValue(new Date())}
-              onChange={(e) => setToDate(e.target.value)}
-              className="min-h-9 rounded-lg border border-glass-edge bg-surface-2/60 px-2 text-ink outline-none focus-neon"
-            />
-          </label>
-          {rangeActive ? (
-            <button
-              type="button"
-              onClick={resetRange}
-              className="focus-neon cursor-pointer rounded text-function transition-colors duration-200 ease-out hover:text-ink"
-            >
-              Reset to last 30 days
-            </button>
-          ) : null}
-        </form>
-      </div>
-
-      <section className="grid grid-cols-2 gap-3 lg:grid-cols-3 lg:gap-4">
-        <StatTile label="Total users" value={formatWhole(data.total_users)} icon="users" />
-        <StatTile label="Active today" value={formatWhole(data.dau)} icon="spark" />
-        <StatTile label="Active this week" value={formatWhole(data.wau)} icon="spark" />
-        <StatTile label="Active this month" value={formatWhole(data.mau)} icon="spark" />
-        <StatTile
-          label="Active trials"
-          value={formatWhole(data.active_trials)}
-          icon="clock"
-          tone="function"
-        />
-        <StatTile
-          label="Paid (all-time)"
-          value={formatWhole(data.paid_users)}
-          icon="coins"
-          tone="string"
-        />
-      </section>
-
-      <div className="grid gap-4 lg:grid-cols-3">
-        <Card className="flex min-w-0 flex-col gap-4 lg:col-span-2">
-          <h2 className="text-xs uppercase tracking-wider text-ink-faint">
-            Signups, logins &amp; purchases
-          </h2>
-          <MultiSparkline
-            data={data.daily.map((d) => ({
-              date: d.date,
-              signups: d.signups,
-              logins: d.logins,
-              purchases: d.purchases,
-            }))}
-            series={[
-              { key: "signups", label: "Signups", color: "var(--color-function)", swatch: "bg-function" },
-              {
-                key: "logins",
-                label: "Logins",
-                color: "var(--color-keyword)",
-                swatch: "bg-keyword",
-                dashArray: "4 3",
-              },
-              {
-                key: "purchases",
-                label: "Purchases",
-                color: "var(--color-string)",
-                swatch: "bg-string",
-                dashArray: "1 3",
-              },
-            ]}
-          />
-        </Card>
-
-        <Card className="flex min-w-0 flex-col gap-4">
-          <h2 className="text-xs uppercase tracking-wider text-ink-faint">
-            Signup → trial → paid
-          </h2>
-          <BarList
-            caption="Conversion funnel"
-            data={[
-              { label: "Signed up", value: data.total_users },
-              { label: "Started a trial", value: data.trials_started },
-              { label: "Purchased", value: data.paid_users },
-            ]}
-          />
-          <div className="flex flex-col gap-1 border-t border-glass-edge pt-3 text-xs text-ink-faint">
-            <p>
-              {formatPercentPoints(data.trial_to_paid_conversion_pct)} of trials started in
-              this window have converted so far.
-            </p>
-            {/* Kept apart from "Purchased" above: a voucher redemption is not
-                a purchase, and folding the two together would overstate how
-                many people actually paid. */}
-            <p>
-              {formatWhole(data.voucher_redemptions)} voucher redemption
-              {data.voucher_redemptions === 1 ? "" : "s"} in this window.
-            </p>
-          </div>
-        </Card>
-      </div>
-
-      <Card className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="text-xs uppercase tracking-wider text-ink-faint">
-            Revenue in this window
-          </p>
-          <p className="mt-1 font-mono text-2xl tabular-nums text-number">
-            {formatPrice(data.revenue_cents, data.currency)}
-          </p>
-        </div>
-        <p className="text-sm text-ink-faint sm:max-w-xs sm:text-right">
-          {formatWhole(data.currently_paid)} account
-          {data.currently_paid === 1 ? " is" : "s are"} on an active paid period
-          right now.
+        <p className="text-sm text-ink-muted" aria-live="polite">
+          {rangeLabel(range)}
+          <span className="text-ink-faint">
+            {" "}· compared with {rangeLabel({ from: s.previous_from.slice(0, 10), to: s.previous_to.slice(0, 10) })}
+          </span>
+          {loading ? <span className="ml-2 text-xs text-ink-faint">Updating…</span> : null}
         </p>
-      </Card>
+        <DateRangePicker value={range} onChange={(next) => setParams(rangeToParams(next))} />
+      </div>
+
+      {error ? <Alert>{error}</Alert> : null}
+
+      <div className={cn("flex flex-col gap-6 transition-opacity duration-200", loading && "opacity-60")}>
+        <section aria-labelledby="period-heading" className="flex flex-col gap-3">
+          <h2 id="period-heading" className="text-xs uppercase tracking-wider text-ink-faint">
+            This period
+          </h2>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+            <KpiCard label="Signups" icon="user" value={s.period.signups} previous={s.previous.signups} />
+            <KpiCard
+              label="Active users"
+              icon="spark"
+              value={s.period.active_users}
+              previous={s.previous.active_users}
+              hint="Distinct accounts that signed in during the period."
+            />
+            <KpiCard
+              label="Trials started"
+              icon="clock"
+              value={s.period.trials_started}
+              previous={s.previous.trials_started}
+            />
+            <KpiCard
+              label="Purchases"
+              icon="coins"
+              value={s.period.purchases}
+              previous={s.previous.purchases}
+            />
+            <KpiCard
+              label="Revenue"
+              icon="coins"
+              value={s.period.revenue_cents}
+              previous={s.previous.revenue_cents}
+              format={money}
+            />
+            <KpiCard
+              label="Trials expired"
+              icon="alert"
+              value={s.period.trials_expired}
+              previous={s.previous.trials_expired}
+              higherIsBetter={false}
+            />
+          </div>
+        </section>
+
+        <section aria-labelledby="now-heading" className="flex flex-col gap-3">
+          <h2 id="now-heading" className="text-xs uppercase tracking-wider text-ink-faint">
+            Right now
+          </h2>
+          <dl className="glass grid grid-cols-2 gap-x-6 gap-y-3 rounded-card p-4 sm:grid-cols-3 xl:grid-cols-6">
+            {[
+              ["Total users", s.total_users],
+              ["Active trials", s.active_trials],
+              ["Currently paid", s.currently_paid],
+              ["Active today", s.dau],
+              ["Active 7 days", s.wau],
+              ["Active 30 days", s.mau],
+            ].map(([label, value]) => (
+              <div key={label} className="flex flex-col gap-0.5">
+                <dt className="text-xs text-ink-faint">{label}</dt>
+                <dd className="font-mono text-lg tabular-nums text-ink">{formatCount(value as number)}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+
+        <div className="grid gap-4 lg:grid-cols-3">
+          <Card className="flex min-w-0 flex-col gap-3 lg:col-span-2">
+            <h2 className="text-xs uppercase tracking-wider text-ink-faint">
+              Signups, active users &amp; purchases per day
+            </h2>
+            <TimeSeriesChart
+              caption="Signups, active users and purchases per day"
+              data={s.daily.map((d) => ({ ...d }))}
+              series={SERIES}
+            />
+          </Card>
+
+          <FunnelCard
+            funnel={s.funnel}
+            cohortPct={s.trial_to_paid_conversion_pct}
+            cohortTrials={s.period.trials_started}
+            vouchers={s.period.voucher_redemptions}
+          />
+        </div>
+      </div>
     </div>
   );
 }
 
-function formatRangeLabel(from: string, to: string): string {
-  const fmt = (iso: string) =>
-    new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+/**
+ * The all-time funnel, with the rate between each step. Bar lengths are
+ * relative to signups; the rates are the backend's.
+ */
+function FunnelCard({
+  funnel,
+  cohortPct,
+  cohortTrials,
+  vouchers,
+}: {
+  funnel: Funnel;
+  cohortPct: number | null;
+  cohortTrials: number;
+  vouchers: number;
+}) {
+  const steps = [
+    { label: "Signed up", value: funnel.signed_up, rate: null as number | null, of: "" },
+    {
+      label: "Started a trial",
+      value: funnel.trial_started,
+      rate: funnel.signup_to_trial_pct,
+      of: "of signups",
+    },
+    {
+      label: "Purchased",
+      value: funnel.purchased,
+      rate: funnel.trial_to_paid_pct,
+      of: "of trials",
+    },
+  ];
+  const top = Math.max(1, funnel.signed_up);
 
-  return `${fmt(from)} – ${fmt(to)}`;
-}
-
-function DashboardSkeleton() {
   return (
-    <div className="flex flex-col gap-6" aria-busy="true" aria-live="polite">
-      <span className="sr-only">Loading admin stats…</span>
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 lg:gap-4">
-        {[0, 1, 2, 3, 4, 5].map((i) => (
-          <div key={i} className="glass h-20 animate-pulse rounded-card" />
+    <Card className="flex min-w-0 flex-col gap-4">
+      <div>
+        <h2 className="text-xs uppercase tracking-wider text-ink-faint">Signup → trial → paid</h2>
+        <p className="mt-1 text-xs text-ink-faint">All time</p>
+      </div>
+
+      <ol className="flex flex-col gap-3">
+        {steps.map((step, i) => (
+          <li key={step.label} className="flex flex-col gap-1.5">
+            {i > 0 ? (
+              <p className="text-xs text-ink-faint">
+                ↓ <span className="font-mono tabular-nums text-ink">{formatPercentPoints(step.rate)}</span>{" "}
+                {step.of}
+              </p>
+            ) : null}
+            <div className="flex items-baseline justify-between gap-3 text-sm">
+              <span className="text-ink">{step.label}</span>
+              <span className="font-mono tabular-nums text-ink">{formatCount(step.value)}</span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-mark-track/60" aria-hidden>
+              <div
+                className="h-full rounded-full bg-[var(--color-series-1)]"
+                style={{ width: `${Math.max(step.value > 0 ? 2 : 0, (step.value / top) * 100)}%` }}
+              />
+            </div>
+          </li>
         ))}
+      </ol>
+
+      <div className="flex flex-col gap-1.5 border-t border-glass-edge pt-3 text-xs text-ink-faint">
+        <p>
+          Overall, <span className="text-ink">{formatPercentPoints(funnel.signup_to_paid_pct)}</span> of
+          signups have purchased.
+        </p>
+        <p>
+          {cohortTrials === 0 || cohortPct === null ? (
+            "No trials started in this period, so there is no conversion to report yet."
+          ) : (
+            <>
+              <span className="text-ink">{formatPercentPoints(cohortPct)}</span> of the{" "}
+              {formatCount(cohortTrials)} trials started in this period have converted so far.
+            </>
+          )}
+        </p>
+        {/* A voucher is not a purchase; counting it as one would overstate sales. */}
+        <p>
+          {formatCount(vouchers)} voucher redemption{vouchers === 1 ? "" : "s"} in this period (not
+          counted as purchases).
+        </p>
       </div>
-      <div className="grid gap-4 lg:grid-cols-3">
-        <div className="glass h-40 animate-pulse rounded-card lg:col-span-2" />
-        <div className="glass h-40 animate-pulse rounded-card" />
-      </div>
-    </div>
+    </Card>
   );
 }

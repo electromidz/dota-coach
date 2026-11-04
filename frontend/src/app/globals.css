@@ -66,6 +66,15 @@
   --color-mark-line: #7aa2f7;
   --color-mark-track: #3b4261;
 
+  /* Categorical series for multi-line charts (admin activity), in this fixed
+     order. The theme's own blue and purple are indistinguishable as lines
+     (normal-vision dE 8.7, protan dE 0.3), so these are stepped into the dark
+     lightness band instead. Verified on the glass surface, all pairs: CVD
+     deutan dE 9.4, normal-vision dE 20.9, contrast >= 3:1. */
+  --color-series-1: #3987e5;
+  --color-series-2: #d95926;
+  --color-series-3: #199e70;
+
   /* Comparison series, used on every "you vs a rank" chart. All Tokyo Night:
      you = function blue (the app's trend-line colour), your rank = the muted
      comment grey, the rank you aim at = number orange. The references are

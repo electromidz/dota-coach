@@ -34,6 +34,10 @@ export type IconName =
   | "menu"
   | "close"
   | "chevron-down"
+  | "chevron-up"
+  | "key"
+  | "ticket"
+  | "search"
   | "discord"
   | "github"
   | "x";
@@ -171,6 +175,28 @@ const PATHS: Record<IconName, React.ReactNode> = {
       <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22" />
       <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22" />
       <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z" />
+    </>
+  ),
+  "chevron-up": <path d="m18 15-6-6-6 6" />,
+  // Lucide "key-round": the admin panel, distinct from Rank's shield.
+  key: (
+    <>
+      <path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z" />
+      <circle cx="16.5" cy="7.5" r=".5" fill="currentColor" />
+    </>
+  ),
+  ticket: (
+    <>
+      <path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z" />
+      <path d="M13 5v2" />
+      <path d="M13 17v2" />
+      <path d="M13 11v2" />
+    </>
+  ),
+  search: (
+    <>
+      <circle cx="11" cy="11" r="8" />
+      <path d="m21 21-4.3-4.3" />
     </>
   ),
   copy: (
