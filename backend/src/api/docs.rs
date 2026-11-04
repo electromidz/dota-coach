@@ -323,7 +323,7 @@ mod tests {
             }
         }
 
-        assert_eq!(seen, 51, "every documented parameter was checked");
+        assert_eq!(seen, 54, "every documented parameter was checked");
     }
 
     /// A path parameter the server requires must be required in the document,

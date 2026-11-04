@@ -7,7 +7,11 @@ use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::domain::admin::{AdminUserSummary, DailyStat, VoucherRedemptionSummary};
+use crate::domain::admin::{
+    AdminUserSummary, DailyStat, PeriodCounts, UserSort, VoucherListItem, VoucherRedemptionSummary,
+    VoucherStatusFilter,
+};
+use crate::domain::voucher::Voucher;
 
 // `macro_rules!` rather than `const`, matching `subscription_columns!` in
 // `repositories::billing`: sqlx requires a `&'static str` literal, and only a
@@ -49,29 +53,42 @@ pub struct UserFilters {
 pub async fn list_users(
     pool: &PgPool,
     filters: &UserFilters,
+    sort: UserSort,
+    descending: bool,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<AdminUserSummary>, sqlx::Error> {
-    sqlx::query_as::<_, AdminUserSummary>(concat!(
-        "SELECT ",
-        user_columns!(),
-        " ",
-        user_join!(),
-        " WHERE ($3::text IS NULL OR u.status = $3)
-            AND ($4::text IS NULL OR s.status = $4)
-            AND ($5::timestamptz IS NULL OR u.last_login_at IS NULL OR u.last_login_at < $5)
-            AND ($6::text IS NULL OR u.persona_name ILIKE '%' || $6 || '%' OR u.steam_id::text = $6)
-          ORDER BY u.created_at DESC
-          LIMIT $1 OFFSET $2"
-    ))
-    .bind(limit)
-    .bind(offset)
-    .bind(&filters.status)
-    .bind(&filters.plan)
-    .bind(filters.last_login_before)
-    .bind(&filters.search)
-    .fetch_all(pool)
-    .await
+    // The ORDER BY is assembled from a closed enum, never from request text,
+    // so formatting it in is safe; every value still goes through a bind.
+    // `u.id` breaks ties so paging never repeats or skips a row.
+    let direction = if descending { "DESC" } else { "ASC" };
+    let sql = format!(
+        concat!(
+            "SELECT ",
+            user_columns!(),
+            " ",
+            user_join!(),
+            " WHERE ($3::text IS NULL OR u.status = $3)
+                AND ($4::text IS NULL OR s.status = $4)
+                AND ($5::timestamptz IS NULL OR u.last_login_at IS NULL OR u.last_login_at < $5)
+                AND ($6::text IS NULL OR u.persona_name ILIKE '%' || $6 || '%' OR u.steam_id::text = $6)
+              ORDER BY {column} {direction} NULLS LAST, u.id
+              LIMIT $1 OFFSET $2"
+        ),
+        column = sort.column(),
+        direction = direction,
+    );
+
+    // Safe: `column` and `direction` come only from the closed sets above.
+    sqlx::query_as::<_, AdminUserSummary>(sqlx::AssertSqlSafe(sql))
+        .bind(limit)
+        .bind(offset)
+        .bind(&filters.status)
+        .bind(&filters.plan)
+        .bind(filters.last_login_before)
+        .bind(&filters.search)
+        .fetch_all(pool)
+        .await
 }
 
 pub async fn count_users(pool: &PgPool, filters: &UserFilters) -> Result<i64, sqlx::Error> {
@@ -173,14 +190,50 @@ pub async fn count_total_users(pool: &PgPool) -> Result<i64, sqlx::Error> {
         .await
 }
 
-/// Distinct accounts with a `login` event since `since`. Distinct, not a raw
-/// event count: `dau`/`wau`/`mau` answer "how many people", not "how many
-/// times".
-pub async fn count_active_since(pool: &PgPool, since: DateTime<Utc>) -> Result<i64, sqlx::Error> {
+/// Distinct accounts with a `login` event in `[since, until]`. Distinct, not
+/// a raw event count: `dau`/`wau`/`mau` answer "how many people", not "how
+/// many times". Bounded on both ends so a window ending in the past does not
+/// also count everything since.
+pub async fn count_active_between(
+    pool: &PgPool,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT count(DISTINCT user_id) FROM events WHERE type = 'login' AND created_at >= $1",
+        "SELECT count(DISTINCT user_id) FROM events
+          WHERE type = 'login' AND created_at BETWEEN $1 AND $2",
     )
     .bind(since)
+    .bind(until)
+    .fetch_one(pool)
+    .await
+}
+
+/// Every window-scoped count for `[from, to]`, in one round trip — called for
+/// the selected window and again for the one before it.
+pub async fn period_counts(
+    pool: &PgPool,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<PeriodCounts, sqlx::Error> {
+    sqlx::query_as::<_, PeriodCounts>(
+        "SELECT
+            (SELECT count(*) FROM users WHERE created_at BETWEEN $1 AND $2) AS signups,
+            (SELECT count(DISTINCT user_id) FROM events
+              WHERE type = 'login' AND created_at BETWEEN $1 AND $2) AS active_users,
+            (SELECT count(DISTINCT user_id) FROM events
+              WHERE type = 'trial_started' AND created_at BETWEEN $1 AND $2) AS trials_started,
+            (SELECT count(*) FROM events
+              WHERE type = 'trial_expired' AND created_at BETWEEN $1 AND $2) AS trials_expired,
+            (SELECT count(*) FROM events
+              WHERE type = 'purchase' AND created_at BETWEEN $1 AND $2) AS purchases,
+            (SELECT count(*) FROM events
+              WHERE type = 'voucher_redeemed' AND created_at BETWEEN $1 AND $2) AS voucher_redemptions,
+            (SELECT COALESCE(SUM(amount_cents), 0)::bigint FROM payments
+              WHERE status = 'paid' AND completed_at BETWEEN $1 AND $2) AS revenue_cents",
+    )
+    .bind(from)
+    .bind(to)
     .fetch_one(pool)
     .await
 }
@@ -353,4 +406,107 @@ pub async fn daily_series(
     .bind(to)
     .fetch_all(pool)
     .await
+}
+
+/// The voucher-status predicate, numbered from `$1`. Same priority as the
+/// admin UI: deactivated, then used up, then expired, then active. A macro so
+/// it composes into a static query with `concat!`.
+macro_rules! voucher_status_predicate {
+    () => {
+        "(
+       $1::text IS NULL
+    OR ($1 = 'deactivated' AND NOT v.active)
+    OR ($1 = 'used' AND v.active AND v.used_count >= v.max_uses)
+    OR ($1 = 'expired' AND v.active AND v.used_count < v.max_uses
+                       AND v.expires_at IS NOT NULL AND v.expires_at <= now())
+    OR ($1 = 'active' AND v.active AND v.used_count < v.max_uses
+                      AND (v.expires_at IS NULL OR v.expires_at > now()))
+)"
+    };
+}
+
+#[derive(sqlx::FromRow)]
+struct VoucherListRow {
+    #[sqlx(flatten)]
+    voucher: Voucher,
+    redemption_id: Option<Uuid>,
+    redeemed_user_id: Option<Uuid>,
+    redeemed_steam_id: Option<i64>,
+    redeemed_persona_name: Option<String>,
+    redeemed_at: Option<DateTime<Utc>>,
+}
+
+impl From<VoucherListRow> for VoucherListItem {
+    fn from(row: VoucherListRow) -> Self {
+        let redeemed_by = match (
+            row.redemption_id,
+            row.redeemed_user_id,
+            row.redeemed_steam_id,
+            row.redeemed_at,
+        ) {
+            (Some(id), Some(user_id), Some(steam_id), Some(redeemed_at)) => {
+                Some(VoucherRedemptionSummary {
+                    id,
+                    user_id,
+                    steam_id,
+                    persona_name: row.redeemed_persona_name,
+                    redeemed_at,
+                })
+            }
+            _ => None,
+        };
+
+        Self {
+            voucher: row.voucher,
+            redeemed_by,
+        }
+    }
+}
+
+/// One page of vouchers, newest first, each with its latest redemption.
+pub async fn list_vouchers(
+    pool: &PgPool,
+    status: Option<VoucherStatusFilter>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<VoucherListItem>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, VoucherListRow>(concat!(
+        "SELECT v.id, v.code, v.duration_days, v.max_uses, v.used_count, v.expires_at,
+                v.active, v.note, v.created_by, v.created_at,
+                r.id AS redemption_id, r.user_id AS redeemed_user_id,
+                u.steam_id AS redeemed_steam_id, u.persona_name AS redeemed_persona_name,
+                r.redeemed_at
+           FROM vouchers v
+           LEFT JOIN LATERAL (
+               SELECT id, user_id, redeemed_at FROM voucher_redemptions
+                WHERE voucher_id = v.id
+                ORDER BY redeemed_at DESC
+                LIMIT 1
+           ) r ON true
+           LEFT JOIN users u ON u.id = r.user_id
+          WHERE ",
+        voucher_status_predicate!(),
+        " ORDER BY v.created_at DESC, v.id
+          LIMIT $2 OFFSET $3"
+    ))
+        .bind(status.map(VoucherStatusFilter::slug))
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows.into_iter().map(VoucherListItem::from).collect())
+}
+
+pub async fn count_vouchers(
+    pool: &PgPool,
+    status: Option<VoucherStatusFilter>,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(concat!(
+        "SELECT count(*) FROM vouchers v WHERE ",
+        voucher_status_predicate!()
+    ))
+        .bind(status.map(VoucherStatusFilter::slug))
+        .fetch_one(pool)
+        .await
 }
