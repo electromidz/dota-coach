@@ -674,10 +674,10 @@ impl Config {
         // from it: whether this deployment looks like production is a question
         // only the auth settings can answer.
         let auth = AuthConfig {
-            public_base_url: trim_trailing_slash(&optional(
-                "PUBLIC_BASE_URL",
-                "http://localhost:8080",
-            )),
+            public_base_url: public_base_url(
+                env::var(APP_PUBLIC_BASE_URL).ok(),
+                env::var("PUBLIC_BASE_URL").ok(),
+            ),
             frontend_base_url: trim_trailing_slash(&optional(
                 "FRONTEND_BASE_URL",
                 "http://localhost:3000",
@@ -803,6 +803,27 @@ where
 
 /// URLs are concatenated with paths throughout, so store them without a
 /// trailing slash and never produce `//` in a redirect.
+/// Takes priority over `PUBLIC_BASE_URL`.
+///
+/// Some hosts (SnapDeploy, at least) set `PUBLIC_BASE_URL` themselves, to the
+/// container's own address, and override the value configured for it. With
+/// the frontend proxying `/api`, that sends Steam back to the wrong origin: the
+/// login nonce cookie is not there, and every login fails as `login_expired`.
+/// A name no platform claims sidesteps the collision.
+pub const APP_PUBLIC_BASE_URL: &str = "APP_PUBLIC_BASE_URL";
+
+/// The public origin, from `APP_PUBLIC_BASE_URL`, then `PUBLIC_BASE_URL`, then
+/// the local default. Empty values count as unset.
+fn public_base_url(app: Option<String>, legacy: Option<String>) -> String {
+    let chosen = [app, legacy]
+        .into_iter()
+        .flatten()
+        .find(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "http://localhost:8080".to_string());
+
+    trim_trailing_slash(chosen.trim())
+}
+
 fn trim_trailing_slash(value: &str) -> String {
     value.trim_end_matches('/').to_string()
 }
@@ -831,6 +852,25 @@ mod tests {
         assert!(!llm(None).is_configured());
         assert!(!llm(Some("")).is_configured());
         assert!(llm(Some("sk-test")).is_configured());
+    }
+
+    #[test]
+    fn app_public_base_url_wins_over_a_platform_injected_public_base_url() {
+        let s = |v: &str| Some(v.to_string());
+
+        assert_eq!(
+            public_base_url(
+                s("https://dota-coach-ivory.vercel.app/"),
+                s("https://backend.containers.snapdeploy.app"),
+            ),
+            "https://dota-coach-ivory.vercel.app"
+        );
+        // Unset or blank falls through to the old variable, then the default.
+        assert_eq!(
+            public_base_url(s("  "), s("https://example.test")),
+            "https://example.test"
+        );
+        assert_eq!(public_base_url(None, None), "http://localhost:8080");
     }
 
     fn auth_at(base_url: &str, cookie_secure: bool) -> AuthConfig {

@@ -66,6 +66,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let dota = Arc::new(OpenDotaProvider::new(&config.dota)?);
     tracing::info!(base_url = %config.dota.base_url, "dota provider ready");
 
+    // Visible proof of which value won, when a host injects its own.
+    if let (Ok(app), Ok(legacy)) = (
+        std::env::var(dota_coach_backend::config::APP_PUBLIC_BASE_URL),
+        std::env::var("PUBLIC_BASE_URL"),
+    ) {
+        if !app.trim().is_empty() && app.trim_end_matches('/') != legacy.trim_end_matches('/') {
+            tracing::warn!(
+                app_public_base_url = %app,
+                public_base_url = %legacy,
+                "APP_PUBLIC_BASE_URL and PUBLIC_BASE_URL differ; using APP_PUBLIC_BASE_URL"
+            );
+        }
+    }
+
     let steam = Arc::new(SteamOpenId::new(reqwest::Client::new(), &config.auth));
     tracing::info!(
         openid_url = %config.auth.steam_openid_url,
