@@ -153,8 +153,12 @@ impl Role {
 ///
 /// Precision depends on what the provider knows. `lane_role` (1 safe, 2 mid,
 /// 3 off, 4 jungle) only exists for parsed replays, which most public matches
-/// are not; farm priority within the team is the fallback, and it can only
-/// separate cores from supports.
+/// are not; farm priority within the team is the fallback.
+///
+/// Always one of the five positions when anything is known, so every match
+/// lands in a role filter: farm order 1-5 reads as positions 1-5, a roamer as
+/// position 4. These are estimates — the match carries `role_source =
+/// 'estimated'` and the player can correct it.
 pub fn derive_role(
     lane_role: Option<i16>,
     is_roaming: Option<bool>,
@@ -163,7 +167,7 @@ pub fn derive_role(
     duration_seconds: i32,
 ) -> Role {
     if is_roaming == Some(true) {
-        return Role::Roamer;
+        return Role::Support;
     }
 
     let minutes = (duration_seconds as f64 / 60.0).max(1.0);
@@ -175,12 +179,14 @@ pub fn derive_role(
         Some(2) => return Role::Mid,
         Some(3) if is_core => return Role::Offlane,
         Some(3) => return Role::Support,
-        Some(4) => return Role::Jungle,
+        // A jungler's position is read from farm like an unparsed match.
         _ => {}
     }
 
     match farm_rank {
-        Some(0..=2) => Role::Core,
+        Some(0) => Role::Carry,
+        Some(1) => Role::Mid,
+        Some(2) => Role::Offlane,
         Some(3) => Role::Support,
         Some(_) => Role::HardSupport,
         None => Role::Unknown,
@@ -324,16 +330,20 @@ mod tests {
     }
 
     #[test]
-    fn mid_and_jungle_ignore_creep_score() {
+    fn mid_ignores_creep_score_and_a_jungler_is_read_from_farm() {
         assert_eq!(sample(40, Some(2)).derive_role(), Role::Mid);
-        assert_eq!(sample(400, Some(4)).derive_role(), Role::Jungle);
+        let mut jungle = sample(400, Some(4));
+        assert_eq!(jungle.derive_role(), Role::Unknown);
+        jungle.farm_rank = Some(0);
+        assert_eq!(jungle.derive_role(), Role::Carry);
     }
 
     #[test]
     fn roaming_wins_over_lane_assignment() {
         let mut m = sample(300, Some(1));
         m.is_roaming = Some(true);
-        assert_eq!(m.derive_role(), Role::Roamer);
+        // A roamer is a position 4.
+        assert_eq!(m.derive_role(), Role::Support);
     }
 
     #[test]
@@ -341,9 +351,12 @@ mod tests {
         // Unparsed match, no lane data at all.
         assert_eq!(sample(300, None).derive_role(), Role::Unknown);
 
-        let mut core = sample(300, None);
-        core.farm_rank = Some(1);
-        assert_eq!(core.derive_role(), Role::Core);
+        // Farm order reads as positions, never a generic "Core".
+        for (rank, role) in [(0, Role::Carry), (1, Role::Mid), (2, Role::Offlane)] {
+            let mut core = sample(300, None);
+            core.farm_rank = Some(rank);
+            assert_eq!(core.derive_role(), role);
+        }
 
         let mut support = sample(40, None);
         support.farm_rank = Some(3);

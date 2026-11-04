@@ -17,6 +17,7 @@ import { Card } from "@/components/ui/Card";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
 import { Icon } from "@/components/ui/Icon";
 import { StreamingText } from "@/components/ui/StreamingText";
+import { ScopeLine } from "@/components/ui/ScopeLine";
 import { ApiError, getMatches, getStats, syncMatches } from "@/lib/api";
 import {
   formatFixed,
@@ -165,6 +166,7 @@ export function Overview({ loginError }: { loginError?: string }) {
 
       {/* Which games everything below is about. Above the numbers, because it
           is what makes them readable. */}
+      {stats && stored > 0 ? <ScopeLine matches={stats.scope.analyzed_matches} /> : null}
       {stats && stored > 0 ? (
         <ScopeBanner
           analyzed={stats.scope.analyzed_matches}

@@ -808,7 +808,7 @@ mod tests {
         assert_eq!(m.lane_role, None);
         // Highest net worth on Radiant.
         assert_eq!(m.farm_rank, Some(0));
-        assert_eq!(m.derive_role(), Role::Core);
+        assert_eq!(m.derive_role(), Role::Carry);
     }
 
     #[test]

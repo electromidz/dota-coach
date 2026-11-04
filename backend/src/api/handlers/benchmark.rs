@@ -252,7 +252,8 @@ pub async fn overview(
     AppQuery(query): AppQuery<BenchmarkQuery>,
 ) -> AppResult<Json<BenchmarkResponse>> {
     let player = load_linked_player(&state, &user).await?;
-    let (scope, role) = resolve_scope(&state, &player, query.role.as_deref()).await?;
+    let resolved = crate::api::scope::resolve(&state, &player, query.role.as_deref()).await?;
+    let (scope, role) = (resolved.matches, resolved.role);
     build(
         &state,
         &player,
@@ -264,44 +265,6 @@ pub async fn overview(
     )
     .await
     .map(Json)
-}
-
-/// Which matches of the player's own the comparison reads.
-///
-/// Defaults to the role they are being coached on, because that is the
-/// comparison they came for: a support player's Phantom Assassin percentile is
-/// a fact about a different game than the one they are trying to improve at.
-/// `?role=all` opts out, and an explicit slug overrides both.
-async fn resolve_scope(
-    state: &AppState,
-    player: &DotaPlayer,
-    requested: Option<&str>,
-) -> AppResult<(MatchScope, Option<CoachableRole>)> {
-    let window = state.config.roles.analysis_match_limit;
-
-    let role = match requested.map(str::trim) {
-        // Explicit opt-out: every role, still competitive-only.
-        Some("all") => return Ok((MatchScope::competitive(window), None)),
-        Some(slug) if !slug.is_empty() => Some(CoachableRole::parse(slug).ok_or_else(|| {
-            AppError::BadRequest(format!(
-                "'{slug}' is not a role. Use one of: {}, or 'all'.",
-                CoachableRole::ALL
-                    .iter()
-                    .map(|r| r.slug())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ))
-        })?),
-        // No preference stated: follow the coaching profile if there is one.
-        _ => repositories::coaching_profile::find(&state.db, player.id)
-            .await?
-            .map(|profile| profile.selected_role),
-    };
-
-    Ok(match role {
-        Some(role) => (MatchScope::for_role(role, window), Some(role)),
-        None => (MatchScope::competitive(window), None),
-    })
 }
 
 /// `GET /api/benchmark/:metric` — the same comparison, narrowed to one metric.
@@ -348,7 +311,8 @@ pub async fn metric(
         .ok_or_else(|| AppError::BadRequest(format!("Unknown metric '{slug}'.")))?;
 
     let player = load_linked_player(&state, &user).await?;
-    let (scope, role) = resolve_scope(&state, &player, query.role.as_deref()).await?;
+    let resolved = crate::api::scope::resolve(&state, &player, query.role.as_deref()).await?;
+    let (scope, role) = (resolved.matches, resolved.role);
     build(
         &state,
         &player,

@@ -727,16 +727,18 @@ pub async fn normalize_hero_names(
     Ok(result.rows_affected())
 }
 
-/// Matches whose role came from the farm-priority fallback (no lane data),
-/// newest first. These are the ones a farm-rank fix can change.
+/// Matches whose role came from the farm-priority fallback (no lane data), or
+/// carry a label that is not a position (Core, Roamer, Jungle, Unknown),
+/// newest first. These are the ones a re-estimate can change. Never a role
+/// the player set.
 pub async fn farm_ranked_matches(pool: &PgPool) -> Result<Vec<(Uuid, i64, i64, String)>, sqlx::Error> {
     sqlx::query_as(
         "SELECT m.id, m.match_id, p.dota_account_id, m.role
            FROM matches m
            JOIN dota_players p ON p.id = m.dota_player_id
-          WHERE m.lane_role IS NULL
-            AND m.role_source = 'estimated'
-            AND m.role IN ('Core', 'Support', 'Hard Support', 'Unknown')
+          WHERE m.role_source = 'estimated'
+            AND (m.role IN ('Core', 'Unknown', 'Roamer', 'Jungle')
+                 OR (m.lane_role IS NULL AND m.role IN ('Support', 'Hard Support')))
           ORDER BY m.started_at DESC",
     )
     .fetch_all(pool)

@@ -57,17 +57,22 @@ pub async fn get(
     EntitledUser(user): EntitledUser,
 ) -> AppResult<Json<RankDistribution>> {
     let player = load_linked_player(&state, &user).await?;
-    let scope = MatchScope::competitive(state.config.roles.analysis_match_limit);
+    // The same population `/api/benchmark` reads by default — the coaching
+    // role when there is one — so "your GPM percentile" is one number on both
+    // pages rather than an all-roles figure here and a role figure there.
+    let resolved = crate::api::scope::resolve(&state, &player, None).await?;
+    let (scope, role) = (resolved.matches, resolved.role);
 
-    // The most-played hero: the only one likely to clear the sample floor, and
-    // the same default `/api/benchmark` uses so the two screens describe the
-    // same hero unless the player asks otherwise.
+    // The most-played hero in that scope: the only one likely to clear the
+    // sample floor, and the same default `/api/benchmark` uses.
     let heroes = repositories::metrics::hero_stats_scoped(&state.db, player.id, &scope, 1).await?;
     let Some(top) = heroes.first() else {
         return Ok(Json(RankDistribution {
             hero_id: 0,
             hero_name: String::new(),
             sample: 0,
+            role,
+            role_label: role.map(|r| r.label()),
             fits: Vec::new(),
             closest: None,
             resemblance: Vec::new(),
@@ -195,6 +200,8 @@ pub async fn get(
         hero_id: top.hero_id,
         hero_name: top.hero_name.clone(),
         sample: averages.sample,
+        role,
+        role_label: role.map(|r| r.label()),
         fits,
         closest,
         resemblance,

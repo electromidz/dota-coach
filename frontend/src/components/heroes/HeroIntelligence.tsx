@@ -8,6 +8,7 @@ import { MetaBars } from "@/components/heroes/MetaBars";
 import { PoolGrid } from "@/components/heroes/PoolGrid";
 import { RecommendedRow } from "@/components/heroes/RecommendedRow";
 import { SignedOut } from "@/components/shell/SignedOut";
+import { ScopeLine } from "@/components/ui/ScopeLine";
 import { Alert } from "@/components/ui/Alert";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
 import { InfoTip } from "@/components/ui/InfoTip";
@@ -99,9 +100,11 @@ export function HeroIntelligence() {
             ]}
           />
         ) : null}
-        <p className="font-mono text-xs text-ink-faint">
-          {scope.role_label ?? "All roles"} · {scope.population} · last {scope.window}
-        </p>
+        <ScopeLine
+          role={scope.role_label}
+          mode={scope.population}
+          matches={data.pool.reduce((sum, hero) => sum + hero.matches, 0)}
+        />
       </div>
 
       {data.note ? <Alert tone="info">{data.note}</Alert> : null}

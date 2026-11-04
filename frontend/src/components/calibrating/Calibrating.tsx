@@ -15,6 +15,7 @@ import { TrajectoryChart } from "@/components/calibrating/TrajectoryChart";
 import { PageSkeleton } from "@/components/shell/PageSkeleton";
 import { SignedOut } from "@/components/shell/SignedOut";
 import { Alert } from "@/components/ui/Alert";
+import { ScopeLine } from "@/components/ui/ScopeLine";
 import { Card } from "@/components/ui/Card";
 import { ApiError, getCalibration, getRankDistribution } from "@/lib/api";
 import { useSession } from "@/lib/session-context";
@@ -144,13 +145,15 @@ export function Calibrating() {
             Modeled movement across your last {data.momentum.window} ranked
             matches, relative to where the window started.
           </p>
+          <ScopeLine mode="Ranked" matches={data.momentum.wins + data.momentum.losses} className="mt-1" />
         </div>
 
         <MomentumChart momentum={data.momentum} />
       </Card>
 
       {brackets ? (
-        <Card>
+        <Card className="flex flex-col gap-3">
+          <ScopeLine hero={brackets.hero_name} role={brackets.role_label} matches={brackets.sample} />
           <EstablishedRankPanel
             rank={data.established_rank}
             confidence={data.confidence}
@@ -172,6 +175,7 @@ export function Calibrating() {
               How closely your {brackets.hero_name} figures resemble each
               bracket&rsquo;s real peers.
             </p>
+            <ScopeLine hero={brackets.hero_name} role={brackets.role_label} matches={brackets.sample} className="mt-1" />
           </div>
 
           <RankDistributionBars distribution={brackets} />

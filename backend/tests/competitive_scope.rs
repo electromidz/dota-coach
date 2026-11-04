@@ -250,12 +250,13 @@ async fn turbo_cannot_influence_the_role_recommendation() {
 }
 
 #[tokio::test]
-async fn unattributable_matches_are_counted_rather_than_assigned_a_lane() {
+async fn an_unparsed_core_is_placed_by_farm_order_as_an_estimate() {
     let Some(db) = support::pool().await else {
-        return skip("unattributable_matches_are_counted_rather_than_assigned_a_lane");
+        return skip("an_unparsed_core_is_placed_by_farm_order_as_an_estimate");
     };
 
     let mut history = batch(1_000, 10, RANKED_ALL_PICK, Lane::Carry, 5);
+    // Second in team farm, no lane data: read as position 2.
     history.extend(batch(2_000, 15, RANKED_ALL_PICK, Lane::UnclassifiedCore, 8));
 
     let (db, player) = seed(db, history).await;
@@ -267,18 +268,13 @@ async fn unattributable_matches_are_counted_rather_than_assigned_a_lane() {
         test_config().roles.score_weights,
     );
 
+    // Every match lands in one of the five positions, so a role filter never
+    // silently drops games. They stay marked as estimated on the match.
     assert_eq!(analysis.analyzed_matches, 25);
-    assert_eq!(
-        analysis.unclassified_matches, 15,
-        "an unparsed core match is not evidence about any one lane",
-    );
-
-    let carry = analysis
-        .roles
-        .iter()
-        .find(|r| r.role == CoachableRole::Carry)
-        .unwrap();
-    assert_eq!(carry.matches, 10);
+    assert_eq!(analysis.unclassified_matches, 0);
+    let count = |role| analysis.roles.iter().find(|r| r.role == role).unwrap().matches;
+    assert_eq!(count(CoachableRole::Carry), 10);
+    assert_eq!(count(CoachableRole::Mid), 15);
 }
 
 // ---------------------------------------------------------------------------

@@ -204,7 +204,11 @@ function Ready({
 
       {comparison.kind === "loading" ? <ComparisonSkeleton /> : null}
       {comparison.kind === "error" ? <Alert>{comparison.message}</Alert> : null}
-      {data ? <MatchComparison data={data} durationSeconds={match.duration_seconds} /> : null}
+      {data ? <MatchComparison
+          data={data}
+          durationSeconds={match.duration_seconds}
+          positionLabel={match.position ? match.position_label : null}
+        /> : null}
 
       <NetWorthTimeline id={match.id} />
 

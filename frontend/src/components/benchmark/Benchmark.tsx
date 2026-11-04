@@ -13,6 +13,7 @@ import { LegendItem, RadarCompare } from "@/components/charts/RadarCompare";
 import { SignedOut } from "@/components/shell/SignedOut";
 import { Alert } from "@/components/ui/Alert";
 import { ChartCard } from "@/components/ui/ChartCard";
+import { ScopeLine } from "@/components/ui/ScopeLine";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
 import { Icon } from "@/components/ui/Icon";
 import { InfoTip } from "@/components/ui/InfoTip";
@@ -287,6 +288,8 @@ export function Benchmark() {
           ; nothing has been estimated.
         </Alert>
       ) : null}
+
+      <ScopeLine hero={data.hero_name} role={data.context.role_label} matches={data.sample} />
 
       {data.note ? <Alert tone="info">{data.note}</Alert> : null}
 

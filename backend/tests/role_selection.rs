@@ -261,3 +261,31 @@ async fn role_selection_requires_a_session() {
 
     app.cleanup(&[]).await;
 }
+
+/// Rank and Benchmark quote one number for one scope: both read the coaching
+/// role by default, so a percentile never differs between the two pages.
+#[tokio::test]
+async fn rank_and_benchmark_read_the_same_scope_by_default() {
+    let Some(db) = support::pool().await else {
+        return skip("rank_and_benchmark_read_the_same_scope_by_default");
+    };
+
+    let (app, session) = seed_app(db, support_is_stronger(), 100).await;
+    let chosen = app
+        .post_json("/api/coach/role", r#"{"role":"soft_support"}"#, Some(&session.token))
+        .await;
+    assert_eq!(chosen.status, 200, "{}", chosen.body);
+
+    let rank = app.get("/api/calibration/brackets", Some(&session.token)).await.json();
+    let bench = app.get("/api/benchmark", Some(&session.token)).await.json();
+
+    assert_eq!(rank["role"], "soft_support");
+    assert_eq!(rank["role_label"], "Soft Support");
+    assert_eq!(bench["context"]["role"], "soft_support");
+    assert_eq!(rank["hero_id"], bench["hero_id"]);
+    assert_eq!(rank["sample"], bench["sample"]);
+    // Turbo carry games are in neither.
+    assert_eq!(rank["sample"], 20);
+
+    app.cleanup(&[]).await;
+}

@@ -304,6 +304,11 @@ pub struct RankDistribution {
     pub hero_name: String,
     /// Matches behind the player's own figures.
     pub sample: i64,
+    /// The role those matches were narrowed to: the coaching role by
+    /// default, the same scope `/api/benchmark` reads, so the two pages
+    /// quote the same percentile. `None` reads every role.
+    pub role: Option<crate::domain::role::CoachableRole>,
+    pub role_label: Option<&'static str>,
     /// One entry per medal, Herald first.
     pub fits: Vec<BracketFit>,
     /// The medal whose peers this player most resembles: the bracket whose

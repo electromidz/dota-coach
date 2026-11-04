@@ -98,7 +98,7 @@ afterEach(() => vi.clearAllMocks());
 describe("HeroIntelligence", () => {
   it("states the scope and defaults to the coaching role", async () => {
     render(<HeroIntelligence />);
-    expect(await screen.findByText("Soft Support · Ranked + All Pick · last 100")).toBeTruthy();
+    expect(await screen.findByText(/^All heroes · Soft Support · Ranked \+ All Pick · \d+ match/)).toBeTruthy();
     expect(getHeroIntelligence).toHaveBeenCalledWith(undefined, undefined);
   });
 

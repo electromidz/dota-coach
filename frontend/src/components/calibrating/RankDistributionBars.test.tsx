@@ -32,6 +32,8 @@ function distribution(
     hero_id: 35,
     hero_name: "Luna",
     sample: 24,
+    role: null,
+    role_label: null,
     fits: [],
     closest: "archon",
     resemblance: [

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { cn, formatDuration, formatRank, kda, timeAgo, ordinal, fixOrdinals } from "./utils";
+import { cn, formatDuration, formatRank, kda, timeAgo, ordinal, fixOrdinals, scopeText } from "./utils";
 
 describe("cn", () => {
   it("joins truthy class names", () => {
@@ -123,5 +123,17 @@ describe("fixOrdinals", () => {
       "61st and 51st, then 11th and 23rd",
     );
     expect(fixOrdinals("won 5-3 in 2026")).toBe("won 5-3 in 2026");
+  });
+});
+
+describe("scopeText", () => {
+  it("names hero, role, mode and sample, defaulting to the shared population", () => {
+    expect(scopeText({ hero: "Mirana", role: "Soft Support", matches: 5 })).toBe(
+      "Mirana · Soft Support · Ranked + All Pick · 5 matches",
+    );
+    expect(scopeText({ matches: 1, mode: "Ranked" })).toBe("All heroes · All roles · Ranked · 1 match");
+    expect(scopeText({ hero: null, role: null, matches: 1234 })).toBe(
+      "All heroes · All roles · Ranked + All Pick · 1,234 matches",
+    );
   });
 });

@@ -1718,6 +1718,10 @@ export interface RankDistribution {
   hero_id: number;
   hero_name: string;
   sample: number;
+  /** The role the sample was narrowed to: the coaching role by default, the
+   *  same scope Benchmark reads. Null for every role. */
+  role: CoachableRole | null;
+  role_label: string | null;
   /** One entry per medal, Herald first. */
   fits: BracketFit[];
   /** The medal whose peers this player most resembles. */
