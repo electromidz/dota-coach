@@ -148,6 +148,8 @@ pub struct MatchFilter {
     /// `Some(true)` for wins, `Some(false)` for losses.
     pub won: Option<bool>,
     pub role: Option<CoachableRole>,
+    /// Only matches started at or after this.
+    pub since: Option<DateTime<Utc>>,
     /// Which kind of game. `All` by default, which is every stored match.
     pub mode: ModeFilter,
     pub sort: MatchSort,
@@ -163,18 +165,18 @@ impl MatchFilter {
             .map(|role| role.stored_labels().iter().map(|l| l.to_string()).collect())
     }
 
-    /// The predicate over `m`, using three bind slots starting at `first`.
+    /// The predicate over `m`, using four bind slots starting at `first`.
     ///
     /// Each clause is a no-op when its parameter is `NULL`, so one SQL string
     /// serves every combination of filters and the bind positions never shift.
-    /// The mode adds a constant clause rather than a fourth slot, so callers
-    /// keep binding the same three values.
+    /// The mode adds a constant clause rather than a bind slot.
     fn predicate(&self, first: usize) -> String {
-        let (hero, won, roles) = (first, first + 1, first + 2);
+        let (hero, won, roles, since) = (first, first + 1, first + 2, first + 3);
         format!(
             "AND (${hero}::int IS NULL OR m.hero_id = ${hero})
              AND (${won}::bool IS NULL OR m.won = ${won})
              AND (${roles}::text[] IS NULL OR m.role = ANY(${roles}))
+             AND (${since}::timestamptz IS NULL OR m.started_at >= ${since})
              {mode}",
             mode = self.mode.sql_clause(),
         )
@@ -185,6 +187,7 @@ impl MatchFilter {
         self.hero_id.is_none()
             && self.won.is_none()
             && self.role.is_none()
+            && self.since.is_none()
             && self.mode == ModeFilter::All
     }
 }
@@ -307,6 +310,7 @@ pub async fn list_by_player(
     .bind(filter.hero_id)
     .bind(filter.won)
     .bind(filter.role_labels())
+    .bind(filter.since)
     .fetch_all(pool)
     .await
 }
@@ -346,6 +350,7 @@ pub async fn list_by_player_scoped(
     .bind(filter.hero_id)
     .bind(filter.won)
     .bind(filter.role_labels())
+    .bind(filter.since)
     .fetch_all(pool)
     .await
 }
@@ -366,6 +371,7 @@ pub async fn count_by_player(
     .bind(filter.hero_id)
     .bind(filter.won)
     .bind(filter.role_labels())
+    .bind(filter.since)
     .fetch_one(pool)
     .await
 }
@@ -393,6 +399,7 @@ pub async fn count_by_player_scoped(
     .bind(filter.hero_id)
     .bind(filter.won)
     .bind(filter.role_labels())
+    .bind(filter.since)
     .fetch_one(pool)
     .await
 }
@@ -727,16 +734,18 @@ pub async fn normalize_hero_names(
     Ok(result.rows_affected())
 }
 
-/// Matches whose role came from the farm-priority fallback (no lane data),
-/// newest first. These are the ones a farm-rank fix can change.
+/// Matches whose role came from the farm-priority fallback (no lane data), or
+/// carry a label that is not a position (Core, Roamer, Jungle, Unknown),
+/// newest first. These are the ones a re-estimate can change. Never a role
+/// the player set.
 pub async fn farm_ranked_matches(pool: &PgPool) -> Result<Vec<(Uuid, i64, i64, String)>, sqlx::Error> {
     sqlx::query_as(
         "SELECT m.id, m.match_id, p.dota_account_id, m.role
            FROM matches m
            JOIN dota_players p ON p.id = m.dota_player_id
-          WHERE m.lane_role IS NULL
-            AND m.role_source = 'estimated'
-            AND m.role IN ('Core', 'Support', 'Hard Support', 'Unknown')
+          WHERE m.role_source = 'estimated'
+            AND (m.role IN ('Core', 'Unknown', 'Roamer', 'Jungle')
+                 OR (m.lane_role IS NULL AND m.role IN ('Support', 'Hard Support')))
           ORDER BY m.started_at DESC",
     )
     .fetch_all(pool)

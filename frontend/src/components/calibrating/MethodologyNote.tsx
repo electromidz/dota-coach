@@ -36,15 +36,12 @@ export function MethodologyNote({
         &minus;{formatMmr(methodology.loss_base_mmr)}
       </span>{" "}
       per loss, adjusted for how you performed, and is anchored so each stretch
-      lands on the next real reading. Rank confidence counts ranked matches at{" "}
+      lands on the next real reading. A break in the line is a stretch with no
+      ranked games. Rank confidence counts ranked games in the last{" "}
       <span className="font-mono tabular-nums">
-        {methodology.confidence_per_match_pct}%
+        {methodology.confidence_window_days}
       </span>{" "}
-      each, settling at{" "}
-      <span className="font-mono tabular-nums">
-        {methodology.confidence_threshold_pct}%
-      </span>
-      .
+      days; {methodology.confidence_target_matches} settles it.
     </p>
   );
 }

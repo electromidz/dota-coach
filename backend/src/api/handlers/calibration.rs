@@ -26,9 +26,10 @@ use utoipa::ToSchema;
 use crate::api::extract::EntitledUser;
 use crate::api::handlers::stats::load_linked_player;
 use crate::domain::calibration::{
-    estimate_mmr, rank_label, EstablishedRank, Methodology, Momentum, RankConfidence,
-    RolePreference, Streak, TrajectoryPoint,
+    estimate_mmr, next_medal, rank_label, EstablishedRank, Methodology, Momentum, RankConfidence,
+    RankedHero, RolePreference, Streak, TrajectoryPoint,
 };
+use crate::services::metrics::rating;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
 use crate::repositories::r#match::MatchFilter;
@@ -49,6 +50,8 @@ pub struct CalibrationResponse {
     pub momentum: Momentum,
     /// Most-played role first. Empty when no ranked match is in the window.
     pub role_preference: Vec<RolePreference>,
+    /// Ranked record on the most-played heroes, at most five.
+    pub hero_win_rates: Vec<RankedHero>,
     pub methodology: Methodology,
     pub calibration_version: i32,
 }
@@ -116,7 +119,20 @@ pub async fn get(
         label: rank_tier.and_then(rank_label),
         leaderboard_rank: latest.and_then(|s| s.leaderboard_rank),
         mmr: rank_tier.and_then(estimate_mmr),
+        next_medal: rank_tier.and_then(|t| next_medal(t, config.win_base_mmr)),
     };
+
+    // Each momentum point carries the same per-match rating the match list
+    // shows, from the same baselines.
+    let mut momentum = calibration::momentum(&matches, config);
+    let baselines = rating::RatingBaselines::from_rows(
+        &repositories::metrics::rating_baselines(&state.db, player.id).await?,
+    );
+    for point in &mut momentum.points {
+        if let Some(m) = matches.iter().find(|m| m.id == point.id) {
+            point.rating = Some(rating::rating(m, &baselines.for_match(m)));
+        }
+    }
 
     Ok(Json(CalibrationResponse {
         established_rank,
@@ -126,8 +142,9 @@ pub async fn get(
         confidence: calibration::rank_confidence(&matches, config, now),
         trajectory: calibration::trajectory(&snapshots, &matches, config),
         streak: calibration::streak(&matches),
-        momentum: calibration::momentum(&matches, config),
+        momentum,
         role_preference: calibration::role_preference(&matches),
+        hero_win_rates: calibration::ranked_heroes(&matches, 5),
         methodology: calibration::methodology(config),
         calibration_version: CALIBRATION_VERSION,
     }))

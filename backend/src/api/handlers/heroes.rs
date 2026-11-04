@@ -430,36 +430,16 @@ pub(crate) async fn resolve_scope(
     player: &DotaPlayer,
     requested: Option<&str>,
 ) -> AppResult<(MatchScope, HeroScope)> {
-    let window = state.config.roles.analysis_match_limit;
-    let coaching = repositories::coaching_profile::find(&state.db, player.id)
-        .await?
-        .map(|p| p.selected_role);
-
-    let role = match requested {
-        Some("all") => None,
-        Some(slug) => Some(
-            CoachableRole::ALL
-                .into_iter()
-                .find(|r| r.slug() == slug)
-                .ok_or_else(|| AppError::BadRequest(format!("Unknown role \"{slug}\".")))?,
-        ),
-        None => coaching,
-    };
-
-    let scope = match role {
-        Some(role) => MatchScope::for_role(role, window),
-        None => MatchScope::competitive(window),
-    };
-
+    let resolved = crate::api::scope::resolve(state, player, requested).await?;
     Ok((
-        scope,
+        resolved.matches,
         HeroScope {
-            role,
-            role_label: role.map(CoachableRole::label),
-            coaching_role: coaching,
-            coaching_role_label: coaching.map(CoachableRole::label),
+            role: resolved.role,
+            role_label: resolved.role.map(CoachableRole::label),
+            coaching_role: resolved.coaching_role,
+            coaching_role_label: resolved.coaching_role.map(CoachableRole::label),
             population: "Ranked + All Pick",
-            window,
+            window: resolved.window,
         },
     ))
 }

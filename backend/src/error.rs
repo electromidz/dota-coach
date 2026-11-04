@@ -163,7 +163,12 @@ impl IntoResponse for AppError {
                 message: self.public_message(),
             },
         };
-        (status, Json(body)).into_response()
+        let transient = matches!(code, "DATABASE_BUSY" | "DATABASE_UNAVAILABLE");
+        let mut response = (status, Json(body)).into_response();
+        if transient {
+            response.extensions_mut().insert(crate::api::retry::Transient);
+        }
+        response
     }
 }
 
@@ -323,11 +328,43 @@ mod tests {
 }
 
 /// The database could not be reached, as opposed to a query going wrong.
+///
+/// Includes what a connection pooler answers when it is momentarily full or
+/// restarting. Supabase's Supavisor in session mode refuses new clients past
+/// its pool size ("max clients reached"), and that arrives as a database
+/// error rather than an I/O one; without this it surfaced as a generic 500
+/// even though a retry a moment later succeeds.
 fn is_connection_failure(error: &sqlx::Error) -> bool {
-    matches!(
-        error,
-        sqlx::Error::Io(_) | sqlx::Error::Tls(_) | sqlx::Error::PoolClosed
-    )
+    match error {
+        sqlx::Error::Io(_) | sqlx::Error::Tls(_) | sqlx::Error::PoolClosed => true,
+        sqlx::Error::Protocol(message) => is_pooler_refusal(message),
+        sqlx::Error::Database(db) => {
+            let code = db.code();
+            let code = code.as_deref().unwrap_or_default();
+            // 08xxx: connection exceptions. 53300: too many connections.
+            // 57P01-03: the server is shutting down or not yet accepting.
+            code.starts_with("08")
+                || code == "53300"
+                || matches!(code, "57P01" | "57P02" | "57P03")
+                || is_pooler_refusal(db.message())
+        }
+        _ => false,
+    }
+}
+
+/// A pooler's "full, try again" in its own words.
+fn is_pooler_refusal(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "maxclientsinsessionmode",
+        "max clients reached",
+        "too many connections",
+        "too many clients",
+        "connection pool timeout",
+        "server conn crashed",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 #[cfg(test)]
@@ -342,6 +379,14 @@ mod database_error_tests {
 
         let busy = AppError::Database(sqlx::Error::PoolTimedOut);
         assert_eq!(busy.parts(), (StatusCode::SERVICE_UNAVAILABLE, "DATABASE_BUSY"));
+
+        // A pooler that is momentarily full is a wait, not a fault.
+        let full = AppError::Database(sqlx::Error::Protocol(
+            "FATAL: (EMAXCONNSESSION) max clients reached in session mode".into(),
+        ));
+        assert_eq!(full.parts(), (StatusCode::SERVICE_UNAVAILABLE, "DATABASE_UNAVAILABLE"));
+        assert!(is_pooler_refusal("Max client connections reached: MaxClientsInSessionMode"));
+        assert!(!is_pooler_refusal("duplicate key value violates unique constraint"));
 
         // A query that genuinely failed stays a 500.
         let row = AppError::Database(sqlx::Error::RowNotFound);

@@ -65,6 +65,18 @@ function match(overrides: Partial<MatchView> = {}): MatchView {
 
 function page(overrides: Partial<MatchListResponse> = {}): MatchListResponse {
   return {
+    summary: {
+      matches: 1,
+      capped: false,
+      wins: 1,
+      win_rate: 100,
+      avg_kda: 9,
+      avg_gpm: 620,
+      recent_results: [true],
+      rolling_win_rate: [],
+      rolling: 10,
+      best_gpm_match_id: null,
+    },
     matches: [match()],
     page: 1,
     limit: 20,
@@ -177,7 +189,13 @@ describe("MatchList filters", () => {
       "All heroes",
       "Lion2",
     ]);
-    expect(screen.getByText("Carry (5)")).toBeTruthy();
+  });
+
+  it("offers positions 1-5 as chips with their counts, disabling empty ones", async () => {
+    render(<MatchList />);
+    const carry = await screen.findByRole("radio", { name: /Pos 1/ });
+    expect(carry.textContent).toContain("5");
+    expect((screen.getByRole("radio", { name: /Pos 4/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("sends each filter to the backend rather than trimming the page here", async () => {
@@ -187,11 +205,14 @@ describe("MatchList filters", () => {
     await pickHero("Luna");
     await waitFor(() => expect(lastCall()[2].heroId).toBe(35));
 
-    fireEvent.change(screen.getByLabelText("Role"), { target: { value: "mid" } });
+    fireEvent.click(screen.getByRole("radio", { name: /Pos 2/ }));
     await waitFor(() => expect(lastCall()[2].role).toBe("mid"));
 
-    fireEvent.change(screen.getByLabelText("Result"), { target: { value: "loss" } });
+    fireEvent.click(screen.getByRole("radio", { name: "Losses" }));
     await waitFor(() => expect(lastCall()[2].result).toBe("loss"));
+
+    fireEvent.click(screen.getByRole("radio", { name: "30d" }));
+    await waitFor(() => expect(lastCall()[2].days).toBe(30));
 
     fireEvent.change(screen.getByLabelText("Sort"), { target: { value: "gpm_desc" } });
 
@@ -203,20 +224,34 @@ describe("MatchList filters", () => {
         role: "mid",
         result: "loss",
         sort: "gpm_desc",
+        days: 30,
       });
     });
+
+    // Active filters show as removable chips.
+    fireEvent.click(screen.getByRole("button", { name: "Remove filter: Losses" }));
+    await waitFor(() => expect(lastCall()[2].result).toBe("all"));
   });
 
-  it("returns to page one when a filter changes", async () => {
+  it("appends the next page on Load more, and starts over when a filter changes", async () => {
     getMatches.mockResolvedValue(page({ total: 60, total_pages: 3 }));
     render(<MatchList />);
     await screen.findByRole("combobox", { name: "Hero" });
 
-    fireEvent.click(screen.getByRole("button", { name: /Next/ }));
+    getMatches.mockResolvedValueOnce(page({ total: 60, total_pages: 3, page: 2, matches: [match({ id: "match-2" })] }));
+    fireEvent.click(screen.getByRole("button", { name: /Load more/ }));
     await waitFor(() => expect(lastCall()[0]).toBe(2));
+    // Both pages are on screen (card list on a phone; the table is hidden by CSS).
+    await waitFor(() => expect(screen.getAllByRole("link", { name: /Luna/ }).length).toBeGreaterThanOrEqual(2));
 
-    fireEvent.change(screen.getByLabelText("Result"), { target: { value: "win" } });
+    fireEvent.click(screen.getByRole("radio", { name: "Wins" }));
     await waitFor(() => expect(lastCall()[0]).toBe(1));
+  });
+
+  it("shows the summary strip for the current filter", async () => {
+    render(<MatchList />);
+    expect(await screen.findByRole("region", { name: "Summary for this filter" })).toBeTruthy();
+    expect(screen.getByText("1W – 0L")).toBeTruthy();
   });
 
   it("issues exactly one request per change", async () => {
@@ -249,6 +284,7 @@ describe("MatchList filters", () => {
         result: "all",
         sort: "newest",
       });
+      expect(lastCall()[2].days).toBeUndefined();
     });
   });
 

@@ -1,49 +1,44 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Paywall } from "@/components/billing/Paywall";
-import { EstablishedRankPanel } from "@/components/calibrating/EstablishedRankPanel";
-import { MatchHistoryTable } from "@/components/calibrating/MatchHistoryTable";
 import { MethodologyNote } from "@/components/calibrating/MethodologyNote";
-import { MomentumChart } from "@/components/calibrating/MomentumChart";
-import { RankCard } from "@/components/calibrating/RankCard";
-import { RankDistributionBars } from "@/components/calibrating/RankDistributionBars";
-import { RolePreferenceBars } from "@/components/calibrating/RolePreferenceBars";
-import { StreakBadge } from "@/components/calibrating/StreakBadge";
+import { MomentumCard } from "@/components/calibrating/MomentumChart";
+import { BracketRadar, RankBreakdown } from "@/components/calibrating/RankBreakdown";
+import { RankHeader } from "@/components/calibrating/RankHeader";
 import { TrajectoryChart } from "@/components/calibrating/TrajectoryChart";
-import { PageSkeleton } from "@/components/shell/PageSkeleton";
+import { RecentMatches } from "@/components/dashboard/RecentMatches";
 import { SignedOut } from "@/components/shell/SignedOut";
 import { Alert } from "@/components/ui/Alert";
-import { Card } from "@/components/ui/Card";
-import { ApiError, getCalibration, getRankDistribution } from "@/lib/api";
+import { ChartCard } from "@/components/ui/ChartCard";
+import { ApiError, getCalibration, getMatches, getRankDistribution } from "@/lib/api";
 import { useSession } from "@/lib/session-context";
-import type { CalibrationResponse, RankDistribution } from "@/lib/types";
+import type { CalibrationResponse, MatchView, RankDistribution } from "@/lib/types";
 
 /**
- * The calibrating screen.
+ * The Rank page.
  *
  * Renders exactly what the API returned. Nothing here derives a confidence, a
  * streak or a trajectory point — including which points are estimated, which
- * is a server decision precisely so a client cannot quietly present a modeled
- * value as a measured one.
+ * is a server decision so a client cannot present a modeled value as a
+ * measured one. All methodology lives in one (i), on Rank over time.
  */
 export function Calibrating() {
   const { session } = useSession();
   const [data, setData] = useState<CalibrationResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  /** The 409 the API answers before anything has been synced. It is a state
-   *  to explain, not a failure to apologise for, so it is kept apart from a
-   *  real error. */
+  /** The 409 before anything has been synced: a state to explain. */
   const [needsSync, setNeedsSync] = useState(false);
   const [paywalled, setPaywalled] = useState(false);
-  /** Fetched separately, because it is the only part of this screen that
-   *  needs the benchmark provider. A `null` here empties one card; it never
-   *  costs the rank, the trajectory or the momentum curve. */
+  /** Needs the benchmark provider; null empties one card, never the page. */
   const [brackets, setBrackets] = useState<RankDistribution | null>(null);
+  const [recent, setRecent] = useState<MatchView[] | null>(null);
 
   useEffect(() => {
-    if (session.kind !== "signed-in") return;
+    // A failed profile read is reported once by the shell; this page
+    // still loads its own data.
+    if (session.kind === "loading" || session.kind === "anonymous") return;
     let cancelled = false;
 
     getCalibration()
@@ -52,7 +47,6 @@ export function Calibrating() {
       })
       .catch((e: unknown) => {
         if (cancelled) return;
-
         if (e instanceof ApiError && e.code === "PRECONDITION_UNMET") {
           setNeedsSync(true);
           return;
@@ -61,17 +55,19 @@ export function Calibrating() {
           setPaywalled(true);
           return;
         }
-        setError(
-          e instanceof ApiError ? e.message : "Could not load your rank.",
-        );
+        setError(e instanceof ApiError ? e.message : "Could not load your rank.");
       });
 
+    // Both optional: their absence is drawn as their absence.
     getRankDistribution()
       .then((response) => {
         if (!cancelled) setBrackets(response);
       })
-      // Deliberately swallowed: this panel is the optional one. Its absence is
-      // rendered as its absence, not as a failure of the page around it.
+      .catch(() => undefined);
+    getMatches(1, 5, { mode: "ranked" })
+      .then((response) => {
+        if (!cancelled) setRecent(response.matches);
+      })
       .catch(() => undefined);
 
     return () => {
@@ -79,23 +75,21 @@ export function Calibrating() {
     };
   }, [session.kind]);
 
-  if (session.kind === "loading") return <PageSkeleton />;
+  if (session.kind === "loading") return <RankSkeleton />;
   if (session.kind === "anonymous") return <SignedOut />;
-  if (session.kind === "error") {
-    return <Alert title="Cannot reach the service">{session.message}</Alert>;
-  }
 
-  // The panels below need a calibration; the match history does not. It reads
-  // its own endpoint, so a rank that cannot be calibrated yet — or a calibration
-  // that failed outright — must not take the player's games down with it.
+  const recentCard =
+    recent && recent.length > 0 ? (
+      <RecentMatches matches={recent} title="Recent ranked" seeAll="See all in Matches →" />
+    ) : null;
+
+  // The rank needs a calibration; the recent games do not, so a rank that
+  // cannot be calibrated yet never takes them down with it.
   if (needsSync) {
     return (
       <div className="flex flex-col gap-4">
-        <Alert title="Nothing to calibrate yet">
-          Sync your matches from the overview, and your rank history starts
-          building from the next one.
-        </Alert>
-        <MatchHistoryCard />
+        <Alert title="Nothing to calibrate yet">Sync your matches from the overview first.</Alert>
+        {recentCard}
       </div>
     );
   }
@@ -103,7 +97,7 @@ export function Calibrating() {
     return (
       <div className="flex flex-col gap-4">
         <Paywall message="Rank calibration needs an active trial or subscription." />
-        <MatchHistoryCard />
+        {recentCard}
       </div>
     );
   }
@@ -111,127 +105,48 @@ export function Calibrating() {
     return (
       <div className="flex flex-col gap-4">
         <Alert>{error}</Alert>
-        <MatchHistoryCard />
+        {recentCard}
       </div>
     );
   }
-  if (!data) return <PageSkeleton />;
+  if (!data) return <RankSkeleton />;
 
   return (
     <div className="flex flex-col gap-4">
-      <RankCard
-        rank={data.established_rank}
-        confidence={data.confidence}
-        thresholdPct={data.methodology.confidence_threshold_pct}
-      />
+      <RankHeader data={data} />
 
-      <Card className="flex flex-col gap-4">
-        <div>
-          <p className="font-semibold text-ink">Rank over time</p>
-          <p className="mt-1 text-sm text-ink-muted">
-            Recorded readings, with the stretches between them modeled.
-          </p>
-        </div>
-
+      <ChartCard title="Rank over time" info={<MethodologyNote methodology={data.methodology} />}>
         <TrajectoryChart points={data.trajectory} />
+      </ChartCard>
 
-        <MethodologyNote methodology={data.methodology} />
-      </Card>
+      <MomentumCard momentum={data.momentum} />
 
-      <Card className="flex flex-col gap-4">
-        <div>
-          <p className="font-semibold text-ink">Recent momentum</p>
-          <p className="mt-1 text-sm text-ink-muted">
-            Modeled movement across your last {data.momentum.window} ranked
-            matches, relative to where the window started.
-          </p>
-        </div>
+      {brackets ? <BracketRadar brackets={brackets} /> : null}
 
-        <MomentumChart momentum={data.momentum} />
-      </Card>
+      <RankBreakdown data={data} />
 
-      {brackets ? (
-        <Card>
-          <EstablishedRankPanel
-            rank={data.established_rank}
-            confidence={data.confidence}
-            consistency={brackets.consistency}
-            metrics={brackets.own_bracket_metrics}
-            resemblancePct={
-              brackets.resemblance.find((r) => r.is_player_bracket)
-                ?.percentage ?? null
-            }
-          />
-        </Card>
-      ) : null}
-
-      {brackets ? (
-        <Card className="flex flex-col gap-4">
-          <div>
-            <p className="font-semibold text-ink">Rank distribution</p>
-            <p className="mt-1 text-sm text-ink-muted">
-              How closely your {brackets.hero_name} figures resemble each
-              bracket&rsquo;s real peers.
-            </p>
-          </div>
-
-          <RankDistributionBars distribution={brackets} />
-        </Card>
-      ) : null}
-
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <Card className="flex flex-col gap-4">
-          <p className="font-semibold text-ink">Current streak</p>
-          <StreakBadge streak={data.streak} />
-        </Card>
-
-        <Card className="flex flex-col gap-4">
-          <p className="font-semibold text-ink">Roles you queue</p>
-          <RolePreferenceBars roles={data.role_preference} />
-        </Card>
-      </div>
-
-      <MatchHistoryCard />
+      {recentCard}
     </div>
   );
 }
 
-/**
- * The games behind everything above.
- *
- * Deliberately at the bottom: the screen answers "where does my rank sit" first
- * and "which games got me here" second. The MMR column is the same modeled
- * estimate the momentum curve plots, and the note says so — a table of precise
- * numbers is exactly where a disclosed model would otherwise start reading as
- * Valve's own.
- *
- * `Suspense` is not optional here: the table reads the page number from the URL
- * with `useSearchParams`, and Next requires a boundary around a component that
- * does so on a prerendered page.
- */
-function MatchHistoryCard() {
+/** Shaped like the page: header tiles, two wide charts, a row of three. */
+function RankSkeleton() {
   return (
-    <Card className="flex flex-col gap-4">
-      <div>
-        <p className="font-semibold text-ink">Match history</p>
-        <p className="mt-1 text-sm text-ink-muted">
-          Every game we have stored. Rating compares each match against your own
-          usual game on that hero; the MMR column is the same estimate as the
-          momentum curve, not a figure Valve publishes.
-        </p>
+    <div className="flex flex-col gap-4" aria-busy="true" aria-live="polite">
+      <span className="sr-only">Loading your rank…</span>
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+        {[0, 1, 2, 3, 4].map((i) => (
+          <div key={i} className="glass h-28 animate-pulse rounded-card" />
+        ))}
       </div>
-
-      <Suspense fallback={<TableFallback />}>
-        <MatchHistoryTable />
-      </Suspense>
-    </Card>
-  );
-}
-
-function TableFallback() {
-  return (
-    <div className="h-64 animate-pulse rounded bg-surface-2/60" aria-busy="true">
-      <span className="sr-only">Loading matches…</span>
+      <div className="glass h-[22rem] animate-pulse rounded-card" />
+      <div className="glass h-72 animate-pulse rounded-card" />
+      <div className="grid gap-4 lg:grid-cols-3">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="glass h-48 animate-pulse rounded-card" />
+        ))}
+      </div>
     </div>
   );
 }

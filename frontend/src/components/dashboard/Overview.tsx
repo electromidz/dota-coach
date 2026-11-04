@@ -1,31 +1,28 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
-import { FormStrip } from "@/components/charts/FormStrip";
-import { Meter } from "@/components/charts/Meter";
-import { Sparkline } from "@/components/charts/Sparkline";
-import { TrainingFocusCard } from "@/components/coach/TrainingFocusCard";
+import { CoachRecommendations } from "@/components/dashboard/CoachRecommendations";
+import { LastGamesStrip, PerformanceTrend, SkillRadar } from "@/components/dashboard/OverviewCharts";
+import { OverviewKpis } from "@/components/dashboard/OverviewKpis";
+import { RecentMatches } from "@/components/dashboard/RecentMatches";
 import { RolePerformance } from "@/components/dashboard/RolePerformance";
-import { ScopeBanner } from "@/components/dashboard/ScopeBanner";
-import { StatTile } from "@/components/dashboard/StatTile";
 import { SignedOut } from "@/components/shell/SignedOut";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { HeroPortrait } from "@/components/ui/HeroPortrait";
 import { Icon } from "@/components/ui/Icon";
+import { InfoTip } from "@/components/ui/InfoTip";
 import { StreamingText } from "@/components/ui/StreamingText";
-import { ApiError, getMatches, getStats, syncMatches } from "@/lib/api";
-import {
-  formatFixed,
-  formatPercent,
-  formatWhole,
-  kdaSeries,
-  recentForm,
-} from "@/lib/stats";
-import type { Match, StatsResponse, SyncReport } from "@/lib/types";
+import { ScopeLine } from "@/components/ui/ScopeLine";
+import { ApiError, getBenchmark, getCalibration, getMatches, getStats, syncMatches } from "@/lib/api";
+import type {
+  BenchmarkResponse,
+  CalibrationResponse,
+  MatchView,
+  StatsResponse,
+  SyncReport,
+} from "@/lib/types";
 import { useSession } from "@/lib/session-context";
 import { cn } from "@/lib/utils";
 
@@ -39,8 +36,12 @@ const SAMPLE = 20;
 
 export function Overview({ loginError }: { loginError?: string }) {
   const { session, setSession } = useSession();
-  const [matches, setMatches] = useState<Match[] | null>(null);
+  const [matches, setMatches] = useState<MatchView[] | null>(null);
   const [stats, setStats] = useState<StatsResponse | null>(null);
+  /** Optional panels: each is null when its endpoint is unavailable (plan,
+   *  provider, no sync yet) and its card simply is not drawn. */
+  const [calibration, setCalibration] = useState<CalibrationResponse | null>(null);
+  const [benchmark, setBenchmark] = useState<BenchmarkResponse | null>(null);
   const [matchesError, setMatchesError] = useState<string | null>(null);
 
   const [syncing, setSyncing] = useState(false);
@@ -59,6 +60,9 @@ export function Overview({ loginError }: { loginError?: string }) {
       setMatches(page.matches);
       setStats(computed);
       setMatchesError(null);
+      // After the essentials, and never able to fail the page.
+      getCalibration().then(setCalibration, () => setCalibration(null));
+      getBenchmark(undefined, "all").then(setBenchmark, () => setBenchmark(null));
     } catch (error) {
       setMatchesError(
         error instanceof ApiError
@@ -104,10 +108,14 @@ export function Overview({ loginError }: { loginError?: string }) {
   if (session.kind === "loading") return <OverviewSkeleton />;
   if (session.kind === "anonymous") return <SignedOut loginError={loginError} />;
   if (session.kind === "error") {
-    return <Alert title="Cannot reach the service">{session.message}</Alert>;
+    // The shell shows the error with a retry.
+    return null;
   }
 
   const { me } = session;
+  // Until the first load lands, "no matches" would be a guess; show the
+  // skeleton instead (an error is reported by its own alert below).
+  if (!stats && !matchesError) return <OverviewSkeleton />;
   const list = matches ?? [];
   const overall = stats?.overall;
   /** Eligible matches — the population every number on this screen describes. */
@@ -162,29 +170,18 @@ export function Overview({ loginError }: { loginError?: string }) {
 
       {matchesError ? <Alert>{matchesError}</Alert> : null}
 
-      {/* Which games everything below is about. Above the numbers, because it
-          is what makes them readable. */}
-      {stats && stored > 0 ? (
-        <ScopeBanner
-          analyzed={stats.scope.analyzed_matches}
-          confidence={stats.scope.confidence}
-          confidenceLabel={stats.scope.confidence_label}
-          caveat={stats.scope.confidence_caveat}
-          description={stats.scope.description}
-          eligibility={stats.eligibility}
-        />
-      ) : null}
-
       {/* The dashboard's first question is "what should I work on", not "what
           are my numbers". Statistics follow underneath. */}
-      {hasMatches ? <TrainingFocusCard compact /> : null}
+      {hasMatches ? <CoachRecommendations /> : null}
+
+      {stats && stored > 0 ? <Scope stats={stats} /> : null}
 
       {stored === 0 && !matchesError ? (
         <Card>
-          <p className="text-sm leading-relaxed text-ink-muted">
+          <p className="text-sm text-ink-muted">
             No matches stored yet. Tap{" "}
             <strong className="font-semibold text-keyword">Sync Matches</strong>{" "}
-            to pull your recent games from OpenDota.
+            to pull your recent games.
           </p>
         </Card>
       ) : null}
@@ -193,141 +190,55 @@ export function Overview({ loginError }: { loginError?: string }) {
           the same, so it does not say "sync". */}
       {stored > 0 && !hasMatches && !matchesError ? (
         <Card>
-          <p className="text-sm leading-relaxed text-ink-muted">
-            None of your {stored} stored{" "}
-            {stored === 1 ? "match is" : "matches are"} Ranked or public All
-            Pick, so there is nothing to analyse yet. Coaching reads standard
-            All Pick matchmaking only — Turbo has a different economy, and
-            reading it against All Pick benchmarks would give you the wrong
-            advice rather than more of it.
+          <p className="text-sm text-ink-muted">
+            None of your {stored} stored {stored === 1 ? "match is" : "matches are"} Ranked
+            or public All Pick, so there is nothing to analyse yet.
           </p>
         </Card>
       ) : null}
 
-      {hasMatches && overall && stats ? (
+      {hasMatches && stats ? (
         <>
-          {/* Four headline numbers: two-up on a phone, one row on a desktop,
-              which is where the eye compares them fastest. */}
-          <section className="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:gap-4">
-            <StatTile
-              label="Win rate"
-              value={formatPercent(overall.win_rate)}
-              icon="trophy"
-              tone="string"
-            />
-            <StatTile
-              label="Avg KDA"
-              value={formatFixed(overall.avg_kda)}
-              icon="spark"
-            />
-            <StatTile
-              label="Avg GPM"
-              value={formatWhole(overall.avg_gpm)}
-              icon="coins"
-            />
-            <StatTile
-              label="Deaths / 10min"
-              value={formatFixed(overall.avg_deaths_per_10)}
-              icon="skull"
-              tone="error"
-            />
-          </section>
+          <OverviewKpis trends={stats.trends} calibration={calibration} />
 
-          {/* Form and trend read together: on a wide screen they sit side by
-              side, the trend taking the extra width because a line needs it.
-
-              Every card in these grids carries `min-w-0`. A grid item defaults
-              to `min-width: auto`, which means "never shrink below your own
-              content" — so one wide child (the hero strip) would push the
-              whole grid past the viewport instead of scrolling inside itself.
-              Column flex, which these cards used to sit in, has no such rule,
-              which is why the overflow only appeared once they were gridded. */}
+          {/* `min-w-0` on every grid child: a grid item defaults to
+              `min-width: auto` and one wide chart would push the page sideways. */}
           <div className="grid gap-4 lg:grid-cols-3">
-            <Card className="flex min-w-0 flex-col gap-5">
-              <Meter
-                value={overall.win_rate ?? 0}
-                label="Win rate"
-                valueText={`${overall.wins}W · ${overall.losses}L`}
-              />
-
-              <div className="flex flex-col gap-2">
-                <h2 className="text-xs uppercase tracking-wider text-ink-faint">
-                  Recent form
-                </h2>
-                <FormStrip results={recentForm(list, 12)} />
-              </div>
-            </Card>
-
-            <Card className="flex min-w-0 flex-col gap-2 lg:col-span-2">
-              <div className="flex items-baseline justify-between gap-3">
-                <h2 className="text-xs uppercase tracking-wider text-ink-faint">
-                  KDA trend
-                </h2>
-                <span className="text-[0.6875rem] text-ink-faint">
-                  last {Math.min(list.length, 20)} matches
-                </span>
-              </div>
-              <Sparkline values={kdaSeries(list, 20)} label="KDA per match" />
-            </Card>
+            {benchmark ? <SkillRadar benchmark={benchmark} /> : null}
+            <PerformanceTrend matches={list} trends={stats.trends} />
           </div>
+
+          {list.length > 0 ? <LastGamesStrip matches={list} /> : null}
 
           <div className="grid gap-4 lg:grid-cols-2">
+            {list.length > 0 ? <RecentMatches matches={list} /> : null}
             <RolePerformance analysis={stats.role_analysis} />
-
-            <Card className="flex min-w-0 flex-col gap-4">
-              <div className="flex items-baseline justify-between gap-3">
-                <h2 className="text-xs uppercase tracking-wider text-ink-faint">
-                  Most played
-                </h2>
-                {/* Named for the scope difference: this card is the eligible
-                    window, that page is every game the player played. */}
-                <Link
-                  href="/matches"
-                  className="focus-neon cursor-pointer rounded text-xs text-function transition-colors duration-200 ease-out hover:text-ink"
-                >
-                  Full history
-                </Link>
-              </div>
-
-              {/* A phone swipes through these; a desktop has room to lay all
-                  five out at once, so it does rather than hiding four of them
-                  behind a gesture that has no pointer equivalent.
-                  `lg`, not `sm`: the column itself only widens at `lg`, and a
-                  portrait is a fixed 7rem — five of them overflow anything
-                  narrower. */}
-              <ul className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1 lg:grid lg:grid-cols-5 lg:overflow-visible">
-                {stats.heroes.slice(0, 5).map((hero) => (
-                  <li
-                    key={hero.hero_id}
-                    className="flex shrink-0 flex-col gap-1.5 lg:min-w-0 lg:shrink"
-                  >
-                    <HeroPortrait
-                      heroId={hero.hero_id}
-                      heroName={hero.hero_name}
-                      size="lg"
-                    />
-                    <span className="max-w-28 truncate text-[0.6875rem] text-ink-muted lg:max-w-full">
-                      {hero.hero_name}
-                    </span>
-                    <span className="truncate font-mono text-[0.6875rem] tabular-nums text-ink-faint">
-                      {hero.matches}× · {formatPercent(hero.win_rate)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </Card>
           </div>
-
-          {overall.parsed_matches < overall.matches ? (
-            <p className="text-xs leading-relaxed text-ink-faint">
-              {overall.parsed_matches} of the {overall.matches} analysed
-              matches have a parsed replay. Timing metrics such as last hits at
-              10 minutes are only available for those, and role detection is
-              sharpest on them.
-            </p>
-          ) : null}
         </>
       ) : null}
+    </div>
+  );
+}
+
+/** What every number here is about, in one line; the detail sits in the (i). */
+function Scope({ stats }: { stats: StatsResponse }) {
+  const { scope, eligibility } = stats;
+  const excluded = eligibility.excluded.filter((g) => g.matches > 0);
+  return (
+    <div className="flex items-center gap-1.5">
+      <ScopeLine matches={scope.analyzed_matches} />
+      <InfoTip label="About these matches">
+        <span className="flex flex-col gap-1.5">
+          <span>
+            {scope.confidence_label} sample. {scope.confidence_caveat}
+          </span>
+          {excluded.map((g) => (
+            <span key={g.reason}>
+              {g.matches} × {g.label} excluded
+            </span>
+          ))}
+        </span>
+      </InfoTip>
     </div>
   );
 }

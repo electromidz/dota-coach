@@ -126,3 +126,35 @@ export function formatRank(rankTier: number | null): string | null {
 
   return `${medal} ${star}`;
 }
+
+/** The population behind a section's numbers. */
+export interface Scope {
+  /** A hero name, or omitted for every hero. */
+  hero?: string | null;
+  /** A position label, or omitted / null for every role. */
+  role?: string | null;
+  /** Defaults to the population every page reads. */
+  mode?: string;
+  matches: number;
+}
+
+/** `Mirana · Soft Support · Ranked + All Pick · 5 matches`. */
+export function scopeText({ hero, role, mode = "Ranked + All Pick", matches }: Scope): string {
+  return [
+    hero || "All heroes",
+    role || "All roles",
+    mode,
+    `${matches.toLocaleString("en-US")} ${matches === 1 ? "match" : "matches"}`,
+  ].join(" · ");
+}
+
+/** "Sep 28", with the year only when it is not the current one. */
+export function shortDate(iso: string, now: Date = new Date()): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
+  });
+}

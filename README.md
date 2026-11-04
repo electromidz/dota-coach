@@ -272,9 +272,9 @@ Copy `.env.example` to `.env`. Never commit the real file.
 | `FOCUS_WEIGHT_CONFIDENCE`| backend  | Focus weight: confidence. Default 0.10.                             |
 | `FOCUS_WEIGHT_RECENCY`   | backend  | Focus weight: recency. Default 0.10.                                |
 | `FOCUS_HISTORY_LIMIT`    | backend  | Past focuses returned with the current one. Default 10.             |
-| `CALIB_CONFIDENCE_PER_MATCH` | backend | Rank confidence gained per ranked match. Default 1.5 (%).        |
-| `CALIB_CONFIDENCE_THRESHOLD` | backend | Where a rank counts as calibrated. Default 30.0 (%).             |
-| `CALIB_DECAY_DAYS`       | backend  | Idle gap that resets the confidence count. Default 180.             |
+| `CALIB_CONFIDENCE_WINDOW_DAYS` | backend | Days of ranked games counted toward rank confidence. Default 30. |
+| `CALIB_CONFIDENCE_TARGET` | backend | Ranked games in that window that settle a rank. Default 20.        |
+| `CALIB_DECAY_DAYS`       | backend  | How far back the Rank screen reads. Default 180.                    |
 | `CALIB_WIN_BASE_MMR`     | backend  | Modeled MMR per win — **ours, not Valve's**. Default 30.            |
 | `CALIB_LOSS_BASE_MMR`    | backend  | Modeled MMR per loss — **ours, not Valve's**. Default 25.           |
 | `COACH_COOLDOWN_SECONDS` | backend  | Minimum gap between two generations per player. Default 30.         |
@@ -683,10 +683,13 @@ themselves are not, and the line cannot drift somewhere the player never was.
 
 ### Rank confidence
 
-Mirrors the 0→100% meter the game shows: `CALIB_CONFIDENCE_PER_MATCH` per
-ranked match, calibrated at `CALIB_CONFIDENCE_THRESHOLD`, reset by a gap of
-`CALIB_DECAY_DAYS` with no ranked game. `matches_counted` ships alongside it, so
-a low figure reads as "play more" rather than as a verdict.
+Ranked games in the last `CALIB_CONFIDENCE_WINDOW_DAYS` days against
+`CALIB_CONFIDENCE_TARGET`, shown as "21 / 20 · Settled". A count a player can
+check against their own history, so a low figure reads as "play more" rather
+than as a verdict.
+
+On the trajectory, points days apart with no ranked game between them carry
+`gap_before: true`, and the chart breaks the line there.
 
 ### Ranked only
 

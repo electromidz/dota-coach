@@ -1,6 +1,7 @@
 "use client";
 
 import { PageHeader } from "@/components/shell/PageHeader";
+import { SectionError } from "@/components/ui/SectionError";
 import { useSession } from "@/lib/session-context";
 import { cn } from "@/lib/utils";
 
@@ -30,7 +31,7 @@ export function AppMain({
   showTabs: boolean;
   children: React.ReactNode;
 }) {
-  const { session } = useSession();
+  const { session, retry } = useSession();
 
   if (session.kind === "anonymous") return <main>{children}</main>;
 
@@ -48,6 +49,17 @@ export function AppMain({
           description={description}
           action={action}
         />
+      ) : null}
+
+      {session.kind === "error" ? (
+        <div className="mb-4">
+          <SectionError
+            section="Your profile"
+            message={session.message}
+            requestId={session.requestId}
+            onRetry={retry}
+          />
+        </div>
       ) : null}
 
       {children}

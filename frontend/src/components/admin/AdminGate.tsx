@@ -20,7 +20,8 @@ export function AdminGate({ children }: { children: React.ReactNode }) {
   if (session.kind === "loading") return <PageSkeleton />;
   if (session.kind === "anonymous") return <SignedOut />;
   if (session.kind === "error") {
-    return <Alert title="Cannot reach the service">{session.message}</Alert>;
+    // The shell shows the error with a retry.
+    return null;
   }
 
   if (!session.me.user.is_admin) {

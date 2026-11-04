@@ -19,9 +19,12 @@ export function MatchCard({
   match,
   index = 0,
   mode = "eligible",
+  badges = [],
 }: {
   match: MatchView;
   index?: number;
+  /** Standout labels, e.g. "Best GPM". */
+  badges?: string[];
   /** In the default view every game is coached, so nothing is labelled. */
   mode?: MatchesMode;
 }) {
@@ -62,6 +65,9 @@ export function MatchCard({
                 >
                   {won ? "Win" : "Loss"}
                 </span>
+                {badges.map((b) => (
+                  <StandoutBadge key={b} label={b} />
+                ))}
               </div>
 
               <p className="mt-0.5 truncate text-xs text-ink-muted">
@@ -159,5 +165,14 @@ export function PeerBar({
         <div className="h-1.5" title="No peer reference for this game" />
       )}
     </div>
+  );
+}
+
+/** A standout badge, e.g. "Best GPM" or "0 deaths". */
+export function StandoutBadge({ label }: { label: string }) {
+  return (
+    <span className="shrink-0 whitespace-nowrap rounded bg-number/15 px-1.5 py-0.5 text-[0.625rem] font-semibold text-number">
+      {label}
+    </span>
   );
 }

@@ -25,7 +25,8 @@ use crate::domain::user::User;
 use crate::error::{AppError, AppResult};
 use crate::repositories;
 use crate::repositories::r#match::{MatchFilter, MatchSort, ModeFilter};
-use crate::services::metrics::rating;
+use crate::domain::metrics::MatchListSummary;
+use crate::services::metrics::{rating, trends};
 use crate::services::benchmarks::percentile;
 use crate::services::{calibration, match_comparison, sync};
 use crate::state::AppState;
@@ -49,6 +50,8 @@ pub struct PageQuery {
     pub mode: Option<String>,
     /// One of the [`MatchSort`] slugs. Defaults to `newest`.
     pub sort: Option<String>,
+    /// Only the last this-many days. Omit for every date.
+    pub days: Option<i64>,
 }
 
 impl PageQuery {
@@ -101,11 +104,17 @@ impl PageQuery {
         if self.hero_id.is_some_and(|id| id < 1) {
             return Err(AppError::BadRequest("hero_id must be positive.".into()));
         }
+        if self.days.is_some_and(|d| !(1..=3650).contains(&d)) {
+            return Err(AppError::BadRequest("days must be between 1 and 3650.".into()));
+        }
 
         Ok(MatchFilter {
             hero_id: self.hero_id,
             won,
             role,
+            since: self
+                .days
+                .map(|d| Utc::now() - Duration::days(d)),
             mode,
             sort,
         })
@@ -602,6 +611,8 @@ pub struct MatchListResponse {
     pub hidden_turbo: i64,
     /// Every other stored game this mode leaves out.
     pub hidden_other: i64,
+    /// KPIs, recent results and a rolling win rate for the filtered list.
+    pub summary: MatchListSummary,
     /// Every match stored for this player, whatever mode, hero or result.
     ///
     /// The denominator behind "20 of 143": `total` describes the filtered list,
@@ -658,6 +669,9 @@ mode.",
             description = "`newest` (default), `oldest`, `gpm_desc`, `gpm_asc` or `kda_desc`. \
 Matches with no computed metrics sort last under `kda_desc` rather than counting as zero.",
             example = "gpm_desc"),
+        ("days" = Option<i64>, Query,
+            description = "Only matches from the last this-many days (1-3650). Omit for every date.",
+            example = 30, minimum = 1, maximum = 3650),
     ),
     responses(
         (status = 200, description = "One page of matches, newest first unless sorted otherwise", body = MatchListResponse),
@@ -676,7 +690,10 @@ pub async fn list(
     let (page, limit) = validate_pagination(query.page, query.limit)?;
     let mode = ListMode::parse(query.mode.as_deref())?;
     let mut filter = query.filter()?;
-    let filtered = filter.hero_id.is_some() || filter.won.is_some() || filter.role.is_some();
+    let filtered = filter.hero_id.is_some()
+        || filter.won.is_some()
+        || filter.role.is_some()
+        || filter.since.is_some();
     let offset = (page - 1) * limit;
 
     // The mode is the population; the filter is a view of it. Both are pushed
@@ -711,6 +728,34 @@ pub async fn list(
         .await?
     };
     let total = count(filter.clone()).await?;
+
+    // The summary strip reads the newest games of the same filtered list,
+    // whatever the page's sort.
+    let summary_filter = MatchFilter {
+        sort: MatchSort::Newest,
+        ..filter.clone()
+    };
+    let summary_rows = if window.is_career() {
+        repositories::r#match::list_by_player(
+            &state.db,
+            player.id,
+            &summary_filter,
+            trends::SUMMARY_LIMIT as i64,
+            0,
+        )
+        .await?
+    } else {
+        repositories::r#match::list_by_player_scoped(
+            &state.db,
+            player.id,
+            &window,
+            &summary_filter,
+            trends::SUMMARY_LIMIT as i64,
+            0,
+        )
+        .await?
+    };
+    let summary = trends::list_summary(&summary_rows, total);
     let mode_total = if filtered { count(unfiltered).await? } else { total };
 
     // What this mode leaves out, so the header can say "+M Turbo hidden".
@@ -763,6 +808,7 @@ pub async fn list(
         mode_total,
         hidden_turbo,
         hidden_other,
+        summary,
         lifetime_games,
         last_synced_at: player.last_synced_at,
         syncing,

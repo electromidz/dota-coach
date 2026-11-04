@@ -155,6 +155,9 @@ pub fn build(state: AppState, config: &Config) -> Router {
 
     standard
         .merge(slow)
+        // Inside the request id, so a retried read keeps one id and one log
+        // line; GETs only.
+        .layer(crate::api::retry::RetryTransientLayer)
         // Innermost of the three below, so the request id is in scope for the
         // handler and for anything the timeout layer logs.
         .layer(middleware::from_fn(observability::request_id))

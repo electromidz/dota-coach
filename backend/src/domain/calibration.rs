@@ -35,7 +35,8 @@ pub struct RankSnapshot {
     pub captured_at: DateTime<Utc>,
 }
 
-/// How settled the player's rank is, on Valve's 0→100% scale.
+/// How settled the player's rank is: ranked games in the last
+/// `window_days` against `target_matches` ("21 / 20 · Settled").
 ///
 /// Counted from **ranked** matches only. That is narrower than the
 /// `eligibility` module's competitive population, which also admits unranked
@@ -44,10 +45,16 @@ pub struct RankSnapshot {
 /// not share.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, ToSchema)]
 pub struct RankConfidence {
+    /// `matches_counted / target_matches`, capped at 100. For a progress bar.
     pub confidence_pct: f32,
-    /// Ranked matches behind that percentage. Published so a low confidence
-    /// reads as "play more", not as a verdict on the player.
+    /// Ranked matches inside the window. Published so a low confidence reads
+    /// as "play more", not as a verdict on the player.
     pub matches_counted: i64,
+    /// How many ranked games settle a rank.
+    pub target_matches: i64,
+    /// How far back the count reaches, in days.
+    pub window_days: i64,
+    /// `matches_counted >= target_matches`.
     pub is_calibrated: bool,
 }
 
@@ -68,6 +75,10 @@ pub struct TrajectoryPoint {
     /// it renders a measured one is presenting a guess as Valve's number, so
     /// the field is never defaulted and never dropped.
     pub estimated: bool,
+    /// No ranked game was played between the previous point and this one,
+    /// and they are days apart. Charts break the line here instead of
+    /// drawing movement across a stretch nobody played.
+    pub gap_before: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
@@ -89,7 +100,10 @@ pub struct Streak {
 /// Share of matches played in one role.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct RolePreference {
+    /// Position label ("Soft Support"), or "Unclassified".
     pub role: String,
+    /// The position, when the match had one.
+    pub position: Option<crate::domain::role::CoachableRole>,
     pub pct: f32,
     pub matches: i64,
 }
@@ -117,6 +131,15 @@ pub struct MomentumPoint {
     /// Running total since the start of the window. Starts from zero.
     pub cumulative: f32,
     pub started_at: DateTime<Utc>,
+    /// The stored match, for a link to its page.
+    pub id: uuid::Uuid,
+    pub hero_id: i32,
+    pub kills: i32,
+    pub deaths: i32,
+    pub assists: i32,
+    /// The per-match rating (1-10) against the player's usual game on that
+    /// hero, filled in by the handler. `None` when no baseline exists.
+    pub rating: Option<f32>,
 }
 
 /// Modeled movement across a recent window of ranked matches.
@@ -131,6 +154,9 @@ pub struct Momentum {
     /// How many matches the window was allowed to hold, so a short curve reads
     /// as "not enough games yet" rather than as a flat stretch.
     pub window: i64,
+    /// Mean modeled gain per win, and mean modeled loss per loss (negative).
+    pub avg_win_delta: Option<f32>,
+    pub avg_loss_delta: Option<f32>,
 }
 
 /// The player's current medal, as the game spells it.
@@ -147,6 +173,39 @@ pub struct EstablishedRank {
     /// The MMR band the medal implies. An **estimate** — see [`MmrEstimate`].
     /// `None` when there is no medal to derive one from.
     pub mmr: Option<MmrEstimate>,
+    /// How far the next medal is, estimated. `None` at Immortal or unranked.
+    pub next_medal: Option<NextMedal>,
+}
+
+/// The next medal up, and roughly what it takes. An estimate: it starts from
+/// the middle of the current star's band, and Valve publishes neither where
+/// inside it the player sits nor what a win is worth.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct NextMedal {
+    pub label: &'static str,
+    /// MMR from the current band's midpoint to the next medal's floor.
+    pub mmr_needed: i32,
+    /// `mmr_needed` over the modeled MMR per win, rounded up.
+    pub wins_needed: i64,
+}
+
+/// The next medal from `rank_tier`, given the modeled MMR per win.
+pub fn next_medal(rank_tier: i32, win_mmr: f32) -> Option<NextMedal> {
+    let bracket = crate::domain::hero::RankBracket::from_rank_tier(rank_tier)?;
+    let next = crate::domain::hero::RankBracket::from_index(bracket.index() + 1)?;
+    let floor = *MEDAL_FLOORS.get((next.index() - 1) as usize)?;
+    let midpoint = estimate_mmr(rank_tier)?.midpoint;
+    let mmr_needed = (floor - midpoint).max(0);
+    let wins_needed = if win_mmr > 0.0 {
+        (mmr_needed as f32 / win_mmr).ceil() as i64
+    } else {
+        0
+    };
+    Some(NextMedal {
+        label: next.label(),
+        mmr_needed,
+        wins_needed,
+    })
 }
 
 /// MMR per star. A medal spans five of them, so 770 MMR per medal.
@@ -174,6 +233,10 @@ pub struct MmrEstimate {
     /// `None` for Immortal, which has no ceiling.
     pub high: Option<i32>,
     pub midpoint: i32,
+    /// The whole medal's band, for drawing the star's band inside it.
+    pub medal_low: i32,
+    /// `None` for Immortal.
+    pub medal_high: Option<i32>,
 }
 
 /// The MMR band a `rank_tier` implies.
@@ -191,6 +254,8 @@ pub fn estimate_mmr(rank_tier: i32) -> Option<MmrEstimate> {
             low: floor,
             high: None,
             midpoint: floor,
+            medal_low: floor,
+            medal_high: None,
         });
     }
 
@@ -207,6 +272,8 @@ pub fn estimate_mmr(rank_tier: i32) -> Option<MmrEstimate> {
         low,
         high: Some(high),
         midpoint: (low + high) / 2,
+        medal_low: floor,
+        medal_high: Some(floor + MMR_PER_STAR * 5 - 1),
     })
 }
 
@@ -304,6 +371,11 @@ pub struct RankDistribution {
     pub hero_name: String,
     /// Matches behind the player's own figures.
     pub sample: i64,
+    /// The role those matches were narrowed to: the coaching role by
+    /// default, the same scope `/api/benchmark` reads, so the two pages
+    /// quote the same percentile. `None` reads every role.
+    pub role: Option<crate::domain::role::CoachableRole>,
+    pub role_label: Option<&'static str>,
     /// One entry per medal, Herald first.
     pub fits: Vec<BracketFit>,
     /// The medal whose peers this player most resembles: the bracket whose
@@ -322,6 +394,17 @@ pub struct RankDistribution {
     pub note: Option<String>,
 }
 
+/// Ranked record on one hero, for the Rank page's breakdown.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct RankedHero {
+    pub hero_id: i32,
+    pub hero_name: String,
+    pub matches: i64,
+    pub wins: i64,
+    /// 0-100.
+    pub win_rate: f32,
+}
+
 /// The disclosed model, shipped with every response.
 ///
 /// Present so no consumer has to hardcode the formula it tells the player
@@ -332,8 +415,8 @@ pub struct RankDistribution {
 pub struct Methodology {
     pub win_base_mmr: f32,
     pub loss_base_mmr: f32,
-    pub confidence_per_match_pct: f32,
-    pub confidence_threshold_pct: f32,
+    pub confidence_window_days: i64,
+    pub confidence_target_matches: i64,
 }
 
 #[cfg(test)]
@@ -345,6 +428,23 @@ mod tests {
         assert_eq!(rank_label(45).as_deref(), Some("Archon 5"));
         assert_eq!(rank_label(11).as_deref(), Some("Herald 1"));
         assert_eq!(rank_label(55).as_deref(), Some("Legend 5"));
+    }
+
+    #[test]
+    fn the_next_medal_is_counted_from_the_middle_of_the_current_star() {
+        // Archon 5: band 2,926-3,079, midpoint 3,002; Legend starts at 3,080.
+        let next = next_medal(45, 30.0).unwrap();
+        assert_eq!(next.label, "Legend");
+        assert_eq!(next.mmr_needed, 78);
+        assert_eq!(next.wins_needed, 3);
+        // Immortal has nowhere to go.
+        assert!(next_medal(80, 30.0).is_none());
+    }
+
+    #[test]
+    fn the_estimate_carries_the_whole_medal_band() {
+        let mmr = estimate_mmr(45).unwrap();
+        assert_eq!((mmr.medal_low, mmr.medal_high), (2310, Some(3079)));
     }
 
     #[test]

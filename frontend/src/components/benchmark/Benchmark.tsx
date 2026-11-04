@@ -13,6 +13,7 @@ import { LegendItem, RadarCompare } from "@/components/charts/RadarCompare";
 import { SignedOut } from "@/components/shell/SignedOut";
 import { Alert } from "@/components/ui/Alert";
 import { ChartCard } from "@/components/ui/ChartCard";
+import { ScopeLine } from "@/components/ui/ScopeLine";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
 import { Icon } from "@/components/ui/Icon";
 import { InfoTip } from "@/components/ui/InfoTip";
@@ -123,7 +124,9 @@ export function Benchmark() {
   );
 
   useEffect(() => {
-    if (session.kind !== "signed-in") return;
+    // A failed profile read is reported once by the shell; this page
+    // still loads its own data.
+    if (session.kind === "loading" || session.kind === "anonymous") return;
 
     // The hero list drives the picker; the benchmark defaults to the
     // most-played, which is the only hero likely to clear the sample floor.
@@ -139,9 +142,6 @@ export function Benchmark() {
 
   if (session.kind === "loading") return <BenchmarkSkeleton />;
   if (session.kind === "anonymous") return <SignedOut />;
-  if (session.kind === "error") {
-    return <Alert title="Cannot reach the service">{session.message}</Alert>;
-  }
 
   if (paywalled) {
     return (
@@ -288,6 +288,8 @@ export function Benchmark() {
           ; nothing has been estimated.
         </Alert>
       ) : null}
+
+      <ScopeLine hero={data.hero_name} role={data.context.role_label} matches={data.sample} />
 
       {data.note ? <Alert tone="info">{data.note}</Alert> : null}
 

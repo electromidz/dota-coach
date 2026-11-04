@@ -1,13 +1,12 @@
 import { Calibrating } from "@/components/calibrating/Calibrating";
 import { AppShell } from "@/components/shell/AppShell";
 
-export const metadata = { title: "Calibrating" };
+export const metadata = { title: "Rank" };
 
-export default function CalibratingPage() {
+export default function RankPage() {
   return (
     <AppShell
-      title="Calibrating"
-      eyebrow="Rank"
+      title="Rank"
       description="Where your rank actually sits, how settled it is, and how it got there."
     >
       <Calibrating />

@@ -26,7 +26,9 @@ export function AppChrome({
   showTabs?: boolean;
 }) {
   const { session } = useSession();
-  if (session.kind !== "signed-in") return null;
+  // A failed profile read keeps the chrome: an outage of one endpoint must
+  // not strand the visitor on a page with no way to navigate.
+  if (session.kind !== "signed-in" && session.kind !== "error") return null;
 
   return (
     <>

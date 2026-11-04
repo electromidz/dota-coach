@@ -76,6 +76,15 @@ const nextConfig: NextConfig = {
   // The server's identity is not a secret worth leaking to every scanner.
   poweredByHeader: false,
 
+  // The Rank page used to live at /calibrating. Old links and bookmarks
+  // land on the new route; 301 so search engines move the URL too.
+  async redirects() {
+    return [
+      { source: "/calibrating", destination: "/rank", statusCode: 301 },
+      { source: "/calibrating/:path*", destination: "/rank/:path*", statusCode: 301 },
+    ];
+  },
+
   async rewrites() {
     if (!proxiedBackend) return [];
 

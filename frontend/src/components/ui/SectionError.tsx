@@ -11,10 +11,13 @@ import { Icon } from "@/components/ui/Icon";
 export function SectionError({
   section,
   message,
+  requestId,
   onRetry,
 }: {
   section: string;
   message?: string | null;
+  /** The server's id for the failed request, so a report can quote it. */
+  requestId?: string | null;
   onRetry?: () => void;
 }) {
   return (
@@ -27,6 +30,11 @@ export function SectionError({
         <span className="text-sm text-ink">{section} couldn&apos;t load</span>
         {message ? (
           <span className="truncate text-xs text-ink-faint">{message}</span>
+        ) : null}
+        {requestId ? (
+          <span className="select-all font-mono text-[0.625rem] text-ink-faint">
+            Request {requestId}
+          </span>
         ) : null}
       </div>
       {onRetry ? (

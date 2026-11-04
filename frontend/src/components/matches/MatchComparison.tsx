@@ -9,6 +9,7 @@ import { LaningPanel } from "@/components/matches/MatchKpis";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
 import { InfoTip } from "@/components/ui/InfoTip";
+import { ScopeLine } from "@/components/ui/ScopeLine";
 import { shortLabel } from "@/lib/benchmark-view";
 import type { PercentilePoint } from "@/lib/benchmark-view";
 import type { MatchComparisonResponse } from "@/lib/types";
@@ -22,9 +23,12 @@ import { cn } from "@/lib/utils";
 export function MatchComparison({
   data,
   durationSeconds,
+  positionLabel = null,
 }: {
   data: MatchComparisonResponse;
   durationSeconds: number;
+  /** The match's position: "your average" is read over this hero in it. */
+  positionLabel?: string | null;
 }) {
   const { bracket } = data;
   const points = radarPoints(data);
@@ -47,6 +51,12 @@ export function MatchComparison({
               </h3>
               <MarkLegend />
             </div>
+            <ScopeLine
+              hero={data.hero_name}
+              role={positionLabel}
+              matches={data.metrics[0]?.hero_average?.sample ?? 0}
+              className="-mt-3"
+            />
 
             {data.metrics.map((row) => (
               <PercentileRow key={row.metric} row={row} />

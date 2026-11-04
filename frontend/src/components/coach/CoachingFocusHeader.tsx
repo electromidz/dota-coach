@@ -1,3 +1,4 @@
+import { ScopeLine } from "@/components/ui/ScopeLine";
 import { InfoTip } from "@/components/ui/InfoTip";
 import { formatPercent } from "@/lib/stats";
 import type {
@@ -68,6 +69,11 @@ export function CoachingFocusHeader({
       >
         Change role
       </button>
+      <ScopeLine
+        role={profile.selected_role_label}
+        matches={performance?.matches ?? 0}
+        className="w-full"
+      />
     </div>
   );
 }

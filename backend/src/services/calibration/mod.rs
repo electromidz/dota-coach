@@ -33,8 +33,9 @@ use crate::config::CalibrationConfig;
 use crate::domain::benchmark::BenchmarkResult;
 use crate::domain::calibration::{
     rank_label, BracketFit, BracketResemblance, Consistency, Methodology, Momentum, MomentumPoint,
-    RankConfidence, RankSnapshot, RolePreference, Streak, StreakKind, TrajectoryPoint,
+    RankConfidence, RankSnapshot, RankedHero, RolePreference, Streak, StreakKind, TrajectoryPoint,
 };
+use crate::domain::role::CoachableRole;
 use crate::domain::eligibility::{self, lobby_type};
 use crate::domain::hero::RankBracket;
 use crate::domain::r#match::Match;
@@ -86,46 +87,29 @@ fn ranked_newest_first(matches: &[Match]) -> Vec<&Match> {
     ranked
 }
 
-/// How settled the player's rank is.
+/// How settled the player's rank is: ranked games in the last
+/// `confidence_window_days`, against `confidence_target_matches`.
 ///
-/// Counts ranked matches back from the most recent one, stopping at the first
-/// gap longer than `decay_days`: Valve lets an idle account's certainty decay,
-/// and games from before a six-month break are not evidence about where the
-/// player sits today. A player who has not queued ranked within that window at
-/// all reads as zero rather than as their pre-break total.
+/// A plain count a player can check against their own history. Only ranked
+/// games count, since nothing else moves a medal.
 pub fn rank_confidence(
     matches: &[Match],
     config: &CalibrationConfig,
     now: DateTime<Utc>,
 ) -> RankConfidence {
-    let ranked = ranked_newest_first(matches);
-    let decay = Duration::days(config.decay_days);
-
-    let counted = match ranked.first() {
-        // Nothing ranked at all, or nothing recent enough to still count.
-        None => 0,
-        Some(newest) if now.signed_duration_since(newest.started_at) > decay => 0,
-        Some(newest) => {
-            let mut counted = 1_i64;
-            let mut previous = newest.started_at;
-
-            for m in ranked.iter().skip(1) {
-                if previous.signed_duration_since(m.started_at) > decay {
-                    break;
-                }
-                counted += 1;
-                previous = m.started_at;
-            }
-            counted
-        }
-    };
-
-    let confidence_pct = (counted as f32 * config.confidence_per_match_pct).min(100.0);
+    let since = now - Duration::days(config.confidence_window_days);
+    let counted = matches
+        .iter()
+        .filter(|m| is_ranked(m) && m.started_at >= since && m.started_at <= now)
+        .count() as i64;
+    let target = config.confidence_target_matches.max(1);
 
     RankConfidence {
-        confidence_pct,
+        confidence_pct: (counted as f32 / target as f32 * 100.0).min(100.0),
         matches_counted: counted,
-        is_calibrated: confidence_pct >= config.confidence_threshold_pct,
+        target_matches: target,
+        window_days: config.confidence_window_days,
+        is_calibrated: counted >= target,
     }
 }
 
@@ -168,26 +152,56 @@ pub fn role_preference(matches: &[Match]) -> Vec<RolePreference> {
         return Vec::new();
     }
 
-    let mut counts: Vec<(String, i64)> = Vec::new();
+    // Grouped by position 1-5; anything the estimator could not place is
+    // one "Unclassified" group rather than a "Core" or "Roamer" slice.
+    let mut counts: Vec<(Option<CoachableRole>, i64)> = Vec::new();
     for m in &ranked {
-        match counts.iter_mut().find(|(role, _)| role == &m.role) {
+        let position = CoachableRole::from_stored(&m.role);
+        match counts.iter_mut().find(|(p, _)| *p == position) {
             Some((_, count)) => *count += 1,
-            None => counts.push((m.role.clone(), 1)),
+            None => counts.push((position, 1)),
         }
     }
 
-    // Most played first; ties broken by name so the order is stable across
-    // requests rather than dependent on iteration order.
-    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    // Most played first; ties in position order, unclassified last.
+    let order = |p: &Option<CoachableRole>| p.map_or(u8::MAX, |r| r.position());
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| order(&a.0).cmp(&order(&b.0))));
 
     counts
         .into_iter()
-        .map(|(role, matches)| RolePreference {
-            role,
+        .map(|(position, matches)| RolePreference {
+            role: position.map_or("Unclassified", CoachableRole::label).to_string(),
+            position,
             pct: (matches as f32 / total as f32) * 100.0,
             matches,
         })
         .collect()
+}
+
+/// Ranked record per hero, most played first, at most `limit` heroes.
+pub fn ranked_heroes(matches: &[Match], limit: usize) -> Vec<RankedHero> {
+    let mut heroes: Vec<RankedHero> = Vec::new();
+    for m in ranked_newest_first(matches) {
+        match heroes.iter_mut().find(|h| h.hero_id == m.hero_id) {
+            Some(h) => {
+                h.matches += 1;
+                h.wins += i64::from(m.won);
+            }
+            None => heroes.push(RankedHero {
+                hero_id: m.hero_id,
+                hero_name: m.hero_name.clone(),
+                matches: 1,
+                wins: i64::from(m.won),
+                win_rate: 0.0,
+            }),
+        }
+    }
+    for h in &mut heroes {
+        h.win_rate = h.wins as f32 / h.matches as f32 * 100.0;
+    }
+    heroes.sort_by(|a, b| b.matches.cmp(&a.matches).then_with(|| a.hero_id.cmp(&b.hero_id)));
+    heroes.truncate(limit);
+    heroes
 }
 
 /// Reduce one bracket's per-metric comparison to a single placement.
@@ -379,9 +393,21 @@ pub fn momentum(matches: &[Match], config: &CalibrationConfig) -> Momentum {
                 delta,
                 cumulative: running,
                 started_at: m.started_at,
+                id: m.id,
+                hero_id: m.hero_id,
+                kills: m.kills,
+                deaths: m.deaths,
+                assists: m.assists,
+                rating: None,
             }
         })
         .collect();
+
+    let average = |won: bool| {
+        let deltas: Vec<f32> = points.iter().filter(|p| p.won == won).map(|p| p.delta).collect();
+        (!deltas.is_empty()).then(|| deltas.iter().sum::<f32>() / deltas.len() as f32)
+    };
+    let (avg_win_delta, avg_loss_delta) = (average(true), average(false));
 
     Momentum {
         points,
@@ -389,6 +415,8 @@ pub fn momentum(matches: &[Match], config: &CalibrationConfig) -> Momentum {
         wins,
         losses,
         window: MOMENTUM_WINDOW,
+        avg_win_delta,
+        avg_loss_delta,
     }
 }
 
@@ -468,6 +496,7 @@ pub fn trajectory(
                     label: rank_label(i32::from(from.0)),
                     at: from.1,
                     estimated: false,
+                    gap_before: false,
                 },
             );
 
@@ -489,12 +518,30 @@ pub fn trajectory(
                     label: rank_label(i32::from(last.0)),
                     at: last.1,
                     estimated: false,
+                    gap_before: false,
                 },
             );
         }
     }
 
+    mark_idle_gaps(&mut points, &ranked);
     points
+}
+
+/// Points further apart than this with no ranked game between them are not
+/// joined by a line.
+pub const IDLE_GAP_DAYS: i64 = 3;
+
+/// Flag each point that follows an idle stretch: days apart from the
+/// previous point with no ranked game in between. A line across that stretch
+/// would show movement nobody played.
+fn mark_idle_gaps(points: &mut [TrajectoryPoint], ranked: &[&Match]) {
+    let gap = Duration::days(IDLE_GAP_DAYS);
+    for i in 1..points.len() {
+        let (from, to) = (points[i - 1].at, points[i].at);
+        let played = ranked.iter().any(|m| m.started_at > from && m.started_at < to);
+        points[i].gap_before = to - from > gap && !played;
+    }
 }
 
 /// The disclosed model, straight from configuration.
@@ -502,8 +549,8 @@ pub fn methodology(config: &CalibrationConfig) -> Methodology {
     Methodology {
         win_base_mmr: config.win_base_mmr,
         loss_base_mmr: config.loss_base_mmr,
-        confidence_per_match_pct: config.confidence_per_match_pct,
-        confidence_threshold_pct: config.confidence_threshold_pct,
+        confidence_window_days: config.confidence_window_days,
+        confidence_target_matches: config.confidence_target_matches,
     }
 }
 
@@ -590,6 +637,7 @@ fn segment(
                 label: rank_label(i32::from(rank_tier)),
                 at: m.started_at,
                 estimated: true,
+                gap_before: false,
             }
         })
         .collect()

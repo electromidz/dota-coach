@@ -4,7 +4,6 @@ import Link from "next/link";
 
 import { ProfileCard } from "@/components/dashboard/ProfileCard";
 import { SignedOut } from "@/components/shell/SignedOut";
-import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Icon } from "@/components/ui/Icon";
@@ -31,7 +30,8 @@ export function Profile() {
 
   if (session.kind === "anonymous") return <SignedOut />;
   if (session.kind === "error") {
-    return <Alert title="Cannot reach the service">{session.message}</Alert>;
+    // The shell shows the error with a retry.
+    return null;
   }
 
   const { me } = session;

@@ -840,8 +840,8 @@ pub fn test_config() -> Config {
         // a test that quietly calibrated at a different threshold would be
         // asserting against a rank nobody ships.
         calibration: CalibrationConfig {
-            confidence_per_match_pct: 1.5,
-            confidence_threshold_pct: 30.0,
+            confidence_window_days: 30,
+            confidence_target_matches: 20,
             decay_days: 180,
             win_base_mmr: 30.0,
             loss_base_mmr: 25.0,

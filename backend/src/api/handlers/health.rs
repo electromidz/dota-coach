@@ -11,6 +11,8 @@ pub struct HealthResponse {
     status: &'static str,
     version: &'static str,
     database: DependencyStatus,
+    /// Round trip of `SELECT 1`, in milliseconds. `None` when it failed.
+    database_latency_ms: Option<u64>,
     llm_configured: bool,
 }
 
@@ -43,14 +45,21 @@ pub async fn liveness() -> Json<serde_json::Value> {
     )
 )]
 pub async fn health(State(state): State<AppState>) -> AppResult<Json<HealthResponse>> {
-    let database = match sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(&state.db)
-        .await
-    {
-        Ok(_) => DependencyStatus::Up,
-        Err(e) => {
+    let started = std::time::Instant::now();
+    let probe = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.db),
+    )
+    .await;
+    let (database, database_latency_ms) = match probe {
+        Ok(Ok(_)) => (DependencyStatus::Up, Some(started.elapsed().as_millis() as u64)),
+        Ok(Err(e)) => {
             tracing::warn!(error = %e, "health check: database unreachable");
-            DependencyStatus::Down
+            (DependencyStatus::Down, None)
+        }
+        Err(_) => {
+            tracing::warn!("health check: database probe timed out after 5s");
+            (DependencyStatus::Down, None)
         }
     };
 
@@ -58,6 +67,7 @@ pub async fn health(State(state): State<AppState>) -> AppResult<Json<HealthRespo
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         database,
+        database_latency_ms,
         llm_configured: state.config.llm.is_configured(),
     }))
 }

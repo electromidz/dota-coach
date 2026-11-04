@@ -33,7 +33,9 @@ export function Billing() {
   const [starting, setStarting] = useState(false);
 
   useEffect(() => {
-    if (session.kind !== "signed-in") return;
+    // A failed profile read is reported once by the shell; this page
+    // still loads its own data.
+    if (session.kind === "loading" || session.kind === "anonymous") return;
 
     getBilling()
       .then((response) => {
@@ -76,9 +78,6 @@ export function Billing() {
 
   if (session.kind === "loading") return <BillingSkeleton />;
   if (session.kind === "anonymous") return <SignedOut />;
-  if (session.kind === "error") {
-    return <Alert title="Cannot reach the service">{session.message}</Alert>;
-  }
 
   if (!data) return error ? <Alert>{error}</Alert> : <BillingSkeleton />;
 

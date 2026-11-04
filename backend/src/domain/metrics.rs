@@ -106,3 +106,54 @@ pub struct RoleStats {
     pub avg_kda: f32,
     pub avg_gpm: f32,
 }
+
+/// One headline number with its comparison and a short history.
+///
+/// `value` is the latest window, `previous` the window before it, and `delta`
+/// is `value - previous` (percentage points for a rate). `None` when a window
+/// had no matches; a delta is never invented from one side.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct KpiTrend {
+    pub value: Option<f32>,
+    pub previous: Option<f32>,
+    pub delta: Option<f32>,
+    /// Oldest first, for a sparkline.
+    pub series: Vec<f32>,
+}
+
+/// The Overview's KPI row, computed over eligible matches only.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct OverviewTrends {
+    /// Matches per window for the per-game KPIs ("last 20 vs the 20 before").
+    pub window: i64,
+    /// Win rate, 0-100. The series is a rolling win rate over `rolling` games.
+    pub win_rate: KpiTrend,
+    pub kda: KpiTrend,
+    pub gpm: KpiTrend,
+    /// Eligible matches in the last 30 days against the 30 before. The series
+    /// is matches per week, last 8 weeks.
+    pub matches_30d: KpiTrend,
+    /// Games behind each point of the rolling win rate.
+    pub rolling: i64,
+}
+
+/// The Matches page's summary strip, for whatever filter is applied.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct MatchListSummary {
+    /// Matches the summary was computed over.
+    pub matches: i64,
+    /// True when the filter matched more than the summary reads.
+    pub capped: bool,
+    pub wins: i64,
+    /// 0-100.
+    pub win_rate: Option<f32>,
+    pub avg_kda: Option<f32>,
+    pub avg_gpm: Option<f32>,
+    /// The newest results, oldest first.
+    pub recent_results: Vec<bool>,
+    /// Rolling win rate over `rolling` games, oldest first.
+    pub rolling_win_rate: Vec<f32>,
+    pub rolling: i64,
+    /// The highest-GPM match in the filter, for a "best GPM" badge.
+    pub best_gpm_match_id: Option<Uuid>,
+}
