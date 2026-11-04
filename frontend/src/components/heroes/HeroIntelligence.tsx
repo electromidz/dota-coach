@@ -36,7 +36,9 @@ export function HeroIntelligence() {
   const [highlight, setHighlight] = useState<number | null>(null);
 
   useEffect(() => {
-    if (session.kind !== "signed-in") return;
+    // A failed profile read is reported once by the shell; this page
+    // still loads its own data.
+    if (session.kind === "loading" || session.kind === "anonymous") return;
 
     getHeroIntelligence(undefined, role)
       .then((response) => {
@@ -58,9 +60,6 @@ export function HeroIntelligence() {
 
   if (session.kind === "loading") return <HeroSkeleton />;
   if (session.kind === "anonymous") return <SignedOut />;
-  if (session.kind === "error") {
-    return <Alert title="Cannot reach the service">{session.message}</Alert>;
-  }
 
   if (paywalled) {
     return (

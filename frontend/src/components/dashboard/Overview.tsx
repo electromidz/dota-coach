@@ -104,7 +104,8 @@ export function Overview({ loginError }: { loginError?: string }) {
   if (session.kind === "loading") return <OverviewSkeleton />;
   if (session.kind === "anonymous") return <SignedOut loginError={loginError} />;
   if (session.kind === "error") {
-    return <Alert title="Cannot reach the service">{session.message}</Alert>;
+    // The shell shows the error with a retry.
+    return null;
   }
 
   const { me } = session;

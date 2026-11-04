@@ -9,11 +9,13 @@ export type Session =
   | { kind: "loading" }
   | { kind: "anonymous" }
   | { kind: "signed-in"; me: MeResponse }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string; requestId: string | null };
 
 interface SessionValue {
   session: Session;
   setSession: React.Dispatch<React.SetStateAction<Session>>;
+  /** Ask for the profile again, after a failure. */
+  retry: () => void;
 }
 
 const SessionContext = createContext<SessionValue | null>(null);
@@ -80,6 +82,7 @@ export function markSignedInHint() {
  */
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session>({ kind: "loading" });
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -109,16 +112,22 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
             error instanceof ApiError
               ? error.message
               : "Could not reach the coaching service.",
+          requestId: error instanceof ApiError ? error.requestId : null,
         });
       });
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [attempt]);
+
+  const retry = () => {
+    setSession({ kind: "loading" });
+    setAttempt((n) => n + 1);
+  };
 
   return (
-    <SessionContext.Provider value={{ session, setSession }}>
+    <SessionContext.Provider value={{ session, setSession, retry }}>
       {children}
     </SessionContext.Provider>
   );

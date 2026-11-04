@@ -98,7 +98,9 @@ export function MatchList() {
   // than replaced by a skeleton, because a filter change that blanked the
   // screen would lose the reader's place on every keystroke of a dropdown.
   useEffect(() => {
-    if (session.kind !== "signed-in") return;
+    // A failed profile read is reported once by the shell; this page
+    // still loads its own data.
+    if (session.kind === "loading" || session.kind === "anonymous") return;
     let cancelled = false;
 
     setLoading(true);
@@ -129,9 +131,6 @@ export function MatchList() {
 
   if (session.kind === "loading") return <ListSkeleton />;
   if (session.kind === "anonymous") return <SignedOut />;
-  if (session.kind === "error") {
-    return <Alert title="Cannot reach the service">{session.message}</Alert>;
-  }
 
   if (error) return <Alert>{error}</Alert>;
   if (!data) return <ListSkeleton />;

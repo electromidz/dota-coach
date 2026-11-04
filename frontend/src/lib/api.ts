@@ -49,6 +49,8 @@ export class ApiError extends Error {
     readonly code: string,
     message: string,
     readonly status: number,
+    /** The server's id for this request, for quoting in a report. */
+    readonly requestId: string | null = null,
   ) {
     super(message);
     this.name = "ApiError";
@@ -87,25 +89,36 @@ export function steamLoginUrl(): string {
  * `credentials: "include"` is what carries the session cookie cross-origin;
  * the backend's CORS layer allows exactly this frontend's origin.
  */
+const RETRY_PAUSE_MS = 400;
+
 export async function apiFetch<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
   let response: Response;
-
-  try {
-    response = await fetch(`${baseUrl()}${path}`, {
+  const method = (init?.method ?? "GET").toUpperCase();
+  const send = () =>
+    fetch(`${baseUrl()}${path}`, {
       ...init,
       credentials: "include",
       headers: { "Content-Type": "application/json", ...init?.headers },
       cache: "no-store",
     });
+
+  try {
+    response = await send();
   } catch {
-    throw new ApiError(
-      "NETWORK_ERROR",
-      "Could not reach the coaching service. Is the backend running?",
-      0,
-    );
+    // A dropped connection on a read is worth one more try: reads are safe
+    // to repeat. The server already retries a transient database failure.
+    if (method !== "GET") {
+      throw new ApiError("NETWORK_ERROR", "Could not reach the coaching service.", 0);
+    }
+    await new Promise((resolve) => setTimeout(resolve, RETRY_PAUSE_MS));
+    try {
+      response = await send();
+    } catch {
+      throw new ApiError("NETWORK_ERROR", "Could not reach the coaching service.", 0);
+    }
   }
 
   if (!response.ok) {
@@ -116,6 +129,7 @@ export async function apiFetch<T>(
       body?.error?.code ?? "UNKNOWN_ERROR",
       body?.error?.message ?? `Request failed with status ${response.status}.`,
       response.status,
+      response.headers?.get?.("x-request-id") ?? null,
     );
   }
 

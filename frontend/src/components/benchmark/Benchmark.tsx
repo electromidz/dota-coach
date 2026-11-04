@@ -123,7 +123,9 @@ export function Benchmark() {
   );
 
   useEffect(() => {
-    if (session.kind !== "signed-in") return;
+    // A failed profile read is reported once by the shell; this page
+    // still loads its own data.
+    if (session.kind === "loading" || session.kind === "anonymous") return;
 
     // The hero list drives the picker; the benchmark defaults to the
     // most-played, which is the only hero likely to clear the sample floor.
@@ -139,9 +141,6 @@ export function Benchmark() {
 
   if (session.kind === "loading") return <BenchmarkSkeleton />;
   if (session.kind === "anonymous") return <SignedOut />;
-  if (session.kind === "error") {
-    return <Alert title="Cannot reach the service">{session.message}</Alert>;
-  }
 
   if (paywalled) {
     return (

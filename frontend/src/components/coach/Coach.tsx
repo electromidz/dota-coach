@@ -86,7 +86,9 @@ export function Coach() {
   }, [handle]);
 
   useEffect(() => {
-    if (session.kind !== "signed-in") return;
+    // A failed profile read is reported once by the shell; this page
+    // still loads its own data.
+    if (session.kind === "loading" || session.kind === "anonymous") return;
     // Independent reads: neither costs a model call, and either failing must
     // leave the other standing.
     void loadCoach();
@@ -98,9 +100,6 @@ export function Coach() {
 
   if (session.kind === "loading") return <CoachSkeleton />;
   if (session.kind === "anonymous") return <SignedOut />;
-  if (session.kind === "error") {
-    return <Alert title="Cannot reach the service">{session.message}</Alert>;
-  }
 
   if (paywalled) {
     return <Paywall message="Coaching needs an active trial or subscription." />;

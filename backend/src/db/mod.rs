@@ -17,6 +17,12 @@ pub async fn connect(config: &Config) -> Result<PgPool, sqlx::Error> {
         .max_connections(config.db.max_connections)
         .min_connections(config.db.min_connections.min(config.db.max_connections))
         .acquire_timeout(Duration::from_secs(config.db.acquire_timeout_seconds))
+        // A pooler closes connections it considers idle, and the next query on
+        // one fails. Recycling them first, and checking each before handing it
+        // out, turns that failure into a quiet reconnect.
+        .idle_timeout(Duration::from_secs(5 * 60))
+        .max_lifetime(Duration::from_secs(30 * 60))
+        .test_before_acquire(true)
         .connect(&config.database_url)
         .await
 }

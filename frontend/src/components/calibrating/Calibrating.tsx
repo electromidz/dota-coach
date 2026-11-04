@@ -43,7 +43,9 @@ export function Calibrating() {
   const [brackets, setBrackets] = useState<RankDistribution | null>(null);
 
   useEffect(() => {
-    if (session.kind !== "signed-in") return;
+    // A failed profile read is reported once by the shell; this page
+    // still loads its own data.
+    if (session.kind === "loading" || session.kind === "anonymous") return;
     let cancelled = false;
 
     getCalibration()
@@ -81,9 +83,6 @@ export function Calibrating() {
 
   if (session.kind === "loading") return <PageSkeleton />;
   if (session.kind === "anonymous") return <SignedOut />;
-  if (session.kind === "error") {
-    return <Alert title="Cannot reach the service">{session.message}</Alert>;
-  }
 
   // The panels below need a calibration; the match history does not. It reads
   // its own endpoint, so a rank that cannot be calibrated yet — or a calibration

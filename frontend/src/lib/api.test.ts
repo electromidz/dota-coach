@@ -17,6 +17,34 @@ afterEach(() => {
 });
 
 describe("apiFetch", () => {
+  it("carries the server's request id on an error", async () => {
+    mockFetch(
+      async () =>
+        new Response(JSON.stringify({ error: { code: "DATABASE_ERROR", message: "x" } }), {
+          status: 500,
+          headers: { "x-request-id": "req-123" },
+        }),
+    );
+    await expect(apiFetch("/api/coach")).rejects.toMatchObject({ requestId: "req-123" });
+  });
+
+  it("retries a read once after a dropped connection, never a write", async () => {
+    let calls = 0;
+    mockFetch(async () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError("network");
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    await expect(apiFetch("/api/stats")).resolves.toEqual({ ok: true });
+    expect(calls).toBe(2);
+
+    calls = 0;
+    await expect(apiFetch("/api/players/me/sync", { method: "POST" })).rejects.toMatchObject({
+      code: "NETWORK_ERROR",
+    });
+    expect(calls).toBe(1);
+  });
+
   it("returns the parsed body on success", async () => {
     mockFetch(async () => new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
 

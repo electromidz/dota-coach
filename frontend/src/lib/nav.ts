@@ -17,11 +17,9 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Overview", icon: "home" },
   { href: "/matches", label: "Matches", icon: "swords" },
   { href: "/benchmark", label: "Benchmark", icon: "gauge" },
-  // Labelled "Rank", not "Calibrating": `TabBar` gives each destination an
-  // equal fraction of a phone's width, and at seven tabs that is ~51px on a
-  // 360px screen. An eleven-character label does not fit in it. The route
-  // keeps the longer name, and the page heading says "Calibrating" in full.
-  { href: "/calibrating", label: "Rank", icon: "shield" },
+  // /calibrating redirects here. Calibrated / Calibrating is a status badge
+  // on the page, not its name.
+  { href: "/rank", label: "Rank", icon: "shield" },
   { href: "/heroes", label: "Heroes", icon: "spark" },
   { href: "/coach", label: "Coach", icon: "trophy" },
   { href: "/profile", label: "Profile", icon: "user" },
