@@ -1,3 +1,4 @@
+import { AskCoach } from "@/components/landing/AskCoach";
 import { FAQ } from "@/components/landing/FAQ";
 import { FeaturesBento } from "@/components/landing/FeaturesBento";
 import { FinalCta } from "@/components/landing/FinalCta";
@@ -6,9 +7,12 @@ import { Hero } from "@/components/landing/Hero";
 import { HowItWorks } from "@/components/landing/HowItWorks";
 import { LandingJsonLd } from "@/components/landing/JsonLd";
 import { LandingNav } from "@/components/landing/LandingNav";
+import { NextMedalHook } from "@/components/landing/NextMedalHook";
 import { Pricing } from "@/components/landing/Pricing";
 import { Problem } from "@/components/landing/Problem";
 import { ProductDeepDive } from "@/components/landing/ProductDeepDive";
+import { StickyCta } from "@/components/landing/StickyCta";
+import { TrustStrip } from "@/components/landing/TrustStrip";
 import { WhatIsDotaCoach } from "@/components/landing/WhatIsDotaCoach";
 import { LandingBackdrop } from "@/components/shell/LandingBackdrop";
 import { SessionHandoff } from "@/components/shell/SessionHandoff";
@@ -27,9 +31,9 @@ import type { PlanResponse } from "@/lib/types";
  * server-side (see the sign-in hint cookie) and renders this tree directly,
  * so the landing page is complete in the first byte.
  *
- * Nothing here may become a client component wholesale: `LandingNav` and
- * `Pricing` are the only islands that need to be, and their text still
- * server-renders.
+ * Nothing here may become a client component wholesale: `LandingNav`,
+ * `Pricing` and `StickyCta` are the only islands that need to be, and their
+ * text still server-renders.
  *
  * Every dollar figure and trial length comes from the backend (`plan`, passed
  * down to `Hero` and `Pricing`) rather than being hard-coded here — the offer
@@ -44,7 +48,8 @@ export function SignedOut({
   plan?: PlanResponse | null;
 }) {
   return (
-    <div className="flex min-h-dvh flex-col">
+    // Bottom padding on phones keeps the sticky trial button off the footer.
+    <div className="flex min-h-dvh flex-col pb-20 sm:pb-0">
       {/* Renders nothing. Asks once whether this browser already has a
           session, so somebody arriving back from Steam is not stranded on the
           pitch — `/` cannot tell on its own, the session cookie being the
@@ -61,17 +66,21 @@ export function SignedOut({
 
       <main>
         <Hero loginError={loginError} plan={plan} />
+        <TrustStrip />
+        <NextMedalHook />
         <Problem />
         <HowItWorks />
         <WhatIsDotaCoach />
         <FeaturesBento />
         <ProductDeepDive />
+        <AskCoach />
         <Pricing initialPlan={plan} />
         <FAQ />
         <FinalCta />
       </main>
 
       <Footer />
+      <StickyCta />
     </div>
   );
 }

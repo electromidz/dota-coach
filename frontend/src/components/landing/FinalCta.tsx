@@ -25,14 +25,14 @@ export function FinalCta() {
         </h2>
 
         <div className="mt-8 flex justify-center">
-          <ButtonLink href={steamLoginUrl()}>
+          <ButtonLink href={steamLoginUrl()} className="whitespace-nowrap">
             <Icon name="steam" className="size-5" />
-            Start free trial — no card
+            Start free trial
           </ButtonLink>
         </div>
 
         <p className="mt-4 text-sm text-ink-faint">
-          Takes about a minute. Cancel anytime.
+          No card needed. Takes about a minute. Cancel anytime.
         </p>
       </Reveal>
     </section>

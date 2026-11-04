@@ -4,6 +4,7 @@ import {
   accessSummary,
   canSubscribe,
   entitlementLabel,
+  formatPerDay,
   formatPlanPrice,
   formatPrice,
 } from "./billing";
@@ -68,6 +69,13 @@ describe("formatPlanPrice", () => {
   it("says month for a 30-day period and spells out anything else", () => {
     expect(formatPlanPrice(PLAN)).toBe("$1.00 / month");
     expect(formatPlanPrice({ ...PLAN, period_days: 7 })).toBe("$1.00 / 7 days");
+  });
+});
+
+describe("formatPerDay", () => {
+  it("rounds the daily price to the cent", () => {
+    expect(formatPerDay({ ...PLAN, amount_cents: 499, period_days: 30 })).toBe("$0.17");
+    expect(formatPerDay({ ...PLAN, amount_cents: 100, period_days: 7 })).toBe("$0.14");
   });
 });
 

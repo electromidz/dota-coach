@@ -69,18 +69,21 @@ export function Hero({
           — with the numbers to prove it moved.
         </p>
 
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
-          <ButtonLink href={steamLoginUrl()} className="w-full sm:w-auto">
-            <Icon name="steam" className="size-5" />
-            Start free trial — no card
-          </ButtonLink>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+          <div className="flex flex-col items-center gap-1.5">
+            <ButtonLink href={steamLoginUrl()} className="w-full whitespace-nowrap sm:w-auto">
+              <Icon name="steam" className="size-5" />
+              Start free trial
+            </ButtonLink>
+            <span className="text-xs text-ink-faint">No card needed</span>
+          </div>
           <ButtonLink
             href="#product"
             variant="ghost"
-            className="w-full sm:w-auto"
+            className="w-full whitespace-nowrap sm:w-auto"
           >
-            See a sample coaching report
-            <Icon name="external" className="size-4" />
+            See sample report
+            <Icon name="chevron-down" className="size-4" />
           </ButtonLink>
         </div>
 
@@ -89,10 +92,6 @@ export function Hero({
           className="text-sm leading-relaxed text-ink-faint"
         />
 
-        <p className="text-xs text-ink-faint">
-          Cancel anytime · Works with your Steam account · We only read public
-          Dota 2 match history
-        </p>
       </div>
 
       <DashboardMockup />

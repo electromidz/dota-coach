@@ -30,8 +30,8 @@ export function TrialOffer({
         Start your {plan.trial_days}-day free trial.
       </span>{" "}
       <span className="text-ink-muted">
-        Then {formatPlanPrice(plan)} for AI coaching — everything measured stays
-        free.
+        Every feature included. Then {formatPlanPrice(plan)}, or keep your
+        overview and match history free.
       </span>
     </p>
   );
