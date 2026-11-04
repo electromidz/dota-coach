@@ -1,10 +1,5 @@
-import { AppShell } from "@/components/shell/AppShell";
-import { PageSkeleton } from "@/components/shell/PageSkeleton";
+import { DashboardSkeleton } from "@/components/admin/Skeletons";
 
 export default function Loading() {
-  return (
-    <AppShell>
-      <PageSkeleton />
-    </AppShell>
-  );
+  return <DashboardSkeleton />;
 }

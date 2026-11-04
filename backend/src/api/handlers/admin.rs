@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::extract::{AdminUser, AppJson, AppPath, AppQuery};
-use crate::domain::admin::{AdminStats, AdminUserDetail, AdminUserSummary, AdminVoucherDetail};
+use crate::domain::admin::{
+    AdminStats, AdminUserDetail, AdminUserSummary, AdminVoucherDetail, UserSort, VoucherListItem,
+    VoucherStatusFilter,
+};
 use crate::domain::audit::{AuditAction, AuditLogEntry, AuditTargetType};
 use crate::domain::billing::SubscriptionStatus;
 use crate::domain::voucher::Voucher;
@@ -21,6 +24,7 @@ use crate::repositories::voucher::NewVoucher;
 use crate::services;
 use crate::services::audit;
 use crate::state::AppState;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::Json;
 use utoipa::ToSchema;
@@ -91,6 +95,11 @@ pub struct UserListQuery {
     /// Matches Steam display name (partial, case-insensitive) or SteamID64
     /// (exact) — this product has no email or username.
     pub search: Option<String>,
+    /// `name`, `steam_id`, `status`, `subscription`, `plan`, `joined` (the
+    /// default) or `last_seen`.
+    pub sort: Option<String>,
+    /// `asc` or `desc` (the default).
+    pub dir: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -114,6 +123,8 @@ pub struct UserListResponse {
         ("plan" = Option<String>, Query, description = "Filter by billing lifecycle: `trialing`, `active`, `expired`, `cancelled` or `past_due`.", example = "trialing"),
         ("last_login_before" = Option<String>, Query, description = "RFC3339 timestamp. Only accounts not seen since before this — including ones that never logged in.", example = "2026-08-01T00:00:00Z"),
         ("search" = Option<String>, Query, description = "Matches Steam display name (partial) or SteamID64 (exact).", example = "Midz"),
+        ("sort" = Option<String>, Query, description = "`name`, `steam_id`, `status`, `subscription`, `plan`, `joined` (default) or `last_seen`.", example = "last_seen"),
+        ("dir" = Option<String>, Query, description = "`asc` or `desc` (default). Missing values always sort last.", example = "desc"),
     ),
     responses(
         (status = 200, description = "One page of accounts, newest first", body = UserListResponse),
@@ -134,9 +145,13 @@ pub async fn list_users(
         last_login_before: query.last_login_before,
         search: query.search,
     };
+    let sort = validate_user_sort(query.sort)?;
+    let descending = validate_direction(query.dir)?;
     let offset = (page - 1) * limit;
 
-    let users = repositories::admin::list_users(&state.db, &filters, limit, offset).await?;
+    let users =
+        repositories::admin::list_users(&state.db, &filters, sort, descending, limit, offset)
+            .await?;
     let total = repositories::admin::count_users(&state.db, &filters).await?;
 
     Ok(Json(UserListResponse {
@@ -173,8 +188,19 @@ pub async fn get_user(
         .await?
         .ok_or_else(|| AppError::NotFound("No such account.".into()))?;
     let events = repositories::event::list_for_user(&state.db, id, USER_EVENT_LIMIT).await?;
+    let admin_actions = repositories::audit::list_for_target(
+        &state.db,
+        AuditTargetType::User.slug(),
+        id,
+        USER_EVENT_LIMIT,
+    )
+    .await?;
 
-    Ok(Json(AdminUserDetail { summary, events }))
+    Ok(Json(AdminUserDetail {
+        summary,
+        events,
+        admin_actions,
+    }))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -182,9 +208,21 @@ pub struct ExtendAccessRequest {
     /// Must be positive. Capped generously — this grants access, and a typo
     /// here should cost a support ticket, not a year of free service.
     pub days: i64,
+    /// Why, in the admin's words. Stored with the audit entry and shown in
+    /// the account's activity feed.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// The optional body of `disable` and `enable`.
+#[derive(Deserialize, ToSchema)]
+pub struct AdminActionRequest {
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 const MAX_EXTENSION_DAYS: i64 = 365;
+const MAX_REASON_CHARS: usize = 500;
 
 /// `POST /api/admin/users/:id/extend`
 #[utoipa::path(
@@ -216,6 +254,7 @@ pub async fn extend(
         )));
     }
 
+    let reason = validate_reason(body.reason)?;
     let extended = repositories::admin::extend_access(&state.db, id, body.days).await?;
     if !extended {
         return Err(AppError::NotFound(
@@ -229,7 +268,7 @@ pub async fn extend(
         AuditAction::ExtendAccess,
         AuditTargetType::User,
         id,
-        serde_json::json!({ "days": body.days }),
+        serde_json::json!({ "days": body.days, "reason": reason }),
     )
     .await;
 
@@ -249,6 +288,7 @@ pub async fn extend(
     params(
         ("id" = Uuid, Path, description = "The account id.", example = "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
     ),
+    request_body(content = Option<AdminActionRequest>, description = "Optional. `{\"reason\": \"...\"}` is stored with the audit entry."),
     responses(
         (status = 200, description = "The updated account", body = AdminUserSummary),
         (status = 404, description = "No such account", body = crate::error::ErrorBody),
@@ -260,7 +300,9 @@ pub async fn disable_user(
     State(state): State<AppState>,
     AdminUser(admin): AdminUser,
     AppPath(id): AppPath<Uuid>,
+    body: Bytes,
 ) -> AppResult<Json<AdminUserSummary>> {
+    let reason = optional_reason(&body)?;
     let disabled = repositories::admin::disable_user(&state.db, id).await?;
     if !disabled {
         return Err(AppError::NotFound("No such account.".into()));
@@ -272,7 +314,7 @@ pub async fn disable_user(
         AuditAction::DisableUser,
         AuditTargetType::User,
         id,
-        serde_json::json!({}),
+        serde_json::json!({ "reason": reason }),
     )
     .await;
 
@@ -291,6 +333,7 @@ pub async fn disable_user(
     params(
         ("id" = Uuid, Path, description = "The account id.", example = "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
     ),
+    request_body(content = Option<AdminActionRequest>, description = "Optional. `{\"reason\": \"...\"}` is stored with the audit entry."),
     responses(
         (status = 200, description = "The updated account", body = AdminUserSummary),
         (status = 404, description = "No such account", body = crate::error::ErrorBody),
@@ -302,7 +345,9 @@ pub async fn enable_user(
     State(state): State<AppState>,
     AdminUser(admin): AdminUser,
     AppPath(id): AppPath<Uuid>,
+    body: Bytes,
 ) -> AppResult<Json<AdminUserSummary>> {
+    let reason = optional_reason(&body)?;
     let enabled = repositories::admin::enable_user(&state.db, id).await?;
     if !enabled {
         return Err(AppError::NotFound("No such account.".into()));
@@ -314,7 +359,7 @@ pub async fn enable_user(
         AuditAction::EnableUser,
         AuditTargetType::User,
         id,
-        serde_json::json!({}),
+        serde_json::json!({ "reason": reason }),
     )
     .await;
 
@@ -426,6 +471,23 @@ pub struct PageQuery {
     pub limit: Option<i64>,
 }
 
+#[derive(Deserialize)]
+pub struct VoucherListQuery {
+    pub page: Option<i64>,
+    pub limit: Option<i64>,
+    /// `active`, `used`, `expired` or `deactivated`.
+    pub status: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct AdminVoucherListResponse {
+    pub vouchers: Vec<VoucherListItem>,
+    pub page: i64,
+    pub limit: i64,
+    pub total: i64,
+    pub total_pages: i64,
+}
+
 /// `GET /api/admin/vouchers`
 #[utoipa::path(
     get, path = "/api/admin/vouchers", tag = "admin",
@@ -434,9 +496,10 @@ pub struct PageQuery {
     params(
         ("page" = Option<i64>, Query, description = "1-based page number. Defaults to 1.", example = 1, minimum = 1),
         ("limit" = Option<i64>, Query, description = "Rows per page. Defaults to 20.", example = 20, minimum = 1, maximum = 100),
+        ("status" = Option<String>, Query, description = "`active`, `used`, `expired` or `deactivated`.", example = "active"),
     ),
     responses(
-        (status = 200, description = "One page of vouchers, newest first", body = VoucherListResponse),
+        (status = 200, description = "One page of vouchers, newest first, each with who redeemed it", body = AdminVoucherListResponse),
         (status = 400, description = "Invalid pagination", body = crate::error::ErrorBody),
         (status = 403, description = "Signed in, but not an admin", body = crate::error::ErrorBody),
         (status = 401, description = "No session cookie, or it has expired", body = crate::error::ErrorBody),
@@ -445,15 +508,16 @@ pub struct PageQuery {
 pub async fn list_vouchers(
     State(state): State<AppState>,
     AdminUser(_admin): AdminUser,
-    AppQuery(query): AppQuery<PageQuery>,
-) -> AppResult<Json<VoucherListResponse>> {
+    AppQuery(query): AppQuery<VoucherListQuery>,
+) -> AppResult<Json<AdminVoucherListResponse>> {
     let (page, limit) = validate_pagination(query.page, query.limit)?;
+    let status = validate_voucher_status(query.status)?;
     let offset = (page - 1) * limit;
 
-    let vouchers = repositories::voucher::list(&state.db, limit, offset).await?;
-    let total = repositories::voucher::count(&state.db).await?;
+    let vouchers = repositories::admin::list_vouchers(&state.db, status, limit, offset).await?;
+    let total = repositories::admin::count_vouchers(&state.db, status).await?;
 
-    Ok(Json(VoucherListResponse {
+    Ok(Json(AdminVoucherListResponse {
         vouchers,
         page,
         limit,
@@ -608,6 +672,65 @@ fn validate_plan(raw: Option<String>) -> AppResult<Option<String>> {
                 ))
             }),
     }
+}
+
+fn validate_user_sort(raw: Option<String>) -> AppResult<UserSort> {
+    match raw.as_deref().map(str::trim) {
+        None | Some("") => Ok(UserSort::default()),
+        Some(other) => UserSort::parse(other).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "Unknown sort '{other}'. Use name, steam_id, status, subscription, plan, joined or last_seen."
+            ))
+        }),
+    }
+}
+
+/// `true` for descending, the default.
+fn validate_direction(raw: Option<String>) -> AppResult<bool> {
+    match raw.as_deref().map(str::trim) {
+        None | Some("") | Some("desc") => Ok(true),
+        Some("asc") => Ok(false),
+        Some(other) => Err(AppError::BadRequest(format!(
+            "Unknown dir '{other}'. Use 'asc' or 'desc'."
+        ))),
+    }
+}
+
+fn validate_voucher_status(raw: Option<String>) -> AppResult<Option<VoucherStatusFilter>> {
+    match raw.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(other) => VoucherStatusFilter::parse(other).map(Some).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "Unknown status '{other}'. Use active, used, expired or deactivated."
+            ))
+        }),
+    }
+}
+
+/// Trimmed; blank means none. Capped so the audit log stays a log.
+fn validate_reason(raw: Option<String>) -> AppResult<Option<String>> {
+    let reason = raw.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+    if reason
+        .as_ref()
+        .is_some_and(|r| r.chars().count() > MAX_REASON_CHARS)
+    {
+        return Err(AppError::BadRequest(format!(
+            "reason must be at most {MAX_REASON_CHARS} characters."
+        )));
+    }
+    Ok(reason)
+}
+
+/// `disable` and `enable` predate reasons and are still called with no body,
+/// so an empty body is "no reason" rather than a malformed request.
+fn optional_reason(body: &[u8]) -> AppResult<Option<String>> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    let parsed: AdminActionRequest = serde_json::from_slice(body).map_err(|_| {
+        AppError::BadRequest("The request body is not valid JSON for this endpoint.".into())
+    })?;
+    validate_reason(parsed.reason)
 }
 
 fn validate_pagination(page: Option<i64>, limit: Option<i64>) -> AppResult<(i64, i64)> {

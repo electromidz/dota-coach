@@ -20,8 +20,9 @@ function AdminLink({ active }: { active: boolean }) {
     <Link
       href="/admin"
       aria-current={active ? "page" : undefined}
+      title="Admin"
       className={cn(
-        "focus-neon flex cursor-pointer items-center gap-2 rounded-xl border px-3.5 py-2",
+        "focus-neon flex shrink-0 cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 xl:px-3.5",
         "text-sm font-medium tracking-wide",
         "transition-[color,background-color,border-color] duration-200 ease-out",
         active
@@ -29,8 +30,9 @@ function AdminLink({ active }: { active: boolean }) {
           : "border-transparent text-ink-faint hover:border-glass-edge hover:text-ink",
       )}
     >
-      <Icon name="shield" className="size-4" />
-      Admin
+      {/* Its own glyph: the shield already means Rank. */}
+      <Icon name="key" className="size-4" />
+      <span className="sr-only xl:not-sr-only">Admin</span>
     </Link>
   );
 }
@@ -51,11 +53,14 @@ export function TopNav() {
 
   return (
     <header className="glass sticky top-0 z-30 hidden rounded-none border-x-0 border-t-0 lg:block">
-      <div className="mx-auto flex h-16 max-w-7xl items-center gap-8 px-8">
+      {/* Between lg and xl there is not room for seven labelled items, the
+          admin link and the account chip: labels collapse to icons (each keeps
+          its accessible name and a tooltip) instead of overlapping. */}
+      <div className="mx-auto flex h-16 max-w-7xl items-center gap-4 px-6 xl:gap-8 xl:px-8">
         <Brand />
 
         <nav aria-label="Primary" className="min-w-0 flex-1">
-          <ul className="flex items-center gap-1">
+          <ul className="flex items-center gap-0.5 xl:gap-1">
             {NAV_ITEMS.map((item) => {
               const active = isActiveRoute(pathname, item.href);
 
@@ -64,8 +69,9 @@ export function TopNav() {
                   <Link
                     href={item.href}
                     aria-current={active ? "page" : undefined}
+                    title={item.label}
                     className={cn(
-                      "focus-neon flex cursor-pointer items-center gap-2 rounded-xl px-3.5 py-2",
+                      "focus-neon flex cursor-pointer items-center gap-2 rounded-xl px-3 py-2 xl:px-3.5",
                       "text-sm font-medium tracking-wide",
                       "transition-[color,background-color,box-shadow] duration-200 ease-out",
                       active
@@ -74,7 +80,7 @@ export function TopNav() {
                     )}
                   >
                     <Icon name={item.icon} className="size-4" />
-                    {item.label}
+                    <span className="sr-only xl:not-sr-only">{item.label}</span>
                   </Link>
                 </li>
               );
@@ -87,12 +93,13 @@ export function TopNav() {
         {me ? (
           <Link
             href="/profile"
+            aria-label={`Profile: ${me.user.persona_name ?? "Steam player"}`}
             className={cn(
               "focus-neon flex shrink-0 cursor-pointer items-center gap-3 rounded-xl px-2 py-1.5",
               "transition-colors duration-200 ease-out hover:bg-surface-2/40",
             )}
           >
-            <span className="flex min-w-0 flex-col items-end leading-tight">
+            <span className="hidden min-w-0 flex-col items-end leading-tight xl:flex">
               <span className="max-w-40 truncate text-sm text-ink">
                 {me.user.persona_name ?? "Steam player"}
               </span>

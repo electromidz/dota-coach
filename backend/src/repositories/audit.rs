@@ -54,3 +54,27 @@ pub async fn count(pool: &PgPool) -> Result<i64, sqlx::Error> {
         .fetch_one(pool)
         .await
 }
+
+/// Every admin action taken on one target, newest first — shown in that
+/// account's activity feed beside its own events.
+pub async fn list_for_target(
+    pool: &PgPool,
+    target_type: &str,
+    target_id: Uuid,
+    limit: i64,
+) -> Result<Vec<AuditLogEntry>, sqlx::Error> {
+    sqlx::query_as::<_, AuditLogEntry>(
+        "SELECT a.id, a.admin_id, u.persona_name AS admin_persona_name,
+                a.action, a.target_type, a.target_id, a.metadata, a.created_at
+           FROM admin_audit_log a
+           LEFT JOIN users u ON u.id = a.admin_id
+          WHERE a.target_type = $1 AND a.target_id = $2
+          ORDER BY a.created_at DESC
+          LIMIT $3",
+    )
+    .bind(target_type)
+    .bind(target_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}

@@ -3,47 +3,53 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import { Icon, type IconName } from "@/components/ui/Icon";
 import { cn } from "@/lib/utils";
 
-const TABS = [
-  { href: "/admin", label: "Dashboard" },
-  { href: "/admin/users", label: "Users" },
-  { href: "/admin/vouchers", label: "Vouchers" },
-] as const;
+const TABS: { href: string; label: string; icon: IconName }[] = [
+  { href: "/admin", label: "Dashboard", icon: "gauge" },
+  { href: "/admin/users", label: "Users", icon: "users" },
+  { href: "/admin/vouchers", label: "Vouchers", icon: "ticket" },
+];
 
 /**
- * The three admin destinations. Kept out of the app's global nav entirely —
- * see `lib/nav.ts` — since almost every account never sees this section at
- * all; a local tab strip is the right amount of chrome for the few screens
- * one role uses.
+ * The admin tabs. Rendered once by the admin layout, so they stay mounted
+ * while the content below changes. `prefetch` loads each tab's route ahead
+ * of the click (production builds only; dev renders on demand).
  */
 export function AdminSubNav() {
   const pathname = usePathname();
 
   return (
-    <nav aria-label="Admin sections" className="flex gap-2">
-      {TABS.map((tab) => {
-        // Exact match for "/admin" so it does not also light up on "/admin/users".
-        const active =
-          tab.href === "/admin" ? pathname === "/admin" : pathname.startsWith(tab.href);
+    <nav aria-label="Admin sections" className="-mx-1 overflow-x-auto px-1">
+      <ul className="flex gap-2">
+        {TABS.map((tab) => {
+          // Exact for the dashboard; a prefix for the others, so a user or
+          // voucher detail page still lights up its tab.
+          const active =
+            tab.href === "/admin" ? pathname === "/admin" : pathname.startsWith(tab.href);
 
-        return (
-          <Link
-            key={tab.href}
-            href={tab.href}
-            aria-current={active ? "page" : undefined}
-            className={cn(
-              "focus-neon min-h-11 cursor-pointer rounded-xl border px-4 py-2 text-sm",
-              "transition-colors duration-200 ease-out",
-              active
-                ? "border-function/60 bg-function/10 text-ink"
-                : "border-glass-edge text-ink-muted hover:text-ink",
-            )}
-          >
-            {tab.label}
-          </Link>
-        );
-      })}
+          return (
+            <li key={tab.href}>
+              <Link
+                href={tab.href}
+                prefetch
+                aria-current={active ? "page" : undefined}
+                className={cn(
+                  "focus-neon flex min-h-11 cursor-pointer items-center gap-2 whitespace-nowrap rounded-xl border px-4 text-sm",
+                  "transition-colors duration-200 ease-out",
+                  active
+                    ? "border-function/60 bg-function/10 text-ink"
+                    : "border-glass-edge text-ink-muted hover:text-ink",
+                )}
+              >
+                <Icon name={tab.icon} className="size-4" />
+                {tab.label}
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
     </nav>
   );
 }

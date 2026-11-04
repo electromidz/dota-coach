@@ -3752,9 +3752,10 @@ async fn active_since_counts_distinct_accounts_not_raw_login_events() {
     .await
     .unwrap();
 
-    let active = dota_coach_backend::repositories::admin::count_active_since(
+    let active = dota_coach_backend::repositories::admin::count_active_between(
         &app.db,
         rfc3339("2022-01-01T00:00:00Z"),
+        rfc3339("2022-01-31T00:00:00Z"),
     )
     .await
     .unwrap();
@@ -4699,11 +4700,19 @@ async fn the_audit_log_lists_entries_newest_first_with_the_admins_name() {
     .await;
 
     let response = app
-        .get("/api/admin/audit-log?limit=2", Some(&admin_session.token))
+        .get("/api/admin/audit-log?limit=100", Some(&admin_session.token))
         .await;
     assert_eq!(response.status, StatusCode::OK);
     let body = response.json();
-    let entries = body["entries"].as_array().unwrap();
+    // Only this test's entries: other tests write to the same log in
+    // parallel, so "the latest two overall" would race them.
+    let entries: Vec<_> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["target_id"] == target_id.to_string())
+        .cloned()
+        .collect();
     assert_eq!(entries.len(), 2);
     // Newest first: enable was the more recent of the two actions.
     assert_eq!(entries[0]["action"], "enable_user");
@@ -5079,4 +5088,329 @@ async fn heroes_and_coach_report_the_same_record_and_tier_for_the_same_role() {
     assert_eq!(bad.status, StatusCode::BAD_REQUEST);
 
     app.cleanup(&[steam_id]).await;
+}
+
+// ---------------------------------------------------------------------------
+// Admin panel refactor: sorting, voucher status, reasons, period stats
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn admin_routes_reject_a_signed_out_caller() {
+    let Some(db) = support::pool().await else {
+        return skip("admin_routes_reject_a_signed_out_caller");
+    };
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let id = "00000000-0000-0000-0000-000000000000";
+
+    for (method, path) in [
+        ("GET", "/api/admin/stats".to_string()),
+        ("GET", "/api/admin/users".to_string()),
+        ("GET", format!("/api/admin/users/{id}")),
+        ("POST", format!("/api/admin/users/{id}/extend")),
+        ("POST", format!("/api/admin/users/{id}/disable")),
+        ("POST", format!("/api/admin/users/{id}/enable")),
+        ("GET", "/api/admin/vouchers".to_string()),
+        ("POST", "/api/admin/vouchers".to_string()),
+        ("GET", format!("/api/admin/vouchers/{id}")),
+        ("POST", format!("/api/admin/vouchers/{id}/deactivate")),
+        ("GET", "/api/admin/audit-log".to_string()),
+    ] {
+        let response = if method == "GET" {
+            app.get(&path, None).await
+        } else {
+            app.post_json(&path, r#"{"days": 1}"#, None).await
+        };
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "{method} {path} should refuse a signed-out caller"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_admin_user_list_sorts_on_a_whitelisted_column_only() {
+    let Some(db) = support::pool().await else {
+        return skip("the_admin_user_list_sorts_on_a_whitelisted_column_only");
+    };
+    let admin_id = unique_steam_id();
+    let a = unique_steam_id();
+    let b = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let admin = app.login_as(admin_id).await;
+    make_admin(&app, admin_id).await;
+    app.login_as(a).await;
+    app.login_as(b).await;
+
+    // Distinct, searchable names that sort the opposite way to signup order.
+    let tag = format!("sorttest{a}");
+    for (steam_id, name) in [(a, format!("{tag}-zed")), (b, format!("{tag}-amy"))] {
+        sqlx::query("UPDATE users SET persona_name = $2 WHERE steam_id = $1")
+            .bind(steam_id)
+            .bind(name)
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+
+    let names = |body: serde_json::Value| -> Vec<String> {
+        body["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["persona_name"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let asc = app
+        .get(
+            &format!("/api/admin/users?search={tag}&sort=name&dir=asc"),
+            Some(&admin.token),
+        )
+        .await;
+    assert_eq!(asc.status, StatusCode::OK, "{}", asc.body);
+    assert_eq!(names(asc.json()), vec![format!("{tag}-amy"), format!("{tag}-zed")]);
+
+    let desc = app
+        .get(
+            &format!("/api/admin/users?search={tag}&sort=name&dir=desc"),
+            Some(&admin.token),
+        )
+        .await;
+    assert_eq!(names(desc.json()), vec![format!("{tag}-zed"), format!("{tag}-amy")]);
+
+    for bad in ["sort=created_at%3BDROP", "dir=sideways"] {
+        let refused = app
+            .get(&format!("/api/admin/users?{bad}"), Some(&admin.token))
+            .await;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    app.cleanup(&[admin_id, a, b]).await;
+}
+
+#[tokio::test]
+async fn the_voucher_list_filters_by_status_and_names_the_redeemer() {
+    let Some(db) = support::pool().await else {
+        return skip("the_voucher_list_filters_by_status_and_names_the_redeemer");
+    };
+    let admin_id = unique_steam_id();
+    let redeemer_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let admin = app.login_as(admin_id).await;
+    make_admin(&app, admin_id).await;
+    let redeemer = app.login_as(redeemer_id).await;
+
+    let create = |days: i32| new_voucher(days, None);
+    let used = dota_coach_backend::repositories::voucher::create(&app.db, &create(3))
+        .await
+        .unwrap();
+    let fresh = dota_coach_backend::repositories::voucher::create(&app.db, &create(4))
+        .await
+        .unwrap();
+    let off = dota_coach_backend::repositories::voucher::create(&app.db, &create(5))
+        .await
+        .unwrap();
+    let lapsed = dota_coach_backend::repositories::voucher::create(&app.db, &create(6))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE vouchers SET expires_at = now() - interval '1 day' WHERE id = $1")
+        .bind(lapsed.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    app.post(
+        &format!("/api/admin/vouchers/{}/deactivate", off.id),
+        Some(&admin.token),
+    )
+    .await;
+    let redeemed = app
+        .post_json(
+            "/api/subscribe/redeem",
+            &format!(r#"{{"code": "{}"}}"#, used.code),
+            Some(&redeemer.token),
+        )
+        .await;
+    assert_eq!(redeemed.status, StatusCode::OK);
+
+    let ids_for = |status: &'static str| {
+        let app = &app;
+        let token = admin.token.clone();
+        async move {
+            let response = app
+                .get(
+                    &format!("/api/admin/vouchers?status={status}&limit=100"),
+                    Some(&token),
+                )
+                .await;
+            assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+            response.json()["vouchers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+
+    let mine = |ids: Vec<String>| -> Vec<String> {
+        let ours = [used.id, fresh.id, off.id, lapsed.id].map(|id| id.to_string());
+        ids.into_iter().filter(|id| ours.contains(id)).collect()
+    };
+
+    assert_eq!(mine(ids_for("used").await), vec![used.id.to_string()]);
+    assert_eq!(mine(ids_for("active").await), vec![fresh.id.to_string()]);
+    assert_eq!(mine(ids_for("deactivated").await), vec![off.id.to_string()]);
+    assert_eq!(mine(ids_for("expired").await), vec![lapsed.id.to_string()]);
+
+    let listed = app
+        .get("/api/admin/vouchers?status=used&limit=100", Some(&admin.token))
+        .await
+        .json();
+    let row = listed["vouchers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == used.id.to_string())
+        .unwrap()
+        .clone();
+    assert_eq!(row["redeemed_by"]["steam_id"], redeemer_id.to_string());
+    assert!(row["redeemed_by"]["redeemed_at"].is_string());
+
+    let bad = app
+        .get("/api/admin/vouchers?status=used_up", Some(&admin.token))
+        .await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+
+    for v in [&used, &fresh, &off, &lapsed] {
+        delete_voucher(&app, &v.id.to_string()).await;
+    }
+    app.cleanup(&[admin_id, redeemer_id]).await;
+}
+
+#[tokio::test]
+async fn admin_actions_carry_a_reason_into_the_accounts_activity() {
+    let Some(db) = support::pool().await else {
+        return skip("admin_actions_carry_a_reason_into_the_accounts_activity");
+    };
+    let admin_id = unique_steam_id();
+    let target_id = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let admin = app.login_as(admin_id).await;
+    make_admin(&app, admin_id).await;
+    let target = app.login_as(target_id).await;
+    app.get("/api/billing", Some(&target.token)).await;
+
+    let user_id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM users WHERE steam_id = $1")
+        .bind(target_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+
+    let disabled = app
+        .post_json(
+            &format!("/api/admin/users/{user_id}/disable"),
+            r#"{"reason": "  chargeback  "}"#,
+            Some(&admin.token),
+        )
+        .await;
+    assert_eq!(disabled.status, StatusCode::OK, "{}", disabled.body);
+
+    // Still callable with no body at all, as before reasons existed.
+    let enabled = app
+        .post(&format!("/api/admin/users/{user_id}/enable"), Some(&admin.token))
+        .await;
+    assert_eq!(enabled.status, StatusCode::OK, "{}", enabled.body);
+
+    let extended = app
+        .post_json(
+            &format!("/api/admin/users/{user_id}/extend"),
+            r#"{"days": 7, "reason": "support goodwill"}"#,
+            Some(&admin.token),
+        )
+        .await;
+    assert_eq!(extended.status, StatusCode::OK, "{}", extended.body);
+
+    let too_long = app
+        .post_json(
+            &format!("/api/admin/users/{user_id}/disable"),
+            &format!(r#"{{"reason": "{}"}}"#, "x".repeat(501)),
+            Some(&admin.token),
+        )
+        .await;
+    assert_eq!(too_long.status, StatusCode::BAD_REQUEST);
+
+    let detail = app
+        .get(&format!("/api/admin/users/{user_id}"), Some(&admin.token))
+        .await
+        .json();
+    let actions = detail["admin_actions"].as_array().unwrap();
+    let summary: Vec<(String, serde_json::Value)> = actions
+        .iter()
+        .map(|a| (a["action"].as_str().unwrap().to_string(), a["metadata"]["reason"].clone()))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            ("extend_access".to_string(), serde_json::json!("support goodwill")),
+            ("enable_user".to_string(), serde_json::Value::Null),
+            ("disable_user".to_string(), serde_json::json!("chargeback")),
+        ],
+        "newest first, reasons trimmed, absent when not given"
+    );
+    assert!(actions[0]["admin_persona_name"].is_null() || actions[0]["admin_id"].is_string());
+
+    sqlx::query("DELETE FROM admin_audit_log WHERE target_id = $1")
+        .bind(user_id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    app.cleanup(&[admin_id, target_id]).await;
+}
+
+#[tokio::test]
+async fn admin_stats_compare_the_window_with_the_one_before_it() {
+    let Some(db) = support::pool().await else {
+        return skip("admin_stats_compare_the_window_with_the_one_before_it");
+    };
+    let admin_id = unique_steam_id();
+    let early = unique_steam_id();
+    let late = unique_steam_id();
+    let app = app(db, MockDota::default().into(), StubVerifier::rejecting());
+    let admin = app.login_as(admin_id).await;
+    make_admin(&app, admin_id).await;
+    app.login_as(early).await;
+    app.login_as(late).await;
+
+    // A window far in the past, so nothing else in the database lands in it:
+    // one signup in the previous ten days, one in the current ten.
+    for (steam_id, at) in [(early, "2020-01-05T12:00:00Z"), (late, "2020-01-15T12:00:00Z")] {
+        sqlx::query("UPDATE users SET created_at = $2::timestamptz WHERE steam_id = $1")
+            .bind(steam_id)
+            .bind(at)
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+
+    let body = app
+        .get(
+            "/api/admin/stats?from=2020-01-11T00:00:00Z&to=2020-01-20T23:59:59Z",
+            Some(&admin.token),
+        )
+        .await
+        .json();
+
+    assert_eq!(body["period"]["signups"], 1);
+    assert_eq!(body["previous"]["signups"], 1);
+    assert_eq!(body["previous_to"].as_str().unwrap(), "2020-01-10T23:59:59.999Z");
+
+    // The funnel is all-time and carries its own step rates.
+    let funnel = &body["funnel"];
+    assert_eq!(funnel["signed_up"], body["total_users"]);
+    assert_eq!(funnel["trial_started"], body["trials_started"]);
+    assert_eq!(funnel["purchased"], body["paid_users"]);
+    assert!(funnel["signup_to_trial_pct"].is_number());
+
+    app.cleanup(&[admin_id, early, late]).await;
 }
