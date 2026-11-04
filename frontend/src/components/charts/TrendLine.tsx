@@ -5,7 +5,6 @@ import { useState } from "react";
 import { cn } from "@/lib/utils";
 
 const W = 640;
-const H = 180;
 const PAD_L = 40;
 const PAD_R = 12;
 const PAD_T = 12;
@@ -30,6 +29,7 @@ export function TrendLine({
   label,
   format = (v) => v.toFixed(1),
   reference,
+  height: H = 180,
   className,
 }: {
   points: TrendPoint[];
@@ -37,6 +37,8 @@ export function TrendLine({
   label: string;
   format?: (value: number) => string;
   reference?: { value: number; label: string };
+  /** Drawing height on the 640-wide grid; it scales with the card width. */
+  height?: number;
   className?: string;
 }) {
   const [hover, setHover] = useState<number | null>(null);

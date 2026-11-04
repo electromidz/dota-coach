@@ -1139,6 +1139,8 @@ fn respond(
     let analysis = analysis.map(|mut a| {
         if a.scope == AnalysisScope::Match {
             a.insights = coaching::findings::govern(a.insights, &a.evidence);
+        } else {
+            a.insights = coaching::findings::govern_session(a.insights, &a.evidence);
         }
         a
     });

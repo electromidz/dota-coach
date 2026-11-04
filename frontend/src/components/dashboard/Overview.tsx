@@ -113,6 +113,9 @@ export function Overview({ loginError }: { loginError?: string }) {
   }
 
   const { me } = session;
+  // Until the first load lands, "no matches" would be a guess; show the
+  // skeleton instead (an error is reported by its own alert below).
+  if (!stats && !matchesError) return <OverviewSkeleton />;
   const list = matches ?? [];
   const overall = stats?.overall;
   /** Eligible matches — the population every number on this screen describes. */

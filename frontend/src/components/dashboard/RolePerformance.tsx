@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { InfoTip } from "@/components/ui/InfoTip";
 import { BarList } from "@/components/charts/BarList";
 import { ConfidenceBadge } from "@/components/dashboard/ScopeBanner";
 import { Card } from "@/components/ui/Card";
@@ -62,7 +63,7 @@ export function RolePerformance({ analysis }: { analysis: RoleAnalysis }) {
               }
             />
           </div>
-          <p className="text-xs leading-relaxed text-ink-muted">
+          <p className="line-clamp-2 text-xs text-ink-muted" title={analysis.recommendation.why}>
             {analysis.recommendation.why}
           </p>
         </div>
@@ -86,11 +87,13 @@ export function RolePerformance({ analysis }: { analysis: RoleAnalysis }) {
       </Link>
 
       {unclassified > 0 ? (
-        <p className="text-[0.6875rem] leading-relaxed text-ink-faint">
-          {unclassified} eligible {unclassified === 1 ? "match" : "matches"}{" "}
-          could not be attributed to one of the five roles. Without a parsed
-          replay the data only shows whether you played a core or a support, and
-          guessing the lane would put the wrong games in the wrong role.
+        <p className="flex items-center gap-1.5 text-[0.6875rem] text-ink-faint">
+          {unclassified} eligible {unclassified === 1 ? "match" : "matches"} without a role
+          <InfoTip label="About matches without a role">
+            Without a parsed replay the data only shows whether you played a core or a
+            support, and guessing the lane would put the wrong games in the wrong role.
+            You can set the position on the match page.
+          </InfoTip>
         </p>
       ) : null}
     </Card>

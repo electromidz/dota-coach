@@ -3,7 +3,7 @@
 import Link from "next/link";
 
 import { Donut, type DonutSlice } from "@/components/charts/Donut";
-import { LegendItem, RadarCompare } from "@/components/charts/RadarCompare";
+import { RadarCompare } from "@/components/charts/RadarCompare";
 import { ChartCard } from "@/components/ui/ChartCard";
 import { HeroPortrait } from "@/components/ui/HeroPortrait";
 import { ScopeLine } from "@/components/ui/ScopeLine";
@@ -41,13 +41,7 @@ export function BracketRadar({ brackets }: { brackets: RankDistribution }) {
     >
       <ScopeLine hero={brackets.hero_name} role={brackets.role_label} matches={brackets.sample} className="-mt-2" />
       {points.length >= 3 ? (
-        <>
-          <RadarCompare points={points} rankLabel="Your medal" />
-          <div className="flex flex-wrap justify-center gap-4 text-xs text-ink-muted">
-            <LegendItem kind="you">You</LegendItem>
-            <LegendItem kind="rank">Your medal&apos;s median</LegendItem>
-          </div>
-        </>
+        <RadarCompare points={points} rankLabel="Your medal" />
       ) : (
         <p className="text-sm text-ink-faint">Needs more games on {brackets.hero_name} to place you on enough metrics.</p>
       )}
@@ -128,10 +122,8 @@ function RatingStrip({ points }: { points: MomentumPoint[] }) {
       {[true, false].map((won) => (
         <div key={String(won)} className="flex items-center gap-2">
           <span className="w-9 shrink-0 text-[0.6875rem] text-ink-faint">{won ? "Won" : "Lost"}</span>
-          <span className="relative block h-7 flex-1 rounded-md bg-surface-2/50">
-            {rated
-              .filter((p) => p.won === won)
-              .map((p) => (
+          <span className="relative block h-12 flex-1 rounded-md bg-surface-2/50">
+            {dodge(rated.filter((p) => p.won === won)).map(({ p, row }) => (
                 <Link
                   key={p.id}
                   href={`/matches/${p.id}`}
@@ -140,7 +132,7 @@ function RatingStrip({ points }: { points: MomentumPoint[] }) {
                     "absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-full ring-2 ring-surface-2",
                     won ? "bg-mark-win" : "bg-mark-loss",
                   )}
-                  style={{ left: at(p.rating!) }}
+                  style={{ left: at(p.rating!), marginTop: ROW_OFFSET[row] }}
                 />
               ))}
           </span>
@@ -153,4 +145,23 @@ function RatingStrip({ points }: { points: MomentumPoint[] }) {
       </div>
     </div>
   );
+}
+
+/** Vertical offsets for dots that would otherwise overlap: centre, then alternating up and down. */
+const ROW_OFFSET = [0, -8, 8, -16, 16];
+/** Ratings closer than this share a column, so the later one moves row. */
+const MIN_GAP = 0.45;
+
+/** Place each game in the first row with no dot too close; past five
+ *  rows, dots stack on the centre row. */
+export function dodge(points: MomentumPoint[]): { p: MomentumPoint; row: number }[] {
+  const lastInRow: number[] = [];
+  return [...points]
+    .sort((a, b) => a.rating! - b.rating!)
+    .map((p) => {
+      let row = ROW_OFFSET.findIndex((_, r) => lastInRow[r] === undefined || p.rating! - lastInRow[r] >= MIN_GAP);
+      if (row < 0) row = 0;
+      lastInRow[row] = p.rating!;
+      return { p, row };
+    });
 }

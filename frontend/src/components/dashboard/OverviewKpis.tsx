@@ -15,12 +15,13 @@ export function OverviewKpis({
   calibration: CalibrationResponse | null;
 }) {
   const vs = `vs prev ${trends.window}`;
+  const last = `last ${trends.window}`;
 
   return (
     <section aria-label="Key numbers" className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
       <RankTile calibration={calibration} />
       <TrendTile
-        label="Win rate"
+        label={`Win rate · ${last}`}
         trend={trends.win_rate}
         format={(v) => `${Math.round(v)}%`}
         deltaFormat={(v) => `${Math.round(v)} pts`}
@@ -28,14 +29,14 @@ export function OverviewKpis({
         info={`Last ${trends.window} Ranked + All Pick games against the ${trends.window} before. The line is a rolling ${trends.rolling}-game win rate.`}
       />
       <TrendTile
-        label="KDA"
+        label={`KDA · ${last}`}
         trend={trends.kda}
         format={(v) => v.toFixed(2)}
         deltaFormat={(v) => v.toFixed(2)}
         suffix={vs}
       />
       <TrendTile
-        label="GPM"
+        label={`GPM · ${last}`}
         trend={trends.gpm}
         format={(v) => Math.round(v).toLocaleString("en-US")}
         deltaFormat={(v) => Math.round(v).toLocaleString("en-US")}
@@ -95,7 +96,6 @@ function RankTile({ calibration }: { calibration: CalibrationResponse | null }) 
       label="Rank · est."
       info="Your medal as Dota reports it. The MMR is the middle of that medal's band, and the change is modeled from your last ranked games — estimates, not Valve's numbers."
       value={rank?.label ?? "—"}
-      trend={hasMomentum ? momentum.points.map((p) => p.cumulative) : undefined}
       comparison={
         rank?.mmr ? (
           <span className="flex items-baseline gap-2">

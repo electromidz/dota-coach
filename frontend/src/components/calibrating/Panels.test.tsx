@@ -84,3 +84,12 @@ describe("MethodologyNote", () => {
     expect(screen.getByText(/has not published a per-match MMR change/)).toBeDefined();
   });
 });
+
+describe("dodge", () => {
+  it("moves close ratings onto different rows", async () => {
+    const { dodge } = await import("./RankBreakdown");
+    const { momentumPoint } = await import("./test-fixtures");
+    const placed = dodge([6.0, 6.1, 6.2, 9.0].map((rating, i) => momentumPoint(i + 1, true, { rating })));
+    expect(placed.map((d) => d.row)).toEqual([0, 1, 2, 0]);
+  });
+});

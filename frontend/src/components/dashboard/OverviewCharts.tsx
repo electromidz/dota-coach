@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 
-import { LegendItem, RadarCompare } from "@/components/charts/RadarCompare";
+import { RadarCompare } from "@/components/charts/RadarCompare";
 import { TrendLine, type TrendPoint } from "@/components/charts/TrendLine";
 import { ChartCard } from "@/components/ui/ChartCard";
 import { ScopeLine } from "@/components/ui/ScopeLine";
@@ -35,13 +35,7 @@ export function SkillRadar({ benchmark }: { benchmark: BenchmarkResponse }) {
         className="-mt-2"
       />
       {points.length >= 3 ? (
-        <>
-          <RadarCompare points={points} rankLabel={bracket} />
-          <div className="flex flex-wrap justify-center gap-4 text-xs text-ink-muted">
-            <LegendItem kind="you">You</LegendItem>
-            <LegendItem kind="rank">{bracket} median</LegendItem>
-          </div>
-        </>
+        <RadarCompare points={points} rankLabel={bracket} />
       ) : (
         <p className="text-sm text-ink-faint">
           Needs more games on {benchmark.hero_name} to place you on enough skills.
@@ -119,6 +113,7 @@ export function PerformanceTrend({
         label={TABS.find((t) => t.value === tab)!.label}
         format={format}
         reference={reference}
+        height={320}
       />
     </ChartCard>
   );

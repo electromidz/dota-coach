@@ -184,6 +184,64 @@ pub fn govern(insights: Vec<Insight>, evidence: &[Evidence]) -> Vec<Insight> {
     kept
 }
 
+/// Whether one cited session-level evidence item shows a weakness, when it
+/// measures anything at all. `None` for unmeasured evidence (a career total
+/// with no comparison), which neither supports nor refutes a weakness.
+fn session_reading(item: &Evidence) -> Option<bool> {
+    use crate::domain::coaching::EvidenceKind;
+    use crate::domain::progress::ProgressStatus;
+
+    // A recurring pattern is itself measured evidence of a weakness.
+    if item.kind == EvidenceKind::Pattern {
+        return Some(true);
+    }
+    let figure = item.figure.as_ref()?;
+    let mut measured = false;
+    let mut weak = false;
+    if let Some(p) = figure.percentile {
+        measured = true;
+        weak |= p < MEDIAN;
+    }
+    match figure.status {
+        Some(ProgressStatus::Declined | ProgressStatus::NewIssue) => {
+            measured = true;
+            weak = true;
+        }
+        Some(ProgressStatus::Improved | ProgressStatus::Stable | ProgressStatus::ResolvedIssue) => {
+            measured = true;
+        }
+        _ => {}
+    }
+    if figure.baseline.is_some() {
+        measured = true;
+        weak |= worse(figure);
+    }
+    measured.then_some(weak)
+}
+
+/// The same rule for a coaching session's insights: a weakness that cites
+/// measured evidence must have at least one cited item that is weak (below
+/// the peer median, declining, a recurring pattern, or worse than its
+/// baseline). One whose measured citations all say otherwise is dropped —
+/// the numbers say it is not a weakness. Nothing else is changed.
+pub fn govern_session(insights: Vec<Insight>, evidence: &[Evidence]) -> Vec<Insight> {
+    insights
+        .into_iter()
+        .filter(|insight| {
+            if insight.kind != InsightKind::Weakness && insight.kind != InsightKind::Warning {
+                return true;
+            }
+            let readings: Vec<bool> = insight
+                .evidence
+                .iter()
+                .filter_map(|id| find(evidence, id))
+                .filter_map(session_reading)
+                .collect();
+            readings.is_empty() || readings.iter().any(|weak| *weak)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +450,59 @@ mod tests {
         );
         let titles: Vec<&str> = out.iter().map(|i| i.title.as_str()).collect();
         assert_eq!(titles, vec!["Towers", "Damage", "Farm"]);
+    }
+
+    fn session_item(id: &str, kind: EvidenceKind, figure: Option<EvidenceFigure>) -> Evidence {
+        Evidence { kind, ..item(id, figure) }
+    }
+
+    /// The reported case: "economy has declined" citing GPM at the 64th and
+    /// XPM at the 55th percentile, plus an unmeasured career total.
+    #[test]
+    fn a_session_weakness_contradicted_by_every_measured_citation_is_dropped() {
+        let evidence = vec![
+            session_item("overall.economy", EvidenceKind::Overall, None),
+            session_item("benchmark.gold_per_min", EvidenceKind::Benchmark, Some(figure("gold_per_min", 412.8, true, None, Some(63.5)))),
+            session_item("benchmark.xp_per_min", EvidenceKind::Benchmark, Some(figure("xp_per_min", 608.6, true, None, Some(55.1)))),
+        ];
+        let kept = govern_session(
+            vec![insight(
+                InsightKind::Weakness,
+                "Economy has declined",
+                &["overall.economy", "benchmark.gold_per_min", "benchmark.xp_per_min"],
+            )],
+            &evidence,
+        );
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn a_session_weakness_with_one_weak_reading_or_a_pattern_stands() {
+        let evidence = vec![
+            session_item("benchmark.gold_per_min", EvidenceKind::Benchmark, Some(figure("gold_per_min", 300.0, true, None, Some(70.0)))),
+            session_item("benchmark.xp_per_min", EvidenceKind::Benchmark, Some(figure("xp_per_min", 400.0, true, None, Some(31.0)))),
+            session_item("pattern.low_teamfight", EvidenceKind::Pattern, None),
+        ];
+        let kept = govern_session(
+            vec![
+                insight(InsightKind::Weakness, "XPM", &["benchmark.gold_per_min", "benchmark.xp_per_min"]),
+                insight(InsightKind::Weakness, "Teamfights", &["pattern.low_teamfight"]),
+            ],
+            &evidence,
+        );
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn session_strengths_and_unmeasured_weaknesses_are_left_alone() {
+        let evidence = vec![session_item("overall.record", EvidenceKind::Overall, None)];
+        let kept = govern_session(
+            vec![
+                insight(InsightKind::Strength, "Record", &["overall.record"]),
+                insight(InsightKind::Weakness, "Unmeasured", &["overall.record"]),
+            ],
+            &evidence,
+        );
+        assert_eq!(kept.len(), 2);
     }
 }
