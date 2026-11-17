@@ -3,10 +3,10 @@ import Link from "next/link";
 import { cn } from "@/lib/utils";
 
 /**
- * Wordmark plus a small crosshair mark.
+ * Wordmark plus the small "Ascent" mark.
  *
- * Inline SVG rather than an image file: it is six path commands, it inherits
- * `currentColor`, and it costs no extra request at any breakpoint.
+ * Inline SVG rather than an image file: it is a handful of shapes, it reads
+ * the theme tokens, and it costs no extra request at any breakpoint.
  */
 export function Brand({
   className,
@@ -38,27 +38,53 @@ export function Brand({
 
 export function Mark({ className }: { className?: string }) {
   return (
+    // "Ascent": same geometry as public/icons/icon.svg, cropped to the mark so
+    // it reads at header size. Start dot, rising match trajectory, focus ring.
     <svg
-      viewBox="0 0 24 24"
+      viewBox="72 72 368 368"
       fill="none"
       aria-hidden
       className={cn("shrink-0", className)}
     >
-      <circle
-        cx="12"
-        cy="12"
-        r="9"
-        stroke="var(--color-keyword)"
-        strokeWidth="1.6"
-        opacity="0.85"
+      <defs>
+        <linearGradient
+          id="brand-mark-line"
+          x1="136"
+          y1="376"
+          x2="368"
+          y2="152"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop offset="0" stopColor="var(--color-good)" />
+          <stop offset="0.45" stopColor="var(--color-keyword)" />
+          <stop offset="1" stopColor="var(--color-function)" />
+        </linearGradient>
+      </defs>
+      <rect
+        x="88"
+        y="88"
+        width="336"
+        height="336"
+        rx="56"
+        stroke="var(--color-border)"
+        strokeWidth="16"
       />
-      <circle cx="12" cy="12" r="3.2" fill="var(--color-function)" />
       <path
-        d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4"
-        stroke="var(--color-function)"
-        strokeWidth="1.6"
+        d="M136 376L216 288L272 320L335 209"
+        stroke="url(#brand-mark-line)"
+        strokeWidth="38"
         strokeLinecap="round"
+        strokeLinejoin="round"
       />
+      <circle cx="136" cy="376" r="28" fill="var(--color-good)" />
+      <circle
+        cx="368"
+        cy="152"
+        r="56"
+        stroke="var(--color-keyword)"
+        strokeWidth="22"
+      />
+      <circle cx="368" cy="152" r="22" fill="var(--color-function)" />
     </svg>
   );
 }
